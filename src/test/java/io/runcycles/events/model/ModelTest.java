@@ -109,9 +109,11 @@ class ModelTest {
         Subscription sub = Subscription.builder()
                 .subscriptionId("sub-1")
                 .tenantId("t-1")
+                .name("My Webhook")
+                .description("Receives tenant events")
                 .url("https://example.com/hook")
                 .eventTypes(List.of("tenant.created"))
-                .eventCategories(List.of("TENANT"))
+                .eventCategories(List.of("tenant"))
                 .scopeFilter("tenant:*")
                 .headers(Map.of("X-Custom", "val"))
                 .status("ACTIVE")
@@ -121,13 +123,18 @@ class ModelTest {
                 .lastTriggeredAt(now)
                 .lastSuccessAt(now)
                 .lastFailureAt(now)
+                .createdAt(now)
+                .updatedAt(now)
+                .metadata(Map.of("env", "prod"))
                 .build();
 
         assertThat(sub.getSubscriptionId()).isEqualTo("sub-1");
         assertThat(sub.getTenantId()).isEqualTo("t-1");
+        assertThat(sub.getName()).isEqualTo("My Webhook");
+        assertThat(sub.getDescription()).isEqualTo("Receives tenant events");
         assertThat(sub.getUrl()).isEqualTo("https://example.com/hook");
         assertThat(sub.getEventTypes()).containsExactly("tenant.created");
-        assertThat(sub.getEventCategories()).containsExactly("TENANT");
+        assertThat(sub.getEventCategories()).containsExactly("tenant");
         assertThat(sub.getScopeFilter()).isEqualTo("tenant:*");
         assertThat(sub.getHeaders()).containsEntry("X-Custom", "val");
         assertThat(sub.getStatus()).isEqualTo("ACTIVE");
@@ -137,6 +144,9 @@ class ModelTest {
         assertThat(sub.getLastTriggeredAt()).isEqualTo(now);
         assertThat(sub.getLastSuccessAt()).isEqualTo(now);
         assertThat(sub.getLastFailureAt()).isEqualTo(now);
+        assertThat(sub.getCreatedAt()).isEqualTo(now);
+        assertThat(sub.getUpdatedAt()).isEqualTo(now);
+        assertThat(sub.getMetadata()).containsEntry("env", "prod");
     }
 
     @Test
@@ -186,11 +196,43 @@ class ModelTest {
     }
 
     @Test
+    void actorType_jsonValueSerializesLowercase() {
+        assertThat(ActorType.ADMIN.getValue()).isEqualTo("admin");
+        assertThat(ActorType.API_KEY.getValue()).isEqualTo("api_key");
+        assertThat(ActorType.SYSTEM.getValue()).isEqualTo("system");
+        assertThat(ActorType.SCHEDULER.getValue()).isEqualTo("scheduler");
+    }
+
+    @Test
+    void actorType_fromValue() {
+        assertThat(ActorType.fromValue("admin")).isEqualTo(ActorType.ADMIN);
+        assertThat(ActorType.fromValue("api_key")).isEqualTo(ActorType.API_KEY);
+        assertThat(ActorType.fromValue("system")).isEqualTo(ActorType.SYSTEM);
+        assertThat(ActorType.fromValue("scheduler")).isEqualTo(ActorType.SCHEDULER);
+    }
+
+    @Test
     void eventCategory_allValues() {
         EventCategory[] values = EventCategory.values();
         assertThat(values).containsExactly(
                 EventCategory.BUDGET, EventCategory.TENANT, EventCategory.API_KEY,
                 EventCategory.POLICY, EventCategory.RESERVATION, EventCategory.SYSTEM);
+    }
+
+    @Test
+    void eventCategory_jsonValueSerializesLowercase() {
+        assertThat(EventCategory.BUDGET.getValue()).isEqualTo("budget");
+        assertThat(EventCategory.TENANT.getValue()).isEqualTo("tenant");
+        assertThat(EventCategory.API_KEY.getValue()).isEqualTo("api_key");
+        assertThat(EventCategory.POLICY.getValue()).isEqualTo("policy");
+        assertThat(EventCategory.RESERVATION.getValue()).isEqualTo("reservation");
+        assertThat(EventCategory.SYSTEM.getValue()).isEqualTo("system");
+    }
+
+    @Test
+    void eventCategory_fromValue() {
+        assertThat(EventCategory.fromValue("budget")).isEqualTo(EventCategory.BUDGET);
+        assertThat(EventCategory.fromValue("api_key")).isEqualTo(EventCategory.API_KEY);
     }
 
     @Test
