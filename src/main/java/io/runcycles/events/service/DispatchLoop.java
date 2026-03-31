@@ -23,7 +23,7 @@ public class DispatchLoop {
         this.timeoutSeconds = timeoutSeconds;
     }
 
-    @Scheduled(fixedDelay = 0)
+    @Scheduled(fixedDelay = 1)
     public void processNext() {
         try {
             String deliveryId = queueRepository.popPending(timeoutSeconds);
