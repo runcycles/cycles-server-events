@@ -25,8 +25,16 @@ mvn-proxy -B package -DskipTests  # Build JAR only
 ```bash
 REDIS_HOST=localhost REDIS_PORT=6379 REDIS_PASSWORD="" \
   WEBHOOK_SECRET_ENCRYPTION_KEY="" \
-  java -jar target/cycles-server-events-0.1.25.1.jar
+  java -jar target/cycles-server-events-*.jar
 ```
+
+## Versioning
+
+Uses Maven CI-friendly `${revision}` property. Version is set **once** in `pom.xml`:
+```xml
+<revision>0.1.25.1</revision>
+```
+The `flatten-maven-plugin` resolves `${revision}` at build time.
 
 ## Encryption Key
 
