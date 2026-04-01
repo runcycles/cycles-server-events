@@ -14,8 +14,8 @@
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 114 |
-| Unit tests | 111 |
+| Total tests | 117 |
+| Unit tests | 114 |
 | Integration tests | 3 (WebhookDeliveryIntegrationTest) |
 | JaCoCo minimum | 95% line coverage (enforced) |
 | Test-to-source ratio | 1.73:1 |
@@ -28,7 +28,7 @@
 | Config | RedisConfig.java | RedisConfigTest (3) |
 | Config | EventsConfig.java | EventsConfigTest (1) |
 | Config | CryptoService.java | CryptoServiceTest (9) |
-| Model | Event.java | ModelTest (21 total) |
+| Model | Event.java | ModelTest (25 total) |
 | Model | EventType.java (40 types) | ModelTest |
 | Model | EventCategory.java | ModelTest |
 | Model | Actor.java, ActorType.java | ModelTest |
@@ -50,7 +50,7 @@
 | Transport | WebhookTransport.java | WebhookTransportTest (12) |
 | Integration | - | WebhookDeliveryIntegrationTest (3) |
 
-*Note: Surefire excludes \*IntegrationTest by default. `mvn verify` runs 110 unit tests; integration tests run separately or via `-Dtest=WebhookDeliveryIntegrationTest`.*
+*Note: Surefire excludes \*IntegrationTest by default. `mvn verify` runs 114 unit tests; `mvn verify -Pintegration-tests` runs all 117 (removes exclusion).*
 
 ## Security Audit
 
@@ -77,6 +77,7 @@
 | webhook.secret.encryption-key | (empty) | WEBHOOK_SECRET_ENCRYPTION_KEY | OK |
 | dispatch.pending.timeout-seconds | 5 | - | OK |
 | dispatch.retry.poll-interval-ms | 5000 | - | OK |
+| dispatch.retry.batch-size | 100 | RETRY_BATCH_SIZE | OK |
 | dispatch.http.timeout-seconds | 30 | - | OK |
 | dispatch.http.connect-timeout-seconds | 5 | - | OK |
 | dispatch.max-delivery-age-ms | 86400000 | MAX_DELIVERY_AGE_MS | OK |
@@ -139,6 +140,6 @@
 
 - **Date:** 2026-04-01
 - **Version:** 0.1.25.1
-- **Build:** PASS (110 unit tests, 0 failures, 95%+ coverage)
+- **Build:** PASS (114 unit tests, 0 failures, 95%+ coverage)
 - **Integration test:** PASS (3 tests with Testcontainers Redis)
-- **Total:** 113 tests (110 unit + 3 integration)
+- **Total:** 117 tests (114 unit + 3 integration)

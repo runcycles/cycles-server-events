@@ -44,4 +44,4 @@ If empty/unset, signing secrets are stored and read as plaintext (backward compa
 
 ## Test Coverage
 
-114 tests (111 unit + 3 integration), 95%+ line coverage enforced via JaCoCo.
+117 tests (114 unit + 3 integration), 95%+ line coverage enforced via JaCoCo.
