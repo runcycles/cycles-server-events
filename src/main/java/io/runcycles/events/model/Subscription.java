@@ -42,6 +42,9 @@ public class Subscription {
     @JsonProperty("scope_filter")
     private String scopeFilter;
 
+    @JsonProperty("thresholds")
+    private WebhookThresholdConfig thresholds;
+
     @JsonProperty("headers")
     private Map<String, String> headers;
 

@@ -295,7 +295,7 @@ class DeliveryHandlerTest {
     @Test
     void handle_transportFailure_maxRetriesExhausted() {
         Delivery delivery = pendingDelivery();
-        delivery.setAttempts(4); // will become 5 == maxRetries
+        delivery.setAttempts(5); // will become 6 > maxRetries(5)
         delivery.setStatus("RETRYING");
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
         when(eventRepository.findById("evt-1")).thenReturn(testEvent());
@@ -333,7 +333,7 @@ class DeliveryHandlerTest {
     @Test
     void handle_consecutiveFailures_incrementsCounter() {
         Delivery delivery = pendingDelivery();
-        delivery.setAttempts(4); // exhaust retries
+        delivery.setAttempts(5); // will become 6 > maxRetries(5), exhausts retries
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
         when(eventRepository.findById("evt-1")).thenReturn(testEvent());
         Subscription sub = activeSubscription();
@@ -352,7 +352,7 @@ class DeliveryHandlerTest {
     @Test
     void handle_consecutiveFailures_autoDisables() {
         Delivery delivery = pendingDelivery();
-        delivery.setAttempts(4); // exhaust retries
+        delivery.setAttempts(5); // will become 6 > maxRetries(5), exhausts retries
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
         when(eventRepository.findById("evt-1")).thenReturn(testEvent());
         Subscription sub = activeSubscription();
@@ -371,7 +371,7 @@ class DeliveryHandlerTest {
     @Test
     void handle_consecutiveFailures_defaultThreshold10() {
         Delivery delivery = pendingDelivery();
-        delivery.setAttempts(4);
+        delivery.setAttempts(5);
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
         when(eventRepository.findById("evt-1")).thenReturn(testEvent());
         Subscription sub = activeSubscription();
@@ -389,7 +389,7 @@ class DeliveryHandlerTest {
     @Test
     void handle_consecutiveFailures_nullInitialCount() {
         Delivery delivery = pendingDelivery();
-        delivery.setAttempts(4);
+        delivery.setAttempts(5);
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
         when(eventRepository.findById("evt-1")).thenReturn(testEvent());
         Subscription sub = activeSubscription();

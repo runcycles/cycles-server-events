@@ -97,7 +97,7 @@ public class DeliveryHandler {
         RetryPolicy policy = sub.getRetryPolicy() != null ? sub.getRetryPolicy() : RetryPolicy.builder().build();
         int maxRetries = policy.getMaxRetries() != null ? policy.getMaxRetries() : 5;
 
-        if (delivery.getAttempts() >= maxRetries) {
+        if (delivery.getAttempts() > maxRetries) {
             markFailed(delivery, result.getErrorMessage());
             incrementConsecutiveFailures(sub);
             return;
