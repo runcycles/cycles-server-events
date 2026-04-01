@@ -42,7 +42,7 @@ class WebhookTransportTest {
         port = server.getAddress().getPort();
         server.start();
 
-        transport = new WebhookTransport(objectMapper, payloadSigner, 5, 2);
+        transport = new WebhookTransport(objectMapper, payloadSigner, 5, 2, null);
     }
 
     @AfterEach
@@ -210,7 +210,7 @@ class WebhookTransportTest {
         transport.deliver(testEvent(), testSubscription("/headers"), null);
 
         assertThat(capturedHeaders.get("Content-Type")).isEqualTo("application/json");
-        assertThat(capturedHeaders.get("User-Agent")).isEqualTo("cycles-server-events/0.1.0");
+        assertThat(capturedHeaders.get("User-Agent")).startsWith("cycles-server-events/");
         assertThat(capturedHeaders.get("X-Cycles-Event-Id")).isEqualTo("evt-1");
         assertThat(capturedHeaders.get("X-Cycles-Event-Type")).isEqualTo("tenant.created");
     }
