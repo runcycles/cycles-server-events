@@ -1,6 +1,7 @@
 package io.runcycles.events.repository;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.runcycles.events.config.CryptoService;
 import io.runcycles.events.model.Subscription;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,10 +16,12 @@ public class SubscriptionRepository {
 
     private final JedisPool jedisPool;
     private final ObjectMapper objectMapper;
+    private final CryptoService cryptoService;
 
-    public SubscriptionRepository(JedisPool jedisPool, ObjectMapper objectMapper) {
+    public SubscriptionRepository(JedisPool jedisPool, ObjectMapper objectMapper, CryptoService cryptoService) {
         this.jedisPool = jedisPool;
         this.objectMapper = objectMapper;
+        this.cryptoService = cryptoService;
     }
 
     public Subscription findById(String subscriptionId) {
@@ -34,7 +37,8 @@ public class SubscriptionRepository {
 
     public String getSigningSecret(String subscriptionId) {
         try (Jedis jedis = jedisPool.getResource()) {
-            return jedis.get("webhook:secret:" + subscriptionId);
+            String encrypted = jedis.get("webhook:secret:" + subscriptionId);
+            return cryptoService.decrypt(encrypted);
         }
     }
 

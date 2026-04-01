@@ -3,6 +3,7 @@ package io.runcycles.events.repository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import io.runcycles.events.config.CryptoService;
 import io.runcycles.events.model.Subscription;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -36,7 +37,8 @@ class SubscriptionRepositoryTest {
         objectMapper.registerModule(new JavaTimeModule());
         objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         lenient().when(jedisPool.getResource()).thenReturn(jedis);
-        repository = new SubscriptionRepository(jedisPool, objectMapper);
+        CryptoService cryptoService = new CryptoService(""); // pass-through mode
+        repository = new SubscriptionRepository(jedisPool, objectMapper, cryptoService);
     }
 
     @Test
@@ -95,6 +97,21 @@ class SubscriptionRepositoryTest {
     }
 
     @Test
+    void getSigningSecret_decryptsEncryptedValue() {
+        // Simulate an encrypted secret stored by admin service
+        CryptoService encryptor = new CryptoService(java.util.Base64.getEncoder().encodeToString(new byte[32]));
+        String encrypted = encryptor.encrypt("my-secret");
+        when(jedis.get("webhook:secret:sub-enc")).thenReturn(encrypted);
+        // Create repo with same key for decryption
+        CryptoService decryptor = new CryptoService(java.util.Base64.getEncoder().encodeToString(new byte[32]));
+        SubscriptionRepository encRepo = new SubscriptionRepository(jedisPool, objectMapper, decryptor);
+
+        String result = encRepo.getSigningSecret("sub-enc");
+
+        assertThat(result).isEqualTo("my-secret");
+    }
+
+    @Test
     void update_success() throws Exception {
         Subscription sub = Subscription.builder()
                 .subscriptionId("sub-1")
@@ -109,7 +126,7 @@ class SubscriptionRepositoryTest {
     @Test
     void update_serializationError() {
         ObjectMapper brokenMapper = mock(ObjectMapper.class);
-        SubscriptionRepository brokenRepo = new SubscriptionRepository(jedisPool, brokenMapper);
+        SubscriptionRepository brokenRepo = new SubscriptionRepository(jedisPool, brokenMapper, new CryptoService(""));
         Subscription sub = Subscription.builder().subscriptionId("sub-1").build();
 
         try {
