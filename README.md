@@ -1,27 +1,51 @@
 # cycles-server-events
 
-Event delivery service for the Cycles ecosystem. Consumes events from Redis and delivers them to webhook endpoints with HMAC-SHA256 signing, exponential backoff retry, and auto-disable on consecutive failures.
+Event delivery service for the Cycles ecosystem. Consumes events from Redis and delivers them to webhook endpoints with HMAC-SHA256 signing, exponential backoff retry, auto-disable on consecutive failures, and AES-256-GCM secret encryption at rest.
+
+**Spec:** [complete-budget-governance-v0.1.25.yaml](https://github.com/runcycles/cycles-server-admin/blob/main/complete-budget-governance-v0.1.25.yaml)
 
 ## Architecture
 
 ```
-cycles-server-admin / cycles-server
-    │ save event + create PENDING delivery
-    │ LPUSH dispatch:pending
+cycles-server-admin
+    │ EventService.emit() → save event + find matching subscriptions
+    │ WebhookDispatchService → create PENDING delivery + LPUSH dispatch:pending
     ▼
-Redis ──BRPOP──► cycles-server-events
+Redis ──BRPOP──► cycles-server-events (DispatchLoop)
                     │
-                    ├── Load event + subscription + secret
-                    ├── Select transport (webhook)
-                    ├── HTTP POST + X-Cycles-Signature
-                    ├── On success: mark SUCCESS, reset failures
-                    └── On failure: schedule retry or auto-disable
+                    ├── DeliveryHandler: load delivery + event + subscription
+                    ├── SubscriptionRepository: decrypt signing secret (AES-256-GCM)
+                    ├── WebhookTransport: HTTP POST with HMAC-SHA256 signature
+                    ├── On success: mark SUCCESS, reset consecutive failures
+                    ├── On failure + retries left: exponential backoff → RETRYING
+                    ├── On failure + retries exhausted: FAILED + increment consecutive failures
+                    └── On consecutive failures >= threshold: subscription → DISABLED
 ```
+
+### Why a separate service?
+
+| Concern | Admin Server | Events Service |
+|---------|-------------|----------------|
+| Workload | Synchronous CRUD, operator-facing | Asynchronous delivery, variable latency |
+| Scaling | Scale with admin traffic | Scale with webhook volume |
+| Failure isolation | Admin stays responsive during delivery backlog | Delivery retries don't block admin API |
+| Concurrency | Single instance | Multiple instances safe (BRPOP is atomic) |
 
 ## Quick Start
 
+### Full stack (with admin + runtime server)
+
 ```bash
-docker compose up
+# From cycles-server-admin directory
+docker compose -f docker-compose.full-stack.yml up
+```
+
+Services: Redis (6379), Admin (7979), Runtime Server (7878), Events (7980)
+
+### Standalone (requires existing Redis)
+
+```bash
+REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.0.jar
 ```
 
 ## Configuration
@@ -31,13 +55,123 @@ docker compose up
 | `REDIS_HOST` | localhost | Redis hostname |
 | `REDIS_PORT` | 6379 | Redis port |
 | `REDIS_PASSWORD` | (empty) | Redis password |
-| `dispatch.pending.timeout-seconds` | 5 | BRPOP timeout |
-| `dispatch.retry.poll-interval-ms` | 5000 | Retry check interval |
-| `dispatch.http.timeout-seconds` | 30 | HTTP request timeout |
+| `WEBHOOK_SECRET_ENCRYPTION_KEY` | (empty) | AES-256-GCM key for signing secret encryption (base64-encoded 32 bytes). If empty, secrets stored/read as plaintext (backward compatible). |
+| `dispatch.pending.timeout-seconds` | 5 | BRPOP blocking timeout (seconds) |
+| `dispatch.retry.poll-interval-ms` | 5000 | Retry queue poll interval (ms) |
+| `dispatch.http.timeout-seconds` | 30 | HTTP request timeout for webhook delivery |
+| `dispatch.http.connect-timeout-seconds` | 5 | HTTP connect timeout |
+
+### Generating the encryption key
+
+```bash
+openssl rand -base64 32
+```
+
+The same key must be configured in both `cycles-server-admin` and `cycles-server-events`. Admin encrypts secrets on write; events decrypts on read.
+
+## Signing Secret Lifecycle
+
+```
+1. Client creates subscription (POST /v1/admin/webhooks)
+   └── optionally provides signing_secret, or admin auto-generates one (whsec_...)
+
+2. Admin stores encrypted secret in Redis
+   └── webhook:secret:{subscriptionId} = AES-256-GCM(secret, WEBHOOK_SECRET_ENCRYPTION_KEY)
+   └── Returns plaintext secret to client ONCE in WebhookCreateResponse (never again)
+
+3. Events service reads + decrypts secret on each delivery
+   └── CryptoService.decrypt(redis.get("webhook:secret:{id}"))
+   └── Backward compatible: plaintext secrets (no "enc:" prefix) returned as-is
+
+4. PayloadSigner computes HMAC-SHA256(JSON payload, decrypted secret)
+   └── Sent as X-Cycles-Signature: sha256=<hex> header
+
+5. Webhook receiver verifies signature using their copy of the secret
+```
+
+## HMAC-SHA256 Signature Verification
+
+The `X-Cycles-Signature` header contains `sha256=<hex>` where `<hex>` is the HMAC-SHA256 of the raw JSON request body using the subscription's signing secret as the key.
+
+**Why HMAC?** Without it, anyone who discovers a webhook URL can send fake events. HMAC proves both identity (shared secret) and integrity (body hash). Same standard used by GitHub, Stripe, and Slack webhooks.
+
+**Verification example (Python):**
+
+```python
+import hmac, hashlib
+
+def verify(body: bytes, secret: str, signature: str) -> bool:
+    expected = "sha256=" + hmac.new(
+        secret.encode(), body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+```
+
+## Webhook Delivery Headers
+
+| Header | Value | Description |
+|--------|-------|-------------|
+| `Content-Type` | `application/json` | Always JSON |
+| `X-Cycles-Signature` | `sha256=<hex>` | HMAC-SHA256 of body (if signing secret configured) |
+| `X-Cycles-Event-Id` | `evt_abc123...` | For deduplication (at-least-once delivery) |
+| `X-Cycles-Event-Type` | `budget.exhausted` | Event type for routing |
+| `User-Agent` | `cycles-server-events/0.1.0` | Service identifier |
+| Custom headers | Per subscription | From `WebhookSubscription.headers` map |
+
+## Retry Policy
+
+Default: 5 retries with exponential backoff (1s, 2s, 4s, 8s, 16s), capped at 60s max delay.
+
+| Setting | Default | Range | Description |
+|---------|---------|-------|-------------|
+| `max_retries` | 5 | 0-10 | Retries after initial failure (6 total attempts) |
+| `initial_delay_ms` | 1000 | 100-60000 | Delay before first retry |
+| `backoff_multiplier` | 2.0 | 1.0-10.0 | Multiplier per retry |
+| `max_delay_ms` | 60000 | 1000-3600000 | Maximum delay cap |
+
+Auto-disable: after `disable_after_failures` (default 10) consecutive delivery failures, the subscription status is set to `DISABLED`. Reset to 0 on any successful delivery.
+
+## Delivery Status Lifecycle
+
+```
+PENDING ──HTTP 2xx──► SUCCESS (reset consecutive_failures)
+    │
+    └──non-2xx──► RETRYING ──retry──► SUCCESS
+                      │
+                      └──max retries exceeded──► FAILED
+                                                    │
+                                                    └──consecutive >= threshold──► subscription DISABLED
+```
+
+## Redis Keys (shared with cycles-server-admin)
+
+| Key | Type | Written By | Read By | Description |
+|-----|------|-----------|---------|-------------|
+| `dispatch:pending` | LIST | Admin (LPUSH) | Events (BRPOP) | Delivery IDs awaiting processing |
+| `dispatch:retry` | ZSET | Events (ZADD) | Events (ZRANGEBYSCORE) | Retry queue (score = timestamp) |
+| `delivery:{id}` | STRING | Admin (SET) | Events (GET/SET) | Delivery record JSON |
+| `event:{id}` | STRING | Admin (SET) | Events (GET) | Event record JSON |
+| `webhook:{id}` | STRING | Admin (SET) | Events (GET/SET) | Subscription JSON |
+| `webhook:secret:{id}` | STRING | Admin (SET, encrypted) | Events (GET, decrypts) | AES-256-GCM encrypted signing secret |
+
+### Concurrent safety
+
+Multiple events service instances can safely BRPOP from the same `dispatch:pending` list — BRPOP is atomic, so each delivery is processed by exactly one consumer. No distributed locking needed.
+
+## Event Types (40)
+
+| Category | Count | Types |
+|----------|-------|-------|
+| `budget` | 15 | created, updated, funded, debited, reset, debt_repaid, frozen, unfrozen, closed, threshold_crossed, exhausted, over_limit_entered, over_limit_exited, debt_incurred, burn_rate_anomaly |
+| `reservation` | 5 | denied, denial_rate_spike, expired, expiry_rate_spike, commit_overage |
+| `tenant` | 6 | created, updated, suspended, reactivated, closed, settings_changed |
+| `api_key` | 6 | created, revoked, expired, permissions_changed, auth_failed, auth_failure_rate_spike |
+| `policy` | 3 | created, updated, deleted |
+| `system` | 5 | store_connection_lost, store_connection_restored, high_latency, webhook_delivery_failed, webhook_test |
 
 ## Transport Layer
 
-Pluggable transport interface. Currently implements `webhook` (HTTP POST). Future transports: Slack, PagerDuty, SQS, email.
+Pluggable transport interface. Currently implements `webhook` (HTTP POST).
 
 ```java
 public interface Transport {
@@ -46,35 +180,19 @@ public interface Transport {
 }
 ```
 
-## Redis Keys (shared with cycles-server-admin)
+## Build & Test
 
-| Key | Type | Description |
-|-----|------|-------------|
-| `dispatch:pending` | LIST | Delivery IDs awaiting processing |
-| `dispatch:retry` | ZSET | Delivery IDs scheduled for retry (score = next_retry_at) |
-| `delivery:{id}` | String | Delivery record JSON |
-| `event:{id}` | String | Event record JSON |
-| `webhook:{id}` | String | Subscription JSON |
-| `webhook:secret:{id}` | String | HMAC signing secret |
+```bash
+# Build and run tests (92 tests, 95%+ coverage)
+mvn verify
 
-## Webhook Delivery Headers
+# Without integration tests
+mvn verify -Dtest='!*IntegrationTest'
 
-```
-Content-Type: application/json
-X-Cycles-Signature: sha256=<hmac-hex>
-X-Cycles-Event-Id: evt_abc123
-X-Cycles-Event-Type: budget.exhausted
-User-Agent: cycles-server-events/0.1.0
+# Run
+REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.0.jar
 ```
 
-## Delivery Status Lifecycle
+## License
 
-```
-PENDING ──HTTP POST──► SUCCESS
-    │
-    └──fail──► RETRYING ──retry──► SUCCESS
-                   │
-                   └──max retries──► FAILED
-                                       │
-                                       └──consecutive──► subscription DISABLED
-```
+Apache License 2.0
