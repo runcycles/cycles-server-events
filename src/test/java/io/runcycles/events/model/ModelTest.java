@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ModelTest {
 
@@ -259,6 +260,41 @@ class ModelTest {
         assertThat(EventType.valueOf("TENANT_CREATED")).isNotNull();
         assertThat(EventType.valueOf("API_KEY_CREATED")).isNotNull();
         assertThat(EventType.valueOf("SYSTEM_HIGH_LATENCY")).isNotNull();
+    }
+
+    @Test
+    void eventType_fromValue() {
+        assertThat(EventType.fromValue("budget.created")).isEqualTo(EventType.BUDGET_CREATED);
+        assertThat(EventType.fromValue("tenant.created")).isEqualTo(EventType.TENANT_CREATED);
+        assertThat(EventType.fromValue("system.high_latency")).isEqualTo(EventType.SYSTEM_HIGH_LATENCY);
+        assertThatThrownBy(() -> EventType.fromValue("nonexistent"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void eventType_isTenantAccessible() {
+        assertThat(EventType.BUDGET_CREATED.isTenantAccessible()).isTrue();
+        assertThat(EventType.RESERVATION_DENIED.isTenantAccessible()).isTrue();
+        assertThat(EventType.TENANT_CREATED.isTenantAccessible()).isTrue();
+        assertThat(EventType.API_KEY_CREATED.isTenantAccessible()).isFalse();
+        assertThat(EventType.POLICY_CREATED.isTenantAccessible()).isFalse();
+        assertThat(EventType.SYSTEM_HIGH_LATENCY.isTenantAccessible()).isFalse();
+    }
+
+    @Test
+    void eventType_getCategory() {
+        assertThat(EventType.BUDGET_FUNDED.getCategory()).isEqualTo(EventCategory.BUDGET);
+        assertThat(EventType.RESERVATION_EXPIRED.getCategory()).isEqualTo(EventCategory.RESERVATION);
+        assertThat(EventType.TENANT_SUSPENDED.getCategory()).isEqualTo(EventCategory.TENANT);
+        assertThat(EventType.API_KEY_REVOKED.getCategory()).isEqualTo(EventCategory.API_KEY);
+        assertThat(EventType.POLICY_DELETED.getCategory()).isEqualTo(EventCategory.POLICY);
+        assertThat(EventType.SYSTEM_WEBHOOK_TEST.getCategory()).isEqualTo(EventCategory.SYSTEM);
+    }
+
+    @Test
+    void eventType_getValue() {
+        assertThat(EventType.BUDGET_CREATED.getValue()).isEqualTo("budget.created");
+        assertThat(EventType.API_KEY_AUTH_FAILURE_RATE_SPIKE.getValue()).isEqualTo("api_key.auth_failure_rate_spike");
     }
 
     @Test
