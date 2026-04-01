@@ -215,7 +215,7 @@ public interface Transport {
 ## Build & Test
 
 ```bash
-# Build and run tests (113 tests, 95%+ coverage)
+# Build and run tests (114 tests, 95%+ coverage)
 mvn verify
 
 # Without integration tests
