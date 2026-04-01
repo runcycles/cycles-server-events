@@ -25,7 +25,7 @@ mvn-proxy -B package -DskipTests  # Build JAR only
 ```bash
 REDIS_HOST=localhost REDIS_PORT=6379 REDIS_PASSWORD="" \
   WEBHOOK_SECRET_ENCRYPTION_KEY="" \
-  java -jar target/cycles-server-events-0.1.0.jar
+  java -jar target/cycles-server-events-0.1.25.1.jar
 ```
 
 ## Encryption Key
@@ -36,4 +36,4 @@ If empty/unset, signing secrets are stored and read as plaintext (backward compa
 
 ## Test Coverage
 
-102 tests, 95%+ line coverage enforced via JaCoCo.
+107 tests, 95%+ line coverage enforced via JaCoCo.

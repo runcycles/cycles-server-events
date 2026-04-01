@@ -13,7 +13,7 @@
 
     <groupId>io.runcycles</groupId>
     <artifactId>cycles-server-events</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.25.1</version>
     <name>cycles-server-events</name>
     <description>Event delivery service for the Cycles ecosystem</description>
 

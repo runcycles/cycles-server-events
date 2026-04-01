@@ -60,6 +60,10 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.0
 | `dispatch.retry.poll-interval-ms` | 5000 | Retry queue poll interval (ms) |
 | `dispatch.http.timeout-seconds` | 30 | HTTP request timeout for webhook delivery |
 | `dispatch.http.connect-timeout-seconds` | 5 | HTTP connect timeout |
+| `MAX_DELIVERY_AGE_MS` | 86400000 | Maximum delivery age (ms). Deliveries older than this after events service outage are auto-failed instead of delivered stale. Default: 24 hours. |
+| `EVENT_TTL_DAYS` | 90 | Redis TTL for `event:{id}` keys (days). Spec: "90 days hot." |
+| `DELIVERY_TTL_DAYS` | 14 | Redis TTL for `delivery:{id}` keys (days). |
+| `RETENTION_CLEANUP_INTERVAL_MS` | 3600000 | How often to trim expired ZSET index entries (ms). Default: 1 hour. |
 
 ### Generating the encryption key
 
@@ -157,6 +161,30 @@ PENDING ──HTTP 2xx──► SUCCESS (reset consecutive_failures)
 ### Concurrent safety
 
 Multiple events service instances can safely BRPOP from the same `dispatch:pending` list — BRPOP is atomic, so each delivery is processed by exactly one consumer. No distributed locking needed.
+
+### TTL and retention
+
+| Key | TTL | Cleanup |
+|-----|-----|---------|
+| `event:{id}` | 90 days (configurable) | Auto-expire via Redis EXPIRE |
+| `delivery:{id}` | 14 days (configurable) | Auto-expire via Redis EXPIRE |
+| `events:{tenantId}`, `events:_all` | N/A (ZSET) | Hourly trim via RetentionCleanupService |
+| `deliveries:{subId}` | N/A (ZSET) | Hourly trim via RetentionCleanupService |
+| `dispatch:pending` | Self-draining | Consumed by BRPOP |
+| `dispatch:retry` | Self-draining | Entries move to pending when ready |
+
+### Resilience: events service down
+
+If `cycles-server-events` is not running or not deployed:
+
+1. **Admin and runtime servers are unaffected** — event emission is fire-and-forget, wrapped in try-catch, never blocks the API response
+2. **Events and deliveries accumulate in Redis** — `event:{id}` keys (90-day TTL), `delivery:{id}` keys (14-day TTL), `dispatch:pending` list grows
+3. **Redis memory is bounded** — TTLs ensure keys auto-expire even if never consumed
+4. **When the events service restarts:**
+   - Stale deliveries (older than `MAX_DELIVERY_AGE_MS`, default 24h) are immediately marked FAILED — they won't be delivered late
+   - Fresh deliveries are processed normally via BRPOP
+   - RetentionCleanupService trims orphaned ZSET index entries hourly
+5. **No data loss for events** — event records persist in Redis for 90 days regardless of delivery status
 
 ## Event Types (40)
 
