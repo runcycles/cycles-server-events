@@ -12,6 +12,7 @@ import io.runcycles.events.transport.Transport;
 import io.runcycles.events.transport.TransportResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -26,15 +27,18 @@ public class DeliveryHandler {
     private final SubscriptionRepository subscriptionRepository;
     private final DeliveryQueueRepository queueRepository;
     private final Transport transport;
+    private final long maxDeliveryAgeMs;
 
     public DeliveryHandler(DeliveryRepository deliveryRepository, EventRepository eventRepository,
                            SubscriptionRepository subscriptionRepository, DeliveryQueueRepository queueRepository,
-                           Transport transport) {
+                           Transport transport,
+                           @Value("${dispatch.max-delivery-age-ms:86400000}") long maxDeliveryAgeMs) {
         this.deliveryRepository = deliveryRepository;
         this.eventRepository = eventRepository;
         this.subscriptionRepository = subscriptionRepository;
         this.queueRepository = queueRepository;
         this.transport = transport;
+        this.maxDeliveryAgeMs = maxDeliveryAgeMs;
     }
 
     public void handle(String deliveryId) {
@@ -48,6 +52,15 @@ public class DeliveryHandler {
         if (!"PENDING".equals(status) && !"RETRYING".equals(status)) {
             LOG.debug("Delivery {} already in state {}, skipping", deliveryId, status);
             return;
+        }
+
+        // Skip stale deliveries (e.g., after prolonged outage)
+        if (delivery.getAttemptedAt() != null) {
+            long ageMs = System.currentTimeMillis() - delivery.getAttemptedAt().toEpochMilli();
+            if (ageMs > maxDeliveryAgeMs) {
+                markFailed(delivery, "Delivery expired: " + (ageMs / 3600000) + "h old (max " + (maxDeliveryAgeMs / 3600000) + "h)");
+                return;
+            }
         }
 
         Event event = eventRepository.findById(delivery.getEventId());
@@ -97,7 +110,7 @@ public class DeliveryHandler {
         RetryPolicy policy = sub.getRetryPolicy() != null ? sub.getRetryPolicy() : RetryPolicy.builder().build();
         int maxRetries = policy.getMaxRetries() != null ? policy.getMaxRetries() : 5;
 
-        if (delivery.getAttempts() >= maxRetries) {
+        if (delivery.getAttempts() > maxRetries) {
             markFailed(delivery, result.getErrorMessage());
             incrementConsecutiveFailures(sub);
             return;

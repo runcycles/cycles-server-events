@@ -36,11 +36,16 @@ public class DeliveryQueueRepository {
         try (Jedis jedis = jedisPool.getResource()) {
             List<String> ready = new ArrayList<>(
                     jedis.zrangeByScore("dispatch:retry", "-inf", String.valueOf(nowMillis), 0, limit));
+            List<String> requeued = new ArrayList<>();
             for (String id : ready) {
-                jedis.zrem("dispatch:retry", id);
-                jedis.lpush("dispatch:pending", id);
+                // Only lpush if we successfully removed — prevents duplicate deliveries
+                // when multiple instances race on the same retry entries
+                if (jedis.zrem("dispatch:retry", id) > 0) {
+                    jedis.lpush("dispatch:pending", id);
+                    requeued.add(id);
+                }
             }
-            return ready;
+            return requeued;
         }
     }
 }

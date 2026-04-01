@@ -24,6 +24,12 @@ public class Subscription {
     @JsonProperty("tenant_id")
     private String tenantId;
 
+    @JsonProperty("name")
+    private String name;
+
+    @JsonProperty("description")
+    private String description;
+
     @JsonProperty("url")
     private String url;
 
@@ -35,6 +41,9 @@ public class Subscription {
 
     @JsonProperty("scope_filter")
     private String scopeFilter;
+
+    @JsonProperty("thresholds")
+    private WebhookThresholdConfig thresholds;
 
     @JsonProperty("headers")
     private Map<String, String> headers;
@@ -59,4 +68,13 @@ public class Subscription {
 
     @JsonProperty("last_failure_at")
     private Instant lastFailureAt;
+
+    @JsonProperty("created_at")
+    private Instant createdAt;
+
+    @JsonProperty("updated_at")
+    private Instant updatedAt;
+
+    @JsonProperty("metadata")
+    private Map<String, Object> metadata;
 }

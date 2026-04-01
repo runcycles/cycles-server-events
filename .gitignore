@@ -1,0 +1,9 @@
+target/
+.flattened-pom.xml
+*.class
+*.jar
+*.log
+.idea/
+*.iml
+.DS_Store
+.claude/settings.local.json

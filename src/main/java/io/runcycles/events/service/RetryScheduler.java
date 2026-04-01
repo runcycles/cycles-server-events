@@ -5,6 +5,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import redis.clients.jedis.exceptions.JedisConnectionException;
 
 import java.util.List;
 
@@ -26,6 +27,8 @@ public class RetryScheduler {
             if (!requeued.isEmpty()) {
                 LOG.info("Requeued {} deliveries for retry", requeued.size());
             }
+        } catch (JedisConnectionException e) {
+            LOG.warn("Redis connection error in retry scheduler: {}", e.getMessage());
         } catch (Exception e) {
             LOG.error("Error in retry scheduler", e);
         }

@@ -1,0 +1,14 @@
+.git
+.gitignore
+.idea
+.vscode
+*.md
+!README.md
+target/
+.DS_Store
+*.swp
+*.swo
+.env
+.env.*
+.flattened-pom.xml
+lombok.config

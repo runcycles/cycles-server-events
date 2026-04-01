@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Repository;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.params.SetParams;
 
 @Repository
 public class DeliveryRepository {
@@ -35,7 +36,13 @@ public class DeliveryRepository {
     public void update(Delivery delivery) {
         try (Jedis jedis = jedisPool.getResource()) {
             String json = objectMapper.writeValueAsString(delivery);
-            jedis.set("delivery:" + delivery.getDeliveryId(), json);
+            String key = "delivery:" + delivery.getDeliveryId();
+            long ttl = jedis.ttl(key);
+            if (ttl > 0) {
+                jedis.set(key, json, SetParams.setParams().ex(ttl));
+            } else {
+                jedis.set(key, json);
+            }
         } catch (Exception e) {
             LOG.error("Failed to update delivery: {}", delivery.getDeliveryId(), e);
         }

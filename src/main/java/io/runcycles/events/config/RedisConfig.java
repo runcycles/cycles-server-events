@@ -33,6 +33,8 @@ public class RedisConfig {
         config.setMaxTotal(50);
         config.setMaxIdle(10);
         config.setMinIdle(5);
+        config.setTestOnBorrow(true);
+        config.setTestWhileIdle(true);
         return password.isEmpty()
                 ? new JedisPool(config, host, port, 2000)
                 : new JedisPool(config, host, port, 2000, password);
