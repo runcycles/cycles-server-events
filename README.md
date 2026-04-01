@@ -62,7 +62,7 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.2
 | `WEBHOOK_SECRET_ENCRYPTION_KEY` | (empty) | AES-256-GCM key for signing secret encryption (base64-encoded 32 bytes). If empty, secrets stored/read as plaintext (backward compatible). |
 | `dispatch.pending.timeout-seconds` | 5 | BRPOP blocking timeout (seconds) |
 | `dispatch.retry.poll-interval-ms` | 5000 | Retry queue poll interval (ms) |
-| `dispatch.retry.batch-size` | 100 | Max retries to requeue per poll cycle |
+| `RETRY_BATCH_SIZE` | 100 | Max retries to requeue per poll cycle |
 | `dispatch.http.timeout-seconds` | 30 | HTTP request timeout for webhook delivery |
 | `dispatch.http.connect-timeout-seconds` | 5 | HTTP connect timeout |
 | `MAX_DELIVERY_AGE_MS` | 86400000 | Maximum delivery age (ms). Deliveries older than this after events service outage are auto-failed instead of delivered stale. Default: 24 hours. |
@@ -213,14 +213,50 @@ public interface Transport {
 }
 ```
 
+## Monitoring
+
+Spring Actuator endpoints are exposed on the service port (7980):
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /actuator/health` | Liveness check (UP/DOWN) |
+| `GET /actuator/info` | Build info (version, artifact) |
+| `GET /actuator/prometheus` | Prometheus-format metrics for scraping |
+
+## Webhook Payload Example
+
+The webhook POST body is the full event JSON. Null fields are omitted.
+
+```json
+{
+  "event_id": "evt_abc123",
+  "event_type": "budget.exhausted",
+  "category": "budget",
+  "timestamp": "2026-04-01T12:00:00Z",
+  "tenant_id": "t_xyz789",
+  "source": "runtime",
+  "data": {
+    "budget_id": "bdg_001",
+    "current_balance": 0,
+    "limit": 10000
+  },
+  "actor": {
+    "type": "api_key",
+    "key_id": "key_abc",
+    "source_ip": "10.0.1.42"
+  },
+  "correlation_id": "req_def456"
+}
+```
+
 ## Build & Test
 
 ```bash
-# Build and run tests (114 tests, 95%+ coverage)
+# Build and run unit tests (117 tests, 95%+ coverage)
 mvn verify
 
-# Without integration tests
-mvn verify -Dtest='!*IntegrationTest'
+# Run all tests including integration (requires Docker for Testcontainers Redis)
+mvn verify -Pintegration-tests
 
 # Run
 REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.25.1.jar
