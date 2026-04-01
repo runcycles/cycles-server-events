@@ -35,7 +35,7 @@ class DeliveryHandlerTest {
     @BeforeEach
     void setUp() {
         handler = new DeliveryHandler(deliveryRepository, eventRepository,
-                subscriptionRepository, queueRepository, transport);
+                subscriptionRepository, queueRepository, transport, 86400000L);
     }
 
     private Delivery pendingDelivery() {
@@ -437,5 +437,36 @@ class DeliveryHandlerTest {
         handler.handle("del-1");
 
         assertThat(delivery.getAttempts()).isEqualTo(1);
+    }
+
+    // --- Staleness check ---
+
+    @Test
+    void handle_staleDelivery_marksFailed() {
+        Delivery delivery = pendingDelivery();
+        delivery.setAttemptedAt(Instant.now().minusMillis(86400001)); // 24h + 1ms ago
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo("FAILED");
+        assertThat(delivery.getErrorMessage()).contains("expired");
+        verify(transport, never()).deliver(any(), any(), any());
+    }
+
+    @Test
+    void handle_freshDelivery_notStale() {
+        Delivery delivery = pendingDelivery();
+        delivery.setAttemptedAt(Instant.now().minusMillis(1000)); // 1s ago
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any())).thenReturn(successResult());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo("SUCCESS");
     }
 }
