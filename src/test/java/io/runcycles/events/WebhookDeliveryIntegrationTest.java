@@ -178,8 +178,13 @@ class WebhookDeliveryIntegrationTest {
             // 7. Verify body contains event data
             assertThat(webhook.get("body")).contains(eventId).contains("tenant.created").contains(TENANT_ID);
 
-            // 8. Verify delivery updated to SUCCESS in Redis
-            String deliveryJson = jedis.get("delivery:" + deliveryId);
+            // 8. Verify delivery updated to SUCCESS in Redis (poll — handler writes after HTTP response)
+            String deliveryJson = null;
+            for (int i = 0; i < 20; i++) {
+                deliveryJson = jedis.get("delivery:" + deliveryId);
+                if (deliveryJson != null && deliveryJson.contains("\"status\":\"SUCCESS\"")) break;
+                Thread.sleep(250);
+            }
             assertThat(deliveryJson).contains("\"status\":\"SUCCESS\"");
             assertThat(deliveryJson).contains("\"response_status\":200");
         }
