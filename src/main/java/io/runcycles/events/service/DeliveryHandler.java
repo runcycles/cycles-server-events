@@ -55,12 +55,15 @@ public class DeliveryHandler {
         }
 
         // Skip stale deliveries (e.g., after prolonged outage)
-        if (delivery.getAttemptedAt() != null) {
-            long ageMs = System.currentTimeMillis() - delivery.getAttemptedAt().toEpochMilli();
-            if (ageMs > maxDeliveryAgeMs) {
-                markFailed(delivery, "Delivery expired: " + (ageMs / 3600000) + "h old (max " + (maxDeliveryAgeMs / 3600000) + "h)");
-                return;
-            }
+        Instant attemptedAt = delivery.getAttemptedAt();
+        if (attemptedAt == null) {
+            LOG.warn("Delivery {} has null attemptedAt, treating as fresh", deliveryId);
+            attemptedAt = Instant.now();
+        }
+        long ageMs = System.currentTimeMillis() - attemptedAt.toEpochMilli();
+        if (ageMs > maxDeliveryAgeMs) {
+            markFailed(delivery, "Delivery expired: " + (ageMs / 3600000) + "h old (max " + (maxDeliveryAgeMs / 3600000) + "h)");
+            return;
         }
 
         Event event = eventRepository.findById(delivery.getEventId());

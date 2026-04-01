@@ -24,7 +24,7 @@ class RetrySchedulerTest {
 
     @BeforeEach
     void setUp() {
-        scheduler = new RetryScheduler(queueRepository);
+        scheduler = new RetryScheduler(queueRepository, 100);
     }
 
     @Test
