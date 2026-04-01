@@ -55,6 +55,8 @@ public class RetentionCleanupService {
                 // Trim per-subscription delivery indexes
                 trimZsetsByPattern(jedis, "deliveries:*", deliveryCutoff, null);
             }
+        } catch (redis.clients.jedis.exceptions.JedisConnectionException e) {
+            LOG.warn("Redis connection error in retention cleanup: {}", e.getMessage());
         } catch (Exception e) {
             LOG.error("Error in retention cleanup", e);
         }

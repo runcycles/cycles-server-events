@@ -6,6 +6,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import redis.clients.jedis.exceptions.JedisConnectionException;
 
 @Service
 public class DispatchLoop {
@@ -30,6 +31,8 @@ public class DispatchLoop {
             if (deliveryId != null) {
                 deliveryHandler.handle(deliveryId);
             }
+        } catch (JedisConnectionException e) {
+            LOG.warn("Redis connection error in dispatch loop: {}", e.getMessage());
         } catch (Exception e) {
             LOG.error("Error in dispatch loop", e);
         }
