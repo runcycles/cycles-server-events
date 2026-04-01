@@ -62,6 +62,7 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.2
 | `WEBHOOK_SECRET_ENCRYPTION_KEY` | (empty) | AES-256-GCM key for signing secret encryption (base64-encoded 32 bytes). If empty, secrets stored/read as plaintext (backward compatible). |
 | `dispatch.pending.timeout-seconds` | 5 | BRPOP blocking timeout (seconds) |
 | `dispatch.retry.poll-interval-ms` | 5000 | Retry queue poll interval (ms) |
+| `dispatch.retry.batch-size` | 100 | Max retries to requeue per poll cycle |
 | `dispatch.http.timeout-seconds` | 30 | HTTP request timeout for webhook delivery |
 | `dispatch.http.connect-timeout-seconds` | 5 | HTTP connect timeout |
 | `MAX_DELIVERY_AGE_MS` | 86400000 | Maximum delivery age (ms). Deliveries older than this after events service outage are auto-failed instead of delivered stale. Default: 24 hours. |

@@ -14,8 +14,8 @@
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 113 |
-| Unit tests | 110 |
+| Total tests | 114 |
+| Unit tests | 111 |
 | Integration tests | 3 (WebhookDeliveryIntegrationTest) |
 | JaCoCo minimum | 95% line coverage (enforced) |
 | Test-to-source ratio | 1.73:1 |
