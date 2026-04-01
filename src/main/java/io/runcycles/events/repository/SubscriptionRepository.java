@@ -39,6 +39,9 @@ public class SubscriptionRepository {
         try (Jedis jedis = jedisPool.getResource()) {
             String encrypted = jedis.get("webhook:secret:" + subscriptionId);
             return cryptoService.decrypt(encrypted);
+        } catch (Exception e) {
+            LOG.error("Failed to read signing secret: {}", subscriptionId, e);
+            return null;
         }
     }
 

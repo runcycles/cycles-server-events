@@ -38,9 +38,10 @@ public class DeliveryRepository {
             String json = objectMapper.writeValueAsString(delivery);
             String key = "delivery:" + delivery.getDeliveryId();
             long ttl = jedis.ttl(key);
-            jedis.set(key, json);
             if (ttl > 0) {
-                jedis.expire(key, ttl); // Preserve existing TTL after SET
+                jedis.set(key, json, SetParams.setParams().ex(ttl));
+            } else {
+                jedis.set(key, json);
             }
         } catch (Exception e) {
             LOG.error("Failed to update delivery: {}", delivery.getDeliveryId(), e);

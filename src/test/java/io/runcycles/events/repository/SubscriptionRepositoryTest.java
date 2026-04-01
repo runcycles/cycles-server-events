@@ -112,6 +112,15 @@ class SubscriptionRepositoryTest {
     }
 
     @Test
+    void getSigningSecret_redisError_returnsNull() {
+        when(jedis.get("webhook:secret:sub-fail")).thenThrow(new RuntimeException("redis error"));
+
+        String result = repository.getSigningSecret("sub-fail");
+
+        assertThat(result).isNull();
+    }
+
+    @Test
     void update_success() throws Exception {
         Subscription sub = Subscription.builder()
                 .subscriptionId("sub-1")

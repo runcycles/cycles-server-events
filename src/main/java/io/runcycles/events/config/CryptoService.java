@@ -66,7 +66,7 @@ public class CryptoService {
         }
         if (key == null) {
             LOG.warn("Encrypted secret found but no encryption key configured");
-            return value;
+            return null;
         }
         try {
             byte[] combined = Base64.getDecoder().decode(value.substring(ENCRYPTED_PREFIX.length()));

@@ -79,12 +79,12 @@ class CryptoServiceTest {
     }
 
     @Test
-    void decrypt_encryptedValueWithNoKey_returnsRaw() {
+    void decrypt_encryptedValueWithNoKey_returnsNull() {
         CryptoService noKey = new CryptoService("");
         String encrypted = "enc:someBase64Data";
 
-        // No key = can't decrypt, returns raw value with warning
-        assertThat(noKey.decrypt(encrypted)).isEqualTo(encrypted);
+        // No key = can't decrypt, returns null to prevent signing with garbage
+        assertThat(noKey.decrypt(encrypted)).isNull();
     }
 
     @Test

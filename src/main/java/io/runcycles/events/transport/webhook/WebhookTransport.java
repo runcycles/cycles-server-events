@@ -28,12 +28,15 @@ public class WebhookTransport implements Transport {
     private final HttpClient httpClient;
     private final String userAgent;
 
+    private final int timeoutSeconds;
+
     public WebhookTransport(ObjectMapper objectMapper, PayloadSigner payloadSigner,
                             @Value("${dispatch.http.timeout-seconds:30}") int timeoutSeconds,
                             @Value("${dispatch.http.connect-timeout-seconds:5}") int connectTimeoutSeconds,
                             @Autowired(required = false) BuildProperties buildProperties) {
         this.objectMapper = objectMapper;
         this.payloadSigner = payloadSigner;
+        this.timeoutSeconds = timeoutSeconds;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds))
                 .build();
@@ -57,7 +60,7 @@ public class WebhookTransport implements Transport {
                     .header("User-Agent", userAgent)
                     .header("X-Cycles-Event-Id", event.getEventId())
                     .header("X-Cycles-Event-Type", event.getEventType())
-                    .timeout(Duration.ofSeconds(30))
+                    .timeout(Duration.ofSeconds(timeoutSeconds))
                     .POST(HttpRequest.BodyPublishers.ofString(payload));
 
             if (signingSecret != null && !signingSecret.isBlank()) {
@@ -67,8 +70,8 @@ public class WebhookTransport implements Transport {
                 subscription.getHeaders().forEach(reqBuilder::header);
             }
 
-            HttpResponse<String> response = httpClient.send(reqBuilder.build(),
-                    HttpResponse.BodyHandlers.ofString());
+            HttpResponse<Void> response = httpClient.send(reqBuilder.build(),
+                    HttpResponse.BodyHandlers.discarding());
             int elapsed = (int) (System.currentTimeMillis() - start);
             boolean success = response.statusCode() >= 200 && response.statusCode() < 300;
             return TransportResult.builder()
@@ -78,6 +81,9 @@ public class WebhookTransport implements Transport {
                     .errorMessage(success ? null : "HTTP " + response.statusCode())
                     .build();
         } catch (Exception e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             int elapsed = (int) (System.currentTimeMillis() - start);
             LOG.warn("Webhook delivery failed to {}: {}", subscription.getUrl(), e.getMessage());
             return TransportResult.builder()

@@ -15,8 +15,10 @@ import redis.clients.jedis.JedisPool;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
+import redis.clients.jedis.params.SetParams;
+
+import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -78,16 +80,32 @@ class DeliveryRepositoryTest {
     }
 
     @Test
-    void update_success() throws Exception {
+    void update_noTtl_plainSet() throws Exception {
         Delivery delivery = Delivery.builder()
                 .deliveryId("del-1")
                 .status("SUCCESS")
                 .completedAt(Instant.now())
                 .build();
+        when(jedis.ttl("delivery:del-1")).thenReturn(-1L); // no TTL
 
         repository.update(delivery);
 
         verify(jedis).set(eq("delivery:del-1"), anyString());
+        verify(jedis, never()).set(anyString(), anyString(), any(SetParams.class));
+    }
+
+    @Test
+    void update_withTtl_preservesTtlAtomically() throws Exception {
+        Delivery delivery = Delivery.builder()
+                .deliveryId("del-1")
+                .status("SUCCESS")
+                .completedAt(Instant.now())
+                .build();
+        when(jedis.ttl("delivery:del-1")).thenReturn(86400L); // 1 day remaining
+
+        repository.update(delivery);
+
+        verify(jedis).set(eq("delivery:del-1"), anyString(), any(SetParams.class));
     }
 
     @Test
@@ -105,5 +123,6 @@ class DeliveryRepositoryTest {
         // Should not throw — error is logged
         brokenRepo.update(delivery);
         verify(jedis, never()).set(anyString(), anyString());
+        verify(jedis, never()).set(anyString(), anyString(), any(SetParams.class));
     }
 }

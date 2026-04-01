@@ -80,6 +80,8 @@ class DeliveryQueueRepositoryTest {
     void popRetryReady_withReadyItems() {
         when(jedis.zrangeByScore("dispatch:retry", "-inf", "1700000000000", 0, 100))
                 .thenReturn(Arrays.asList("del-1", "del-2"));
+        when(jedis.zrem("dispatch:retry", "del-1")).thenReturn(1L);
+        when(jedis.zrem("dispatch:retry", "del-2")).thenReturn(1L);
 
         List<String> result = repository.popRetryReady(1700000000000L, 100);
 
@@ -88,6 +90,20 @@ class DeliveryQueueRepositoryTest {
         verify(jedis).zrem("dispatch:retry", "del-2");
         verify(jedis).lpush("dispatch:pending", "del-1");
         verify(jedis).lpush("dispatch:pending", "del-2");
+    }
+
+    @Test
+    void popRetryReady_concurrentWorker_skipsAlreadyRemovedItems() {
+        when(jedis.zrangeByScore("dispatch:retry", "-inf", "1700000000000", 0, 100))
+                .thenReturn(Arrays.asList("del-1", "del-2"));
+        when(jedis.zrem("dispatch:retry", "del-1")).thenReturn(1L);
+        when(jedis.zrem("dispatch:retry", "del-2")).thenReturn(0L); // already removed by another worker
+
+        List<String> result = repository.popRetryReady(1700000000000L, 100);
+
+        assertThat(result).containsExactly("del-1");
+        verify(jedis).lpush("dispatch:pending", "del-1");
+        verify(jedis, never()).lpush("dispatch:pending", "del-2");
     }
 
     @Test
