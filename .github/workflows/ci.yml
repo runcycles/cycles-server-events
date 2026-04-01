@@ -1,0 +1,14 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: runcycles/.github/.github/workflows/ci-java.yml@main
+    with:
+      pom-file: pom.xml
+      maven-args: "-Dtest=!*IntegrationTest -Dsurefire.failIfNoSpecifiedTests=false"
