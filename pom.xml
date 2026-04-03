@@ -18,7 +18,7 @@
     <description>Event delivery service for the Cycles ecosystem</description>
 
     <properties>
-        <revision>0.1.25.1</revision>
+        <revision>0.1.25.3</revision>
         <java.version>21</java.version>
         <jedis.version>5.2.0</jedis.version>
         <testcontainers.version>1.20.4</testcontainers.version>
@@ -32,6 +32,10 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
         <dependency>
             <groupId>redis.clients</groupId>

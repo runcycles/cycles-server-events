@@ -20,7 +20,7 @@ class ModelTest {
                 .subscriptionId("sub-1")
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .status("PENDING")
+                .status(DeliveryStatus.PENDING)
                 .attemptedAt(now)
                 .completedAt(now)
                 .attempts(3)
@@ -34,7 +34,7 @@ class ModelTest {
         assertThat(delivery.getSubscriptionId()).isEqualTo("sub-1");
         assertThat(delivery.getEventId()).isEqualTo("evt-1");
         assertThat(delivery.getEventType()).isEqualTo("tenant.created");
-        assertThat(delivery.getStatus()).isEqualTo("PENDING");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.PENDING);
         assertThat(delivery.getAttemptedAt()).isEqualTo(now);
         assertThat(delivery.getCompletedAt()).isEqualTo(now);
         assertThat(delivery.getAttempts()).isEqualTo(3);
@@ -46,9 +46,9 @@ class ModelTest {
 
     @Test
     void delivery_equalsAndHashCode() {
-        Delivery d1 = Delivery.builder().deliveryId("del-1").status("PENDING").build();
-        Delivery d2 = Delivery.builder().deliveryId("del-1").status("PENDING").build();
-        Delivery d3 = Delivery.builder().deliveryId("del-2").status("PENDING").build();
+        Delivery d1 = Delivery.builder().deliveryId("del-1").status(DeliveryStatus.PENDING).build();
+        Delivery d2 = Delivery.builder().deliveryId("del-1").status(DeliveryStatus.PENDING).build();
+        Delivery d3 = Delivery.builder().deliveryId("del-2").status(DeliveryStatus.PENDING).build();
 
         assertThat(d1).isEqualTo(d2);
         assertThat(d1.hashCode()).isEqualTo(d2.hashCode());
@@ -65,9 +65,9 @@ class ModelTest {
     void delivery_setters() {
         Delivery d = new Delivery();
         d.setDeliveryId("del-1");
-        d.setStatus("SUCCESS");
+        d.setStatus(DeliveryStatus.SUCCESS);
         assertThat(d.getDeliveryId()).isEqualTo("del-1");
-        assertThat(d.getStatus()).isEqualTo("SUCCESS");
+        assertThat(d.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
     }
 
     @Test
@@ -117,7 +117,7 @@ class ModelTest {
                 .eventCategories(List.of("tenant"))
                 .scopeFilter("tenant:*")
                 .headers(Map.of("X-Custom", "val"))
-                .status("ACTIVE")
+                .status(WebhookStatus.ACTIVE)
                 .retryPolicy(policy)
                 .disableAfterFailures(10)
                 .consecutiveFailures(0)
@@ -138,7 +138,7 @@ class ModelTest {
         assertThat(sub.getEventCategories()).containsExactly("tenant");
         assertThat(sub.getScopeFilter()).isEqualTo("tenant:*");
         assertThat(sub.getHeaders()).containsEntry("X-Custom", "val");
-        assertThat(sub.getStatus()).isEqualTo("ACTIVE");
+        assertThat(sub.getStatus()).isEqualTo(WebhookStatus.ACTIVE);
         assertThat(sub.getRetryPolicy()).isEqualTo(policy);
         assertThat(sub.getDisableAfterFailures()).isEqualTo(10);
         assertThat(sub.getConsecutiveFailures()).isEqualTo(0);

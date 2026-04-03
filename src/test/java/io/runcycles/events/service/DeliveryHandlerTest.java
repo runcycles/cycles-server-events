@@ -44,7 +44,7 @@ class DeliveryHandlerTest {
                 .subscriptionId("sub-1")
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .status("PENDING")
+                .status(DeliveryStatus.PENDING)
                 .attempts(0)
                 .build();
     }
@@ -65,7 +65,7 @@ class DeliveryHandlerTest {
                 .subscriptionId("sub-1")
                 .tenantId("t-1")
                 .url("https://example.com/webhook")
-                .status("ACTIVE")
+                .status(WebhookStatus.ACTIVE)
                 .eventTypes(List.of("tenant.created"))
                 .consecutiveFailures(0)
                 .disableAfterFailures(10)
@@ -96,7 +96,7 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(delivery.getStatus()).isEqualTo("SUCCESS");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
         assertThat(delivery.getAttempts()).isEqualTo(1);
         assertThat(delivery.getCompletedAt()).isNotNull();
         assertThat(delivery.getResponseStatus()).isEqualTo(200);
@@ -108,7 +108,7 @@ class DeliveryHandlerTest {
     @Test
     void handle_retryingDelivery_succeeds() {
         Delivery delivery = pendingDelivery();
-        delivery.setStatus("RETRYING");
+        delivery.setStatus(DeliveryStatus.RETRYING);
         delivery.setAttempts(2);
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
         when(eventRepository.findById("evt-1")).thenReturn(testEvent());
@@ -119,7 +119,7 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(delivery.getStatus()).isEqualTo("SUCCESS");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
         assertThat(delivery.getAttempts()).isEqualTo(3);
     }
 
@@ -138,7 +138,7 @@ class DeliveryHandlerTest {
     @Test
     void handle_deliveryAlreadySuccess() {
         Delivery delivery = pendingDelivery();
-        delivery.setStatus("SUCCESS");
+        delivery.setStatus(DeliveryStatus.SUCCESS);
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
 
         handler.handle("del-1");
@@ -150,7 +150,7 @@ class DeliveryHandlerTest {
     @Test
     void handle_deliveryAlreadyFailed() {
         Delivery delivery = pendingDelivery();
-        delivery.setStatus("FAILED");
+        delivery.setStatus(DeliveryStatus.FAILED);
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
 
         handler.handle("del-1");
@@ -168,7 +168,7 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(delivery.getStatus()).isEqualTo("FAILED");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("Event not found");
         verify(deliveryRepository).update(delivery);
     }
@@ -182,7 +182,7 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(delivery.getStatus()).isEqualTo("FAILED");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("Subscription not found");
     }
 
@@ -192,12 +192,12 @@ class DeliveryHandlerTest {
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
         when(eventRepository.findById("evt-1")).thenReturn(testEvent());
         Subscription sub = activeSubscription();
-        sub.setStatus("PAUSED");
+        sub.setStatus(WebhookStatus.PAUSED);
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
 
         handler.handle("del-1");
 
-        assertThat(delivery.getStatus()).isEqualTo("FAILED");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("not active");
     }
 
@@ -207,12 +207,12 @@ class DeliveryHandlerTest {
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
         when(eventRepository.findById("evt-1")).thenReturn(testEvent());
         Subscription sub = activeSubscription();
-        sub.setStatus("DISABLED");
+        sub.setStatus(WebhookStatus.DISABLED);
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
 
         handler.handle("del-1");
 
-        assertThat(delivery.getStatus()).isEqualTo("FAILED");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
     }
 
     // --- Failure + retry ---
@@ -229,7 +229,7 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(delivery.getStatus()).isEqualTo("RETRYING");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.RETRYING);
         assertThat(delivery.getAttempts()).isEqualTo(1);
         assertThat(delivery.getNextRetryAt()).isNotNull();
         verify(queueRepository).scheduleRetry(eq("del-1"), anyLong());
@@ -239,7 +239,7 @@ class DeliveryHandlerTest {
     void handle_transportFailure_exponentialBackoff() {
         Delivery delivery = pendingDelivery();
         delivery.setAttempts(2); // will become 3 after increment
-        delivery.setStatus("RETRYING");
+        delivery.setStatus(DeliveryStatus.RETRYING);
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
         when(eventRepository.findById("evt-1")).thenReturn(testEvent());
         Subscription sub = activeSubscription();
@@ -268,7 +268,7 @@ class DeliveryHandlerTest {
     void handle_transportFailure_maxDelayCapped() {
         Delivery delivery = pendingDelivery();
         delivery.setAttempts(9); // will become 10
-        delivery.setStatus("RETRYING");
+        delivery.setStatus(DeliveryStatus.RETRYING);
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
         when(eventRepository.findById("evt-1")).thenReturn(testEvent());
         Subscription sub = activeSubscription();
@@ -296,7 +296,7 @@ class DeliveryHandlerTest {
     void handle_transportFailure_maxRetriesExhausted() {
         Delivery delivery = pendingDelivery();
         delivery.setAttempts(5); // will become 6 > maxRetries(5)
-        delivery.setStatus("RETRYING");
+        delivery.setStatus(DeliveryStatus.RETRYING);
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
         when(eventRepository.findById("evt-1")).thenReturn(testEvent());
         Subscription sub = activeSubscription();
@@ -306,7 +306,7 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(delivery.getStatus()).isEqualTo("FAILED");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getCompletedAt()).isNotNull();
         verify(queueRepository, never()).scheduleRetry(anyString(), anyLong());
     }
@@ -324,7 +324,7 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(delivery.getStatus()).isEqualTo("RETRYING");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.RETRYING);
         verify(queueRepository).scheduleRetry(eq("del-1"), anyLong());
     }
 
@@ -345,7 +345,7 @@ class DeliveryHandlerTest {
         handler.handle("del-1");
 
         assertThat(sub.getConsecutiveFailures()).isEqualTo(4);
-        assertThat(sub.getStatus()).isEqualTo("ACTIVE"); // not yet disabled
+        assertThat(sub.getStatus()).isEqualTo(WebhookStatus.ACTIVE); // not yet disabled
         verify(subscriptionRepository).update(sub);
     }
 
@@ -364,7 +364,7 @@ class DeliveryHandlerTest {
         handler.handle("del-1");
 
         assertThat(sub.getConsecutiveFailures()).isEqualTo(10);
-        assertThat(sub.getStatus()).isEqualTo("DISABLED");
+        assertThat(sub.getStatus()).isEqualTo(WebhookStatus.DISABLED);
         verify(subscriptionRepository).update(sub);
     }
 
@@ -383,7 +383,7 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(sub.getStatus()).isEqualTo("DISABLED");
+        assertThat(sub.getStatus()).isEqualTo(WebhookStatus.DISABLED);
     }
 
     @Test
@@ -417,7 +417,7 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(delivery.getStatus()).isEqualTo("SUCCESS");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
         verify(transport).deliver(any(), eq(sub), isNull());
     }
 
@@ -449,7 +449,7 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(delivery.getStatus()).isEqualTo("FAILED");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("expired");
         verify(transport, never()).deliver(any(), any(), any());
     }
@@ -467,6 +467,6 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(delivery.getStatus()).isEqualTo("SUCCESS");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
     }
 }

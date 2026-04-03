@@ -49,7 +49,7 @@ public class Subscription {
     private Map<String, String> headers;
 
     @JsonProperty("status")
-    private String status;
+    private WebhookStatus status;
 
     @JsonProperty("retry_policy")
     private RetryPolicy retryPolicy;

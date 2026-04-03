@@ -49,7 +49,7 @@ Services: Redis (6379), Admin (7979), Runtime Server (7878), Events (7980)
 ### Standalone (requires existing Redis)
 
 ```bash
-REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.25.1.jar
+REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.25.3.jar
 ```
 
 ## Configuration
@@ -124,7 +124,7 @@ def verify(body: bytes, secret: str, signature: str) -> bool:
 | `X-Cycles-Signature` | `sha256=<hex>` | HMAC-SHA256 of body (if signing secret configured) |
 | `X-Cycles-Event-Id` | `evt_abc123...` | For deduplication (at-least-once delivery) |
 | `X-Cycles-Event-Type` | `budget.exhausted` | Event type for routing |
-| `User-Agent` | `cycles-server-events/0.1.25.1` | Service identifier |
+| `User-Agent` | `cycles-server-events/0.1.25.3` | Service identifier |
 | Custom headers | Per subscription | From `WebhookSubscription.headers` map |
 
 ## Retry Policy
@@ -215,13 +215,23 @@ public interface Transport {
 
 ## Monitoring
 
-Spring Actuator endpoints are exposed on the service port (7980):
+Spring Actuator endpoints are exposed on the service port (7980), powered by Micrometer with a Prometheus registry:
 
 | Endpoint | Description |
 |----------|-------------|
 | `GET /actuator/health` | Liveness check (UP/DOWN) |
 | `GET /actuator/info` | Build info (version, artifact) |
 | `GET /actuator/prometheus` | Prometheus-format metrics for scraping |
+
+Prometheus scrape config example:
+
+```yaml
+scrape_configs:
+  - job_name: cycles-server-events
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['localhost:7980']
+```
 
 ## Webhook Payload Example
 
@@ -259,7 +269,7 @@ mvn verify
 mvn verify -Pintegration-tests
 
 # Run
-REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.25.1.jar
+REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.25.3.jar
 ```
 
 ## License

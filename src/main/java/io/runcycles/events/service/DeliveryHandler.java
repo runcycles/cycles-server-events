@@ -1,9 +1,11 @@
 package io.runcycles.events.service;
 
 import io.runcycles.events.model.Delivery;
+import io.runcycles.events.model.DeliveryStatus;
 import io.runcycles.events.model.Event;
 import io.runcycles.events.model.RetryPolicy;
 import io.runcycles.events.model.Subscription;
+import io.runcycles.events.model.WebhookStatus;
 import io.runcycles.events.repository.DeliveryQueueRepository;
 import io.runcycles.events.repository.DeliveryRepository;
 import io.runcycles.events.repository.EventRepository;
@@ -48,8 +50,8 @@ public class DeliveryHandler {
             return;
         }
 
-        String status = delivery.getStatus();
-        if (!"PENDING".equals(status) && !"RETRYING".equals(status)) {
+        DeliveryStatus status = delivery.getStatus();
+        if (status != DeliveryStatus.PENDING && status != DeliveryStatus.RETRYING) {
             LOG.debug("Delivery {} already in state {}, skipping", deliveryId, status);
             return;
         }
@@ -77,7 +79,7 @@ public class DeliveryHandler {
             markFailed(delivery, "Subscription not found");
             return;
         }
-        if (!"ACTIVE".equals(sub.getStatus())) {
+        if (sub.getStatus() != WebhookStatus.ACTIVE) {
             markFailed(delivery, "Subscription not active: " + sub.getStatus());
             return;
         }
@@ -95,7 +97,7 @@ public class DeliveryHandler {
     }
 
     private void handleSuccess(Delivery delivery, Subscription sub, TransportResult result) {
-        delivery.setStatus("SUCCESS");
+        delivery.setStatus(DeliveryStatus.SUCCESS);
         delivery.setResponseStatus(result.getStatusCode());
         delivery.setResponseTimeMs(result.getLatencyMs());
         delivery.setCompletedAt(Instant.now());
@@ -126,7 +128,7 @@ public class DeliveryHandler {
         long delay = Math.min((long) (initialDelay * Math.pow(multiplier, delivery.getAttempts() - 1)), maxDelay);
         long nextRetryAt = System.currentTimeMillis() + delay;
 
-        delivery.setStatus("RETRYING");
+        delivery.setStatus(DeliveryStatus.RETRYING);
         delivery.setResponseStatus(result.getStatusCode());
         delivery.setResponseTimeMs(result.getLatencyMs());
         delivery.setErrorMessage(result.getErrorMessage());
@@ -139,7 +141,7 @@ public class DeliveryHandler {
     }
 
     private void markFailed(Delivery delivery, String errorMessage) {
-        delivery.setStatus("FAILED");
+        delivery.setStatus(DeliveryStatus.FAILED);
         delivery.setErrorMessage(errorMessage);
         delivery.setCompletedAt(Instant.now());
         deliveryRepository.update(delivery);
@@ -154,7 +156,7 @@ public class DeliveryHandler {
 
         int disableAfter = sub.getDisableAfterFailures() != null ? sub.getDisableAfterFailures() : 10;
         if (failures >= disableAfter) {
-            sub.setStatus("DISABLED");
+            sub.setStatus(WebhookStatus.DISABLED);
             LOG.warn("Subscription {} auto-disabled after {} consecutive failures",
                     sub.getSubscriptionId(), failures);
         }
