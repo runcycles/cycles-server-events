@@ -98,6 +98,7 @@
 | lombok | (parent) | Compile-time only |
 | spring-boot-starter-test | 3.5.11 | Test framework |
 | testcontainers | 1.20.4 | Integration test Redis |
+| micrometer-registry-prometheus | (parent) | Prometheus metrics endpoint |
 | jacoco | 0.8.12 | Coverage enforcement |
 
 ## Resilience Patterns
@@ -136,9 +137,11 @@
 | 2026-04-01 | 0.1.25.1 | Release audit: fix README version refs (0.1.0 -> 0.1.25.1), test count (92 -> 113) |
 | 2026-04-01 | 0.1.25.1 | Code validation: fix duplicate delivery bug, missing exception handler, atomic TTL, config timeout, pool health checks, scheduler pool, response body discard |
 
+| 2026-04-03 | 0.1.25.1 | Fix: add micrometer-registry-prometheus dependency for /actuator/prometheus endpoint |
+
 ## Last Audited
 
-- **Date:** 2026-04-01
+- **Date:** 2026-04-03
 - **Version:** 0.1.25.1
 - **Build:** PASS (114 unit tests, 0 failures, 95%+ coverage)
 - **Integration test:** PASS (3 tests with Testcontainers Redis)
