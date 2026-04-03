@@ -118,6 +118,7 @@
 |-------------|--------|
 | 40 event types across 6 categories | PASS |
 | Enum serialization (lowercase) | PASS - ActorType, EventCategory, EventType |
+| Status fields use enums | PASS - DeliveryStatus, WebhookStatus (not string literals) |
 | Subscription model fields | PASS - all spec fields present |
 | HMAC-SHA256 webhook signing | PASS |
 | Retry with exponential backoff | PASS |
@@ -127,16 +128,18 @@
 
 | Date | Version | Change |
 |------|---------|--------|
-| 2026-03-31 | 0.1.25.3 | Initial implementation: dispatch loop, delivery handler, retry scheduler |
-| 2026-03-31 | 0.1.25.3 | v0.1.25 spec compliance (enum serialization, Subscription fields) |
-| 2026-03-31 | 0.1.25.3 | AES-256-GCM encryption for webhook signing secrets |
-| 2026-03-31 | 0.1.25.3 | TTL and retention for event/delivery Redis keys |
-| 2026-03-31 | 0.1.25.3 | CI-friendly ${revision} versioning |
-| 2026-04-01 | 0.1.25.3 | E2E integration test with Testcontainers |
-| 2026-04-01 | 0.1.25.3 | Graceful Redis connection error handling in scheduled services |
-| 2026-04-01 | 0.1.25.3 | Release audit: fix README version refs (0.1.0 -> 0.1.25.3), test count (92 -> 113) |
-| 2026-04-01 | 0.1.25.3 | Code validation: fix duplicate delivery bug, missing exception handler, atomic TTL, config timeout, pool health checks, scheduler pool, response body discard |
+| 2026-03-31 | 0.1.25.1 | Initial implementation: dispatch loop, delivery handler, retry scheduler |
+| 2026-03-31 | 0.1.25.1 | v0.1.25 spec compliance (enum serialization, Subscription fields) |
+| 2026-03-31 | 0.1.25.1 | AES-256-GCM encryption for webhook signing secrets |
+| 2026-03-31 | 0.1.25.1 | TTL and retention for event/delivery Redis keys |
+| 2026-03-31 | 0.1.25.1 | CI-friendly ${revision} versioning |
+| 2026-04-01 | 0.1.25.1 | E2E integration test with Testcontainers |
+| 2026-04-01 | 0.1.25.1 | Graceful Redis connection error handling in scheduled services |
+| 2026-04-01 | 0.1.25.1 | Release audit: fix README version refs (0.1.0 -> 0.1.25.1), test count (92 -> 113) |
+| 2026-04-01 | 0.1.25.1 | Code validation: fix duplicate delivery bug, missing exception handler, atomic TTL, config timeout, pool health checks, scheduler pool, response body discard |
 | 2026-04-03 | 0.1.25.3 | Fix: add micrometer-registry-prometheus dependency for /actuator/prometheus endpoint |
+| 2026-04-03 | 0.1.25.3 | Use DeliveryStatus/WebhookStatus enums instead of string literals for type safety |
+| 2026-04-03 | 0.1.25.3 | Bump version to 0.1.25.3 |
 
 ## Last Audited
 
