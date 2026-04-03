@@ -11,4 +11,3 @@ jobs:
     uses: runcycles/.github/.github/workflows/ci-java.yml@main
     with:
       pom-file: pom.xml
-      maven-args: "-Dtest=!*IntegrationTest -Dsurefire.failIfNoSpecifiedTests=false"
