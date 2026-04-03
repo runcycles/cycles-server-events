@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | Service | cycles-server-events |
-| Version | 0.1.25.1 |
+| Version | 0.1.25.3 |
 | Java | 21 |
 | Spring Boot | 3.5.11 |
 | Spec Authority | [complete-budget-governance-v0.1.25.yaml](https://github.com/runcycles/cycles-server-admin/blob/main/complete-budget-governance-v0.1.25.yaml) |
@@ -127,21 +127,21 @@
 
 | Date | Version | Change |
 |------|---------|--------|
-| 2026-03-31 | 0.1.25.1 | Initial implementation: dispatch loop, delivery handler, retry scheduler |
-| 2026-03-31 | 0.1.25.1 | v0.1.25 spec compliance (enum serialization, Subscription fields) |
-| 2026-03-31 | 0.1.25.1 | AES-256-GCM encryption for webhook signing secrets |
-| 2026-03-31 | 0.1.25.1 | TTL and retention for event/delivery Redis keys |
-| 2026-03-31 | 0.1.25.1 | CI-friendly ${revision} versioning |
-| 2026-04-01 | 0.1.25.1 | E2E integration test with Testcontainers |
-| 2026-04-01 | 0.1.25.1 | Graceful Redis connection error handling in scheduled services |
-| 2026-04-01 | 0.1.25.1 | Release audit: fix README version refs (0.1.0 -> 0.1.25.1), test count (92 -> 113) |
-| 2026-04-01 | 0.1.25.1 | Code validation: fix duplicate delivery bug, missing exception handler, atomic TTL, config timeout, pool health checks, scheduler pool, response body discard |
-| 2026-04-03 | 0.1.25.1 | Fix: add micrometer-registry-prometheus dependency for /actuator/prometheus endpoint |
+| 2026-03-31 | 0.1.25.3 | Initial implementation: dispatch loop, delivery handler, retry scheduler |
+| 2026-03-31 | 0.1.25.3 | v0.1.25 spec compliance (enum serialization, Subscription fields) |
+| 2026-03-31 | 0.1.25.3 | AES-256-GCM encryption for webhook signing secrets |
+| 2026-03-31 | 0.1.25.3 | TTL and retention for event/delivery Redis keys |
+| 2026-03-31 | 0.1.25.3 | CI-friendly ${revision} versioning |
+| 2026-04-01 | 0.1.25.3 | E2E integration test with Testcontainers |
+| 2026-04-01 | 0.1.25.3 | Graceful Redis connection error handling in scheduled services |
+| 2026-04-01 | 0.1.25.3 | Release audit: fix README version refs (0.1.0 -> 0.1.25.3), test count (92 -> 113) |
+| 2026-04-01 | 0.1.25.3 | Code validation: fix duplicate delivery bug, missing exception handler, atomic TTL, config timeout, pool health checks, scheduler pool, response body discard |
+| 2026-04-03 | 0.1.25.3 | Fix: add micrometer-registry-prometheus dependency for /actuator/prometheus endpoint |
 
 ## Last Audited
 
 - **Date:** 2026-04-03
-- **Version:** 0.1.25.1
+- **Version:** 0.1.25.3
 - **Build:** PASS (114 unit tests, 0 failures, 95%+ coverage)
 - **Integration test:** PASS (3 tests with Testcontainers Redis)
 - **Total:** 117 tests (114 unit + 3 integration)
