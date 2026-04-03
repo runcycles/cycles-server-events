@@ -29,7 +29,7 @@ public class Delivery {
     private String eventType;
 
     @JsonProperty("status")
-    private String status;
+    private DeliveryStatus status;
 
     @JsonProperty("attempted_at")
     private Instant attemptedAt;

@@ -7,6 +7,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.runcycles.events.model.Event;
 import io.runcycles.events.model.EventCategory;
 import io.runcycles.events.model.Subscription;
+import io.runcycles.events.model.WebhookStatus;
 import io.runcycles.events.transport.TransportResult;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -66,7 +67,7 @@ class WebhookTransportTest {
                 .subscriptionId("sub-1")
                 .tenantId("t-1")
                 .url("http://localhost:" + port + path)
-                .status("ACTIVE")
+                .status(WebhookStatus.ACTIVE)
                 .eventTypes(List.of("tenant.created"))
                 .build();
     }
@@ -240,7 +241,7 @@ class WebhookTransportTest {
         Subscription sub = Subscription.builder()
                 .subscriptionId("sub-1")
                 .url("http://localhost:1") // port 1 — connection refused
-                .status("ACTIVE")
+                .status(WebhookStatus.ACTIVE)
                 .build();
 
         TransportResult result = transport.deliver(testEvent(), sub, null);

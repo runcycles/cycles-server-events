@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.runcycles.events.config.CryptoService;
 import io.runcycles.events.model.Subscription;
+import io.runcycles.events.model.WebhookStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -47,7 +48,7 @@ class SubscriptionRepositoryTest {
                 .subscriptionId("sub-1")
                 .tenantId("t-1")
                 .url("https://example.com/webhook")
-                .status("ACTIVE")
+                .status(WebhookStatus.ACTIVE)
                 .eventTypes(List.of("tenant.created"))
                 .build();
         when(jedis.get("webhook:sub-1")).thenReturn(objectMapper.writeValueAsString(sub));
@@ -57,7 +58,7 @@ class SubscriptionRepositoryTest {
         assertThat(result).isNotNull();
         assertThat(result.getSubscriptionId()).isEqualTo("sub-1");
         assertThat(result.getUrl()).isEqualTo("https://example.com/webhook");
-        assertThat(result.getStatus()).isEqualTo("ACTIVE");
+        assertThat(result.getStatus()).isEqualTo(WebhookStatus.ACTIVE);
     }
 
     @Test
@@ -124,7 +125,7 @@ class SubscriptionRepositoryTest {
     void update_success() throws Exception {
         Subscription sub = Subscription.builder()
                 .subscriptionId("sub-1")
-                .status("ACTIVE")
+                .status(WebhookStatus.ACTIVE)
                 .build();
 
         repository.update(sub);

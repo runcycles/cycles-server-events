@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.runcycles.events.model.Delivery;
+import io.runcycles.events.model.DeliveryStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -47,7 +48,7 @@ class DeliveryRepositoryTest {
                 .deliveryId("del-1")
                 .subscriptionId("sub-1")
                 .eventId("evt-1")
-                .status("PENDING")
+                .status(DeliveryStatus.PENDING)
                 .attempts(0)
                 .build();
         String json = objectMapper.writeValueAsString(delivery);
@@ -58,7 +59,7 @@ class DeliveryRepositoryTest {
         assertThat(result).isNotNull();
         assertThat(result.getDeliveryId()).isEqualTo("del-1");
         assertThat(result.getSubscriptionId()).isEqualTo("sub-1");
-        assertThat(result.getStatus()).isEqualTo("PENDING");
+        assertThat(result.getStatus()).isEqualTo(DeliveryStatus.PENDING);
     }
 
     @Test
@@ -83,7 +84,7 @@ class DeliveryRepositoryTest {
     void update_noTtl_plainSet() throws Exception {
         Delivery delivery = Delivery.builder()
                 .deliveryId("del-1")
-                .status("SUCCESS")
+                .status(DeliveryStatus.SUCCESS)
                 .completedAt(Instant.now())
                 .build();
         when(jedis.ttl("delivery:del-1")).thenReturn(-1L); // no TTL
@@ -98,7 +99,7 @@ class DeliveryRepositoryTest {
     void update_withTtl_preservesTtlAtomically() throws Exception {
         Delivery delivery = Delivery.builder()
                 .deliveryId("del-1")
-                .status("SUCCESS")
+                .status(DeliveryStatus.SUCCESS)
                 .completedAt(Instant.now())
                 .build();
         when(jedis.ttl("delivery:del-1")).thenReturn(86400L); // 1 day remaining
