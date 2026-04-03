@@ -215,13 +215,23 @@ public interface Transport {
 
 ## Monitoring
 
-Spring Actuator endpoints are exposed on the service port (7980):
+Spring Actuator endpoints are exposed on the service port (7980), powered by Micrometer with a Prometheus registry:
 
 | Endpoint | Description |
 |----------|-------------|
 | `GET /actuator/health` | Liveness check (UP/DOWN) |
 | `GET /actuator/info` | Build info (version, artifact) |
 | `GET /actuator/prometheus` | Prometheus-format metrics for scraping |
+
+Prometheus scrape config example:
+
+```yaml
+scrape_configs:
+  - job_name: cycles-server-events
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['localhost:7980']
+```
 
 ## Webhook Payload Example
 

@@ -136,7 +136,6 @@
 | 2026-04-01 | 0.1.25.1 | Graceful Redis connection error handling in scheduled services |
 | 2026-04-01 | 0.1.25.1 | Release audit: fix README version refs (0.1.0 -> 0.1.25.1), test count (92 -> 113) |
 | 2026-04-01 | 0.1.25.1 | Code validation: fix duplicate delivery bug, missing exception handler, atomic TTL, config timeout, pool health checks, scheduler pool, response body discard |
-
 | 2026-04-03 | 0.1.25.1 | Fix: add micrometer-registry-prometheus dependency for /actuator/prometheus endpoint |
 
 ## Last Audited
