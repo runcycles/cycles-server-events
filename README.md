@@ -49,7 +49,7 @@ Services: Redis (6379), Admin (7979), Runtime Server (7878), Events (7980)
 ### Standalone (requires existing Redis)
 
 ```bash
-REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.25.3.jar
+REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.25.4.jar
 ```
 
 ## Configuration
@@ -124,7 +124,7 @@ def verify(body: bytes, secret: str, signature: str) -> bool:
 | `X-Cycles-Signature` | `sha256=<hex>` | HMAC-SHA256 of body (if signing secret configured) |
 | `X-Cycles-Event-Id` | `evt_abc123...` | For deduplication (at-least-once delivery) |
 | `X-Cycles-Event-Type` | `budget.exhausted` | Event type for routing |
-| `User-Agent` | `cycles-server-events/0.1.25.3` | Service identifier |
+| `User-Agent` | `cycles-server-events/0.1.25.4` | Service identifier |
 | Custom headers | Per subscription | From `WebhookSubscription.headers` map |
 
 ## Retry Policy
@@ -269,7 +269,7 @@ mvn verify
 mvn verify -Pintegration-tests
 
 # Run
-REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.25.3.jar
+REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.25.4.jar
 ```
 
 ## License
