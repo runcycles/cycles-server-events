@@ -101,8 +101,9 @@ class DeliveryHandlerTest {
         assertThat(delivery.getCompletedAt()).isNotNull();
         assertThat(delivery.getResponseStatus()).isEqualTo(200);
         verify(deliveryRepository).update(delivery);
-        assertThat(sub.getConsecutiveFailures()).isEqualTo(0);
-        verify(subscriptionRepository).update(sub);
+        // Partial update: resets consecutive failures, sets success timestamps
+        verify(subscriptionRepository).updateDeliveryState(
+                eq("sub-1"), eq(0), any(Instant.class), any(Instant.class), isNull(), isNull());
     }
 
     @Test
@@ -344,9 +345,9 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(sub.getConsecutiveFailures()).isEqualTo(4);
-        assertThat(sub.getStatus()).isEqualTo(WebhookStatus.ACTIVE); // not yet disabled
-        verify(subscriptionRepository).update(sub);
+        // Partial update: failures=4, not yet disabled (null status = no change)
+        verify(subscriptionRepository).updateDeliveryState(
+                eq("sub-1"), eq(4), any(Instant.class), isNull(), any(Instant.class), isNull());
     }
 
     @Test
@@ -363,9 +364,10 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(sub.getConsecutiveFailures()).isEqualTo(10);
-        assertThat(sub.getStatus()).isEqualTo(WebhookStatus.DISABLED);
-        verify(subscriptionRepository).update(sub);
+        // Partial update: failures=10, status=DISABLED
+        verify(subscriptionRepository).updateDeliveryState(
+                eq("sub-1"), eq(10), any(Instant.class), isNull(), any(Instant.class),
+                eq(WebhookStatus.DISABLED));
     }
 
     @Test
@@ -383,7 +385,9 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(sub.getStatus()).isEqualTo(WebhookStatus.DISABLED);
+        verify(subscriptionRepository).updateDeliveryState(
+                eq("sub-1"), eq(10), any(Instant.class), isNull(), any(Instant.class),
+                eq(WebhookStatus.DISABLED));
     }
 
     @Test
@@ -400,7 +404,9 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        assertThat(sub.getConsecutiveFailures()).isEqualTo(1);
+        // null → 0 + 1 = 1
+        verify(subscriptionRepository).updateDeliveryState(
+                eq("sub-1"), eq(1), any(Instant.class), isNull(), any(Instant.class), isNull());
     }
 
     // --- Signing secret ---

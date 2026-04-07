@@ -14,8 +14,8 @@
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 117 |
-| Unit tests | 114 |
+| Total tests | 119 |
+| Unit tests | 116 |
 | Integration tests | 3 (WebhookDeliveryIntegrationTest) |
 | JaCoCo minimum | 95% line coverage (enforced) |
 | Test-to-source ratio | 1.73:1 |
@@ -38,7 +38,7 @@
 | Model | WebhookThresholdConfig.java | ModelTest |
 | Repository | EventRepository.java | EventRepositoryTest (3) |
 | Repository | DeliveryRepository.java | DeliveryRepositoryTest (6) |
-| Repository | SubscriptionRepository.java | SubscriptionRepositoryTest (9) |
+| Repository | SubscriptionRepository.java | SubscriptionRepositoryTest (11) |
 | Repository | DeliveryQueueRepository.java | DeliveryQueueRepositoryTest (8) |
 | Service | DeliveryHandler.java | DeliveryHandlerTest (22) |
 | Service | DispatchLoop.java | DispatchLoopTest (4) |
@@ -140,11 +140,12 @@
 | 2026-04-03 | 0.1.25.3 | Fix: add micrometer-registry-prometheus dependency for /actuator/prometheus endpoint |
 | 2026-04-03 | 0.1.25.3 | Use DeliveryStatus/WebhookStatus enums instead of string literals for type safety |
 | 2026-04-03 | 0.1.25.3 | Bump version to 0.1.25.3 |
+| 2026-04-07 | 0.1.25.3 | Fix: partial subscription update to prevent overwriting admin config changes |
 
 ## Last Audited
 
-- **Date:** 2026-04-03
+- **Date:** 2026-04-07
 - **Version:** 0.1.25.3
-- **Build:** PASS (114 unit tests, 0 failures, 95%+ coverage)
+- **Build:** PASS (116 unit tests, 0 failures, 95%+ coverage)
 - **Integration test:** PASS (3 tests with Testcontainers Redis)
-- **Total:** 117 tests (114 unit + 3 integration)
+- **Total:** 119 tests (116 unit + 3 integration)

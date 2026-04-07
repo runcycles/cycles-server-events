@@ -2,6 +2,7 @@ package io.runcycles.events.repository;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.runcycles.events.config.CryptoService;
 import io.runcycles.events.model.Subscription;
@@ -9,11 +10,13 @@ import io.runcycles.events.model.WebhookStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 
+import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -122,30 +125,67 @@ class SubscriptionRepositoryTest {
     }
 
     @Test
-    void update_success() throws Exception {
-        Subscription sub = Subscription.builder()
-                .subscriptionId("sub-1")
-                .status(WebhookStatus.ACTIVE)
-                .build();
+    void updateDeliveryState_mergesOnlyOperationalFields() throws Exception {
+        // Simulate existing subscription in Redis with admin-managed config
+        String existing = objectMapper.writeValueAsString(objectMapper.createObjectNode()
+                .put("subscription_id", "sub-1")
+                .put("url", "https://example.com/webhook")
+                .put("status", "ACTIVE")
+                .put("consecutive_failures", 0)
+                .put("name", "My Webhook"));
+        when(jedis.get("webhook:sub-1")).thenReturn(existing);
 
-        repository.update(sub);
+        Instant now = Instant.now();
+        repository.updateDeliveryState("sub-1", 3, now, now, null, null);
 
-        verify(jedis).set(eq("webhook:sub-1"), anyString());
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(jedis).set(eq("webhook:sub-1"), captor.capture());
+        ObjectNode written = (ObjectNode) objectMapper.readTree(captor.getValue());
+        // Operational fields updated
+        assertThat(written.get("consecutive_failures").asInt()).isEqualTo(3);
+        assertThat(written.get("last_triggered_at").asText()).isEqualTo(now.toString());
+        assertThat(written.get("last_success_at").asText()).isEqualTo(now.toString());
+        // Admin-managed fields preserved
+        assertThat(written.get("url").asText()).isEqualTo("https://example.com/webhook");
+        assertThat(written.get("name").asText()).isEqualTo("My Webhook");
+        // Status not changed (null passed)
+        assertThat(written.get("status").asText()).isEqualTo("ACTIVE");
     }
 
     @Test
-    void update_serializationError() {
-        ObjectMapper brokenMapper = mock(ObjectMapper.class);
-        SubscriptionRepository brokenRepo = new SubscriptionRepository(jedisPool, brokenMapper, new CryptoService(""));
-        Subscription sub = Subscription.builder().subscriptionId("sub-1").build();
+    void updateDeliveryState_updatesStatus_whenProvided() throws Exception {
+        String existing = objectMapper.writeValueAsString(objectMapper.createObjectNode()
+                .put("subscription_id", "sub-1")
+                .put("status", "ACTIVE")
+                .put("consecutive_failures", 9));
+        when(jedis.get("webhook:sub-1")).thenReturn(existing);
 
-        try {
-            when(brokenMapper.writeValueAsString(any())).thenThrow(new com.fasterxml.jackson.core.JsonProcessingException("fail") {});
-        } catch (Exception e) {
-            // won't happen
-        }
+        Instant now = Instant.now();
+        repository.updateDeliveryState("sub-1", 10, now, null, now, WebhookStatus.DISABLED);
 
-        brokenRepo.update(sub);
-        verify(jedis, never()).set(anyString(), anyString());
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(jedis).set(eq("webhook:sub-1"), captor.capture());
+        ObjectNode written = (ObjectNode) objectMapper.readTree(captor.getValue());
+        assertThat(written.get("status").asText()).isEqualTo("DISABLED");
+        assertThat(written.get("consecutive_failures").asInt()).isEqualTo(10);
+        assertThat(written.has("last_success_at")).isFalse(); // null not written
+        assertThat(written.get("last_failure_at").asText()).isEqualTo(now.toString());
+    }
+
+    @Test
+    void updateDeliveryState_subscriptionNotFound() {
+        when(jedis.get("webhook:sub-missing")).thenReturn(null);
+
+        repository.updateDeliveryState("sub-missing", 1, Instant.now(), null, Instant.now(), null);
+
+        verify(jedis, never()).set(eq("webhook:sub-missing"), anyString());
+    }
+
+    @Test
+    void updateDeliveryState_redisError_doesNotThrow() {
+        when(jedis.get("webhook:sub-fail")).thenThrow(new RuntimeException("redis error"));
+
+        // Should not throw
+        repository.updateDeliveryState("sub-fail", 1, Instant.now(), null, Instant.now(), null);
     }
 }

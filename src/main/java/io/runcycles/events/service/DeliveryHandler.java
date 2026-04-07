@@ -103,10 +103,9 @@ public class DeliveryHandler {
         delivery.setCompletedAt(Instant.now());
         deliveryRepository.update(delivery);
 
-        sub.setConsecutiveFailures(0);
-        sub.setLastTriggeredAt(Instant.now());
-        sub.setLastSuccessAt(Instant.now());
-        subscriptionRepository.update(sub);
+        Instant now = Instant.now();
+        subscriptionRepository.updateDeliveryState(
+                sub.getSubscriptionId(), 0, now, now, null, null);
 
         LOG.info("Delivery {} succeeded (HTTP {})", delivery.getDeliveryId(), result.getStatusCode());
     }
@@ -150,16 +149,16 @@ public class DeliveryHandler {
 
     private void incrementConsecutiveFailures(Subscription sub) {
         int failures = (sub.getConsecutiveFailures() != null ? sub.getConsecutiveFailures() : 0) + 1;
-        sub.setConsecutiveFailures(failures);
-        sub.setLastFailureAt(Instant.now());
-        sub.setLastTriggeredAt(Instant.now());
-
         int disableAfter = sub.getDisableAfterFailures() != null ? sub.getDisableAfterFailures() : 10;
+        WebhookStatus newStatus = null;
         if (failures >= disableAfter) {
-            sub.setStatus(WebhookStatus.DISABLED);
+            newStatus = WebhookStatus.DISABLED;
             LOG.warn("Subscription {} auto-disabled after {} consecutive failures",
                     sub.getSubscriptionId(), failures);
         }
-        subscriptionRepository.update(sub);
+
+        Instant now = Instant.now();
+        subscriptionRepository.updateDeliveryState(
+                sub.getSubscriptionId(), failures, now, null, now, newStatus);
     }
 }
