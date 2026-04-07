@@ -11,10 +11,17 @@ Event delivery service for the Cycles ecosystem. Consumes events from Redis and 
 ## Architecture
 
 ```
-cycles-server-admin
-    │ EventService.emit() → save event + find matching subscriptions
-    │ WebhookDispatchService → create PENDING delivery + LPUSH dispatch:pending
-    ▼
+cycles-server-admin                    cycles-server (runtime)
+    │ tenant/budget CRUD,                  │ reservation ops,
+    │ api_key/policy lifecycle             │ budget thresholds,
+    │                                      │ rate spike detection
+    │                                      │
+    └──────────┐              ┌────────────┘
+               ▼              ▼
+         EventService.emit() → save event + find matching subscriptions
+         WebhookDispatchService → create PENDING delivery + LPUSH dispatch:pending
+               │
+               ▼
 Redis ──BRPOP──► cycles-server-events (DispatchLoop)
                     │
                     ├── DeliveryHandler: load delivery + event + subscription
@@ -26,14 +33,16 @@ Redis ──BRPOP──► cycles-server-events (DispatchLoop)
                     └── On consecutive failures >= threshold: subscription → DISABLED
 ```
 
+Event sources (per spec `source` field): `cycles-admin`, `cycles-server`, `expiry-sweeper`, `anomaly-detector`
+
 ### Why a separate service?
 
-| Concern | Admin Server | Events Service |
-|---------|-------------|----------------|
-| Workload | Synchronous CRUD, operator-facing | Asynchronous delivery, variable latency |
-| Scaling | Scale with admin traffic | Scale with webhook volume |
-| Failure isolation | Admin stays responsive during delivery backlog | Delivery retries don't block admin API |
-| Concurrency | Single instance | Multiple instances safe (BRPOP is atomic) |
+| Concern | Admin / Runtime Servers | Events Service |
+|---------|------------------------|----------------|
+| Workload | Synchronous CRUD + reservation ops | Asynchronous delivery, variable latency |
+| Scaling | Scale with API traffic | Scale with webhook volume |
+| Failure isolation | Servers stay responsive during delivery backlog | Delivery retries don't block API |
+| Concurrency | Multiple instances | Multiple instances safe (BRPOP is atomic) |
 
 ## Quick Start
 
