@@ -32,7 +32,7 @@ REDIS_HOST=localhost REDIS_PORT=6379 REDIS_PASSWORD="" \
 
 Uses Maven CI-friendly `${revision}` property. Version is set **once** in `pom.xml`:
 ```xml
-<revision>0.1.25.4</revision>
+<revision>0.1.25.5</revision>
 ```
 The `flatten-maven-plugin` resolves `${revision}` at build time.
 

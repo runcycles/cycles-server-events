@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | Service | cycles-server-events |
-| Version | 0.1.25.4 |
+| Version | 0.1.25.5 |
 | Java | 21 |
 | Spring Boot | 3.5.11 |
 | Spec Authority | [complete-budget-governance-v0.1.25.yaml](https://github.com/runcycles/cycles-server-admin/blob/main/complete-budget-governance-v0.1.25.yaml) |
@@ -142,12 +142,13 @@
 | 2026-04-03 | 0.1.25.3 | Bump version to 0.1.25.3 |
 | 2026-04-07 | 0.1.25.4 | Fix: partial subscription update to prevent overwriting admin config changes |
 | 2026-04-07 | 0.1.25.4 | Bump version to 0.1.25.4 |
-| 2026-04-08 | 0.1.25.4 | Fix: force HTTP/1.1 in WebhookTransport to prevent h2c upgrade body drop (#16) |
+| 2026-04-08 | 0.1.25.5 | Fix: force HTTP/1.1 in WebhookTransport to prevent h2c upgrade body drop (#16) |
+| 2026-04-08 | 0.1.25.5 | Bump version to 0.1.25.5 |
 
 ## Last Audited
 
 - **Date:** 2026-04-08
-- **Version:** 0.1.25.4
+- **Version:** 0.1.25.5
 - **Build:** PASS (116 unit tests, 0 failures, 95%+ coverage)
 - **Integration test:** PASS (3 tests with Testcontainers Redis)
 - **Total:** 119 tests (116 unit + 3 integration)
