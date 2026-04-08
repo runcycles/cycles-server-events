@@ -142,10 +142,11 @@
 | 2026-04-03 | 0.1.25.3 | Bump version to 0.1.25.3 |
 | 2026-04-07 | 0.1.25.4 | Fix: partial subscription update to prevent overwriting admin config changes |
 | 2026-04-07 | 0.1.25.4 | Bump version to 0.1.25.4 |
+| 2026-04-08 | 0.1.25.4 | Fix: force HTTP/1.1 in WebhookTransport to prevent h2c upgrade body drop (#16) |
 
 ## Last Audited
 
-- **Date:** 2026-04-07
+- **Date:** 2026-04-08
 - **Version:** 0.1.25.4
 - **Build:** PASS (116 unit tests, 0 failures, 95%+ coverage)
 - **Integration test:** PASS (3 tests with Testcontainers Redis)
