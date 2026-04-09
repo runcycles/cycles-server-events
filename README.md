@@ -2,7 +2,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Coverage](https://img.shields.io/badge/coverage-95%25+-brightgreen)](https://github.com/runcycles/cycles-server-events/actions)
 
-# Runcyles Event Server
+# Runcycles Event Server
 
 Event delivery service for the Cycles ecosystem. Consumes events from Redis and delivers them to webhook endpoints with HMAC-SHA256 signing, exponential backoff retry, auto-disable on consecutive failures, and AES-256-GCM secret encryption at rest.
 
