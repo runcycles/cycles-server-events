@@ -3,12 +3,13 @@ package io.runcycles.events.model;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 public enum EventType {
-    // Budget lifecycle (15)
+    // Budget lifecycle (16)
     BUDGET_CREATED("budget.created", EventCategory.BUDGET),
     BUDGET_UPDATED("budget.updated", EventCategory.BUDGET),
     BUDGET_FUNDED("budget.funded", EventCategory.BUDGET),
     BUDGET_DEBITED("budget.debited", EventCategory.BUDGET),
     BUDGET_RESET("budget.reset", EventCategory.BUDGET),
+    BUDGET_RESET_SPENT("budget.reset_spent", EventCategory.BUDGET),
     BUDGET_DEBT_REPAID("budget.debt_repaid", EventCategory.BUDGET),
     BUDGET_FROZEN("budget.frozen", EventCategory.BUDGET),
     BUDGET_UNFROZEN("budget.unfrozen", EventCategory.BUDGET),
