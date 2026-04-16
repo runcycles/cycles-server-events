@@ -4,6 +4,7 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -16,8 +17,10 @@ class CyclesMetricsTest {
     @BeforeEach
     void setUp() {
         registry = new SimpleMeterRegistry();
-        metrics = new CyclesMetrics(registry);
+        metrics = new CyclesMetrics(registry, true); // tenant tag enabled by default
     }
+
+    // ---- Delivery lifecycle ----
 
     @Test
     void recordDeliveryAttempt_incrementsCounter() {
@@ -112,26 +115,43 @@ class CyclesMetricsTest {
                 .counter().count()).isEqualTo(1.0);
     }
 
-    @Test
-    void recordEventValidationWarning_incrementsCounter() {
-        metrics.recordEventValidationWarning("budget.reset_spent", "reset_spent_shape");
+    // ---- Event payload validation ----
 
-        assertThat(registry.find(CyclesMetrics.EVENT_VALIDATION_WARNINGS)
-                .tags("event_type", "budget.reset_spent", "rule", "reset_spent_shape")
+    @Test
+    void recordEventsPayloadInvalid_incrementsCounter() {
+        metrics.recordEventsPayloadInvalid("budget.reset_spent", "reset_spent_shape");
+
+        // Parallel to admin's cycles_admin_events_payload_invalid_total{type, expected_class}
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID)
+                .tags("type", "budget.reset_spent", "rule", "reset_spent_shape")
                 .counter().count()).isEqualTo(1.0);
     }
 
     @Test
-    void nullTenant_taggedAsUnknown() {
+    void recordEventsPayloadInvalid_hasNoTenantDimension() {
+        // Intentional: payload-shape validity is about the event, not the tenant
+        metrics.recordEventsPayloadInvalid("budget.created", "budget_data_shape");
+
+        Counter c = registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID)
+                .tag("type", "budget.created").counter();
+        assertThat(c).isNotNull();
+        assertThat(c.getId().getTag("tenant")).isNull();
+    }
+
+    // ---- Normalisation ----
+
+    @Test
+    void nullTenant_normalisesToUppercaseUNKNOWN() {
         metrics.recordDeliveryAttempt(null, "tenant.created");
 
         assertThat(registry.find(CyclesMetrics.DELIVERY_ATTEMPTS)
-                .tags("tenant", CyclesMetrics.TAG_UNKNOWN, "event_type", "tenant.created")
+                .tags("tenant", "UNKNOWN", "event_type", "tenant.created")
                 .counter().count()).isEqualTo(1.0);
+        assertThat(CyclesMetrics.TAG_UNKNOWN).isEqualTo("UNKNOWN"); // cycles-server parity
     }
 
     @Test
-    void blankEventType_taggedAsUnknown() {
+    void blankEventType_normalisesToUNKNOWN() {
         metrics.recordDeliveryAttempt("acme", "  ");
 
         assertThat(registry.find(CyclesMetrics.DELIVERY_ATTEMPTS)
@@ -142,10 +162,10 @@ class CyclesMetricsTest {
     @Test
     void statusFamily_mapsAllBuckets() {
         metrics.recordDeliverySuccess("t", "e", 201, 1);
-        metrics.recordDeliverySuccess("t", "e", 302, 1); // counted under 3xx
-        metrics.recordDeliverySuccess("t", "e", 404, 1); // counted under 4xx
-        metrics.recordDeliverySuccess("t", "e", 503, 1); // counted under 5xx
-        metrics.recordDeliverySuccess("t", "e", 199, 1); // out-of-range -> unknown
+        metrics.recordDeliverySuccess("t", "e", 302, 1); // 3xx
+        metrics.recordDeliverySuccess("t", "e", 404, 1); // 4xx
+        metrics.recordDeliverySuccess("t", "e", 503, 1); // 5xx
+        metrics.recordDeliverySuccess("t", "e", 199, 1); // out-of-range -> UNKNOWN
 
         assertThat(registry.find(CyclesMetrics.DELIVERY_SUCCESS)
                 .tag("status_code_family", "2xx").counter().count()).isEqualTo(1.0);
@@ -163,9 +183,53 @@ class CyclesMetricsTest {
     void negativeLatency_skipsTimer() {
         metrics.recordDeliverySuccess("acme", "tenant.created", 200, -1);
 
-        // Counter still incremented
         assertThat(registry.find(CyclesMetrics.DELIVERY_SUCCESS).counter().count()).isEqualTo(1.0);
-        // But timer not registered for negative values
         assertThat(registry.find(CyclesMetrics.DELIVERY_LATENCY).timers()).isEmpty();
+    }
+
+    // ---- Tenant-tag cardinality toggle (cycles-server parity) ----
+
+    @Nested
+    class TenantTagDisabled {
+
+        private SimpleMeterRegistry r;
+        private CyclesMetrics m;
+
+        @BeforeEach
+        void setUp() {
+            r = new SimpleMeterRegistry();
+            m = new CyclesMetrics(r, false); // high-cardinality deployment: tenant omitted
+        }
+
+        @Test
+        void attempt_omitsTenantTag() {
+            m.recordDeliveryAttempt("acme", "tenant.created");
+
+            Counter c = r.find(CyclesMetrics.DELIVERY_ATTEMPTS)
+                    .tag("event_type", "tenant.created").counter();
+            assertThat(c).isNotNull();
+            assertThat(c.count()).isEqualTo(1.0);
+            assertThat(c.getId().getTag("tenant")).isNull();
+        }
+
+        @Test
+        void autoDisabled_omitsTenantTag() {
+            m.recordSubscriptionAutoDisabled("acme", "consecutive_failures");
+
+            Counter c = r.find(CyclesMetrics.SUBSCRIPTION_AUTO_DISABLED)
+                    .tag("reason", "consecutive_failures").counter();
+            assertThat(c).isNotNull();
+            assertThat(c.getId().getTag("tenant")).isNull();
+        }
+
+        @Test
+        void latency_omitsTenantTag() {
+            m.recordDeliverySuccess("acme", "tenant.created", 200, 50);
+
+            Timer t = r.find(CyclesMetrics.DELIVERY_LATENCY)
+                    .tags("event_type", "tenant.created", "outcome", "success").timer();
+            assertThat(t).isNotNull();
+            assertThat(t.getId().getTag("tenant")).isNull();
+        }
     }
 }

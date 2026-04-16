@@ -23,7 +23,7 @@ class EventPayloadValidatorTest {
     @BeforeEach
     void setUp() {
         registry = new SimpleMeterRegistry();
-        metrics = new CyclesMetrics(registry);
+        metrics = new CyclesMetrics(registry, true); // tenant tag enabled (irrelevant for this counter)
         validator = new EventPayloadValidator(metrics);
     }
 
@@ -44,8 +44,10 @@ class EventPayloadValidatorTest {
     }
 
     private double warningCount(String eventType, String rule) {
-        return registry.find(CyclesMetrics.EVENT_VALIDATION_WARNINGS)
-                .tags("event_type", eventType, "rule", rule)
+        // Tag is named "type" (not "event_type") for parallel alignment with
+        // cycles-server-admin's cycles_admin_events_payload_invalid_total{type, expected_class}.
+        return registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID)
+                .tags("type", eventType, "rule", rule)
                 .counter().count();
     }
 
@@ -54,7 +56,7 @@ class EventPayloadValidatorTest {
     @Test
     void valid_budget_reset_spent_event_emitsNoWarnings() {
         validator.validate(validBudgetResetSpent());
-        assertThat(registry.find(CyclesMetrics.EVENT_VALIDATION_WARNINGS).counters()).isEmpty();
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID).counters()).isEmpty();
     }
 
     @Test
@@ -68,7 +70,7 @@ class EventPayloadValidatorTest {
                 .source("admin")
                 .build();
         validator.validate(event);
-        assertThat(registry.find(CyclesMetrics.EVENT_VALIDATION_WARNINGS).counters()).isEmpty();
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID).counters()).isEmpty();
     }
 
     // --- Rule 1: missing_required ---
@@ -232,7 +234,7 @@ class EventPayloadValidatorTest {
                 .data(data)
                 .build();
         validator.validate(event);
-        assertThat(registry.find(CyclesMetrics.EVENT_VALIDATION_WARNINGS).counters()).isEmpty();
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID).counters()).isEmpty();
     }
 
     @Test
@@ -254,7 +256,7 @@ class EventPayloadValidatorTest {
                     .build();
             validator.validate(event);
         }
-        assertThat(registry.find(CyclesMetrics.EVENT_VALIDATION_WARNINGS).counters()).isEmpty();
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID).counters()).isEmpty();
     }
 
     // --- Rule 5: reset_spent_shape ---
@@ -295,7 +297,7 @@ class EventPayloadValidatorTest {
                 .data(data)
                 .build();
         validator.validate(event);
-        assertThat(registry.find(CyclesMetrics.EVENT_VALIDATION_WARNINGS).counters()).isEmpty();
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID).counters()).isEmpty();
     }
 
     @Test
@@ -314,7 +316,7 @@ class EventPayloadValidatorTest {
                 .data(data)
                 .build();
         validator.validate(event);
-        assertThat(registry.find(CyclesMetrics.EVENT_VALIDATION_WARNINGS).counters()).isEmpty();
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID).counters()).isEmpty();
     }
 
     // --- Null-safety ---
@@ -336,7 +338,7 @@ class EventPayloadValidatorTest {
                 .source("admin")
                 .build();
         validator.validate(event);
-        assertThat(registry.find(CyclesMetrics.EVENT_VALIDATION_WARNINGS).counters()).isEmpty();
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID).counters()).isEmpty();
     }
 
     @Test
@@ -353,6 +355,6 @@ class EventPayloadValidatorTest {
                 .data(data)
                 .build();
         validator.validate(event);
-        assertThat(registry.find(CyclesMetrics.EVENT_VALIDATION_WARNINGS).counters()).isEmpty();
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID).counters()).isEmpty();
     }
 }

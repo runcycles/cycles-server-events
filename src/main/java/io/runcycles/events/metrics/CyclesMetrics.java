@@ -1,142 +1,165 @@
 package io.runcycles.events.metrics;
 
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tag;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.Timer;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * Domain-specific counters and timer for webhook dispatch observability.
+ * Centralised Micrometer instrumentation for webhook dispatch operations.
  *
- * <p>Naming mirrors cycles-server's CyclesMetrics (v0.1.25.10):
- * all metric names are prefixed "cycles_webhook_" and counters use the
- * "_total" suffix.
+ * <p>Mirrors the conventions of cycles-server's {@code CyclesMetrics}
+ * (v0.1.25.10): all metric names use the dotted namespace
+ * ({@code cycles.webhook.*}) which Micrometer's Prometheus registry rewrites
+ * to {@code cycles_webhook_*_total} on scrape. Tag choices prioritise
+ * operational signal while keeping cardinality bounded: the only inherently
+ * high-card tag is {@code tenant}, toggleable via
+ * {@code cycles.metrics.tenant-tag.enabled} (default {@code true}) — same
+ * semantics as cycles-server so deployments can flip it consistently across
+ * services when the per-tenant series count would stress Prometheus.
  *
- * <p>Tag conventions:
- * <ul>
- *   <li><code>tenant</code>: owner tenant id; {@link #TAG_UNKNOWN} when a
- *       subscription hasn't loaded yet (e.g., stale delivery or missing event).</li>
- *   <li><code>event_type</code>: the canonical event.type string
- *       (e.g., <code>budget.reset_spent</code>).</li>
- *   <li><code>reason</code>: why a delivery or subscription transition occurred
- *       (<code>http_4xx</code>, <code>http_5xx</code>, <code>transport_error</code>,
- *       <code>event_not_found</code>, <code>subscription_not_found</code>,
- *       <code>subscription_inactive</code>, <code>consecutive_failures</code>).</li>
- *   <li><code>status_code_family</code>: HTTP status bucket on success
- *       (<code>2xx</code>).</li>
- *   <li><code>outcome</code>: success | failure (timer only).</li>
- * </ul>
+ * <p>Null or blank tag values are normalised to the sentinel
+ * {@link #TAG_UNKNOWN} ({@code "UNKNOWN"}) to keep series names stable and
+ * consistent with cycles-server dashboards.
  *
- * <p>Scraped at <code>/actuator/prometheus</code> by the Prometheus registry
- * autowired via spring-boot-starter-actuator + micrometer-registry-prometheus.
- *
- * <p>Double-counting rule: the <code>stale</code> path increments only
- * {@code cycles_webhook_delivery_stale_total} (not {@code failed_total}).
- * Transport-level failures (HTTP or connection) increment
- * {@code cycles_webhook_delivery_failed_total} with an appropriate
- * <code>reason</code> tag.
+ * <p><b>Deviation from cycles-server</b>: this class exposes a Timer
+ * ({@link #DELIVERY_LATENCY}) for outbound webhook latency. cycles-server
+ * does not — it relies on Spring's auto-emitted
+ * {@code http.server.requests} for inbound latency. This service is the
+ * HTTP <em>client</em>, so {@code http.server.requests} does not cover its
+ * primary I/O surface; an explicit Timer is necessary.
  */
 @Component
 public class CyclesMetrics {
 
-    public static final String DELIVERY_ATTEMPTS = "cycles_webhook_delivery_attempts_total";
-    public static final String DELIVERY_SUCCESS = "cycles_webhook_delivery_success_total";
-    public static final String DELIVERY_FAILED = "cycles_webhook_delivery_failed_total";
-    public static final String DELIVERY_RETRIED = "cycles_webhook_delivery_retried_total";
-    public static final String DELIVERY_STALE = "cycles_webhook_delivery_stale_total";
-    public static final String SUBSCRIPTION_AUTO_DISABLED = "cycles_webhook_subscription_auto_disabled_total";
-    public static final String DELIVERY_LATENCY = "cycles_webhook_delivery_latency_seconds";
+    // Dotted source names (Prometheus scrape rewrites to cycles_webhook_*_total).
+    public static final String DELIVERY_ATTEMPTS = "cycles.webhook.delivery.attempts";
+    public static final String DELIVERY_SUCCESS = "cycles.webhook.delivery.success";
+    public static final String DELIVERY_FAILED = "cycles.webhook.delivery.failed";
+    public static final String DELIVERY_RETRIED = "cycles.webhook.delivery.retried";
+    public static final String DELIVERY_STALE = "cycles.webhook.delivery.stale";
+    public static final String SUBSCRIPTION_AUTO_DISABLED = "cycles.webhook.subscription.auto_disabled";
+    public static final String DELIVERY_LATENCY = "cycles.webhook.delivery.latency";
 
-    public static final String EVENT_VALIDATION_WARNINGS = "cycles_webhook_event_validation_warnings_total";
+    /**
+     * Parallel to cycles-server-admin's {@code cycles_admin_events_payload_invalid_total}
+     * (v0.1.25.12, commit bc9f075) — same intent, scoped to the webhook-delivery
+     * plane. Emitted by {@code EventPayloadValidator}.
+     */
+    public static final String EVENTS_PAYLOAD_INVALID = "cycles.webhook.events.payload.invalid";
 
-    public static final String TAG_UNKNOWN = "unknown";
+    public static final String TAG_UNKNOWN = "UNKNOWN";
     public static final String OUTCOME_SUCCESS = "success";
     public static final String OUTCOME_FAILURE = "failure";
 
     private final MeterRegistry registry;
+    private final boolean tenantTagEnabled;
 
-    public CyclesMetrics(MeterRegistry registry) {
+    public CyclesMetrics(MeterRegistry registry,
+                         @Value("${cycles.metrics.tenant-tag.enabled:true}") boolean tenantTagEnabled) {
         this.registry = registry;
+        this.tenantTagEnabled = tenantTagEnabled;
     }
+
+    // ---- Delivery lifecycle ----
 
     public void recordDeliveryAttempt(String tenant, String eventType) {
         registry.counter(DELIVERY_ATTEMPTS,
-                "tenant", safe(tenant),
-                "event_type", safe(eventType)
-        ).increment();
+                tags(tenant, "event_type", eventType))
+                .increment();
     }
 
     public void recordDeliverySuccess(String tenant, String eventType, int statusCode, long latencyMs) {
         registry.counter(DELIVERY_SUCCESS,
-                "tenant", safe(tenant),
-                "event_type", safe(eventType),
-                "status_code_family", statusFamily(statusCode)
-        ).increment();
+                tags(tenant,
+                        "event_type", eventType,
+                        "status_code_family", statusFamily(statusCode)))
+                .increment();
         recordLatency(tenant, eventType, OUTCOME_SUCCESS, latencyMs);
     }
 
     public void recordDeliveryFailure(String tenant, String eventType, String reason, long latencyMs) {
         registry.counter(DELIVERY_FAILED,
-                "tenant", safe(tenant),
-                "event_type", safe(eventType),
-                "reason", safe(reason)
-        ).increment();
+                tags(tenant,
+                        "event_type", eventType,
+                        "reason", reason))
+                .increment();
         if (latencyMs > 0) {
-            // Only record latency when a transport round-trip actually occurred
-            // (upstream failures like event_not_found have no meaningful latency).
+            // Only record latency when a transport round-trip actually occurred;
+            // upstream failures (event_not_found, etc.) have no meaningful latency.
             recordLatency(tenant, eventType, OUTCOME_FAILURE, latencyMs);
         }
     }
 
     public void recordDeliveryRetried(String tenant, String eventType) {
         registry.counter(DELIVERY_RETRIED,
-                "tenant", safe(tenant),
-                "event_type", safe(eventType)
-        ).increment();
+                tags(tenant, "event_type", eventType))
+                .increment();
     }
 
     public void recordDeliveryStale(String tenant) {
         registry.counter(DELIVERY_STALE,
-                "tenant", safe(tenant)
-        ).increment();
+                tags(tenant))
+                .increment();
     }
 
     public void recordSubscriptionAutoDisabled(String tenant, String reason) {
         registry.counter(SUBSCRIPTION_AUTO_DISABLED,
-                "tenant", safe(tenant),
-                "reason", safe(reason)
-        ).increment();
+                tags(tenant, "reason", reason))
+                .increment();
     }
+
+    // ---- Event payload validation ----
 
     /**
      * Emitted by {@code EventPayloadValidator} for each non-fatal shape
-     * discrepancy found on an ingested event. Never increments when the event
-     * is well-formed.
+     * discrepancy found on an ingested event. Tag schema intentionally
+     * parallels cycles-server-admin's {@code cycles_admin_events_payload_invalid_total}:
+     * admin uses {@code type} + {@code expected_class} (its Jackson round-trip
+     * yields a target class), we use {@code type} + {@code rule} (our
+     * rule-based validator yields a rule name).
      */
-    public void recordEventValidationWarning(String eventType, String rule) {
-        registry.counter(EVENT_VALIDATION_WARNINGS,
-                "event_type", safe(eventType),
-                "rule", safe(rule)
-        ).increment();
+    public void recordEventsPayloadInvalid(String type, String rule) {
+        // No tenant dimension on this counter — the discrepancy is about the
+        // event payload shape, not tenant-specific traffic.
+        registry.counter(EVENTS_PAYLOAD_INVALID,
+                Tags.of("type", normalise(type), "rule", normalise(rule)))
+                .increment();
     }
 
-    // --- internals ---
+    // ---- Internals ----
 
     private void recordLatency(String tenant, String eventType, String outcome, long latencyMs) {
         if (latencyMs < 0) return;
         Timer timer = Timer.builder(DELIVERY_LATENCY)
-                .tags(Tags.of(
-                        "tenant", safe(tenant),
-                        "event_type", safe(eventType),
-                        "outcome", outcome))
+                .tags(tags(tenant, "event_type", eventType, "outcome", outcome))
                 .register(registry);
         timer.record(Duration.ofMillis(latencyMs));
     }
 
-    private static String safe(String value) {
-        return (value == null || value.isBlank()) ? TAG_UNKNOWN : value;
+    /**
+     * Builds the tag list with normalisation + conditional tenant inclusion.
+     * Mirrors cycles-server's {@code CyclesMetrics#tags(String, String...)}.
+     */
+    private Tags tags(String tenant, String... kvs) {
+        List<Tag> list = new ArrayList<>((kvs.length / 2) + 1);
+        if (tenantTagEnabled) {
+            list.add(Tag.of("tenant", normalise(tenant)));
+        }
+        for (int i = 0; i + 1 < kvs.length; i += 2) {
+            list.add(Tag.of(kvs[i], normalise(kvs[i + 1])));
+        }
+        return Tags.of(list);
+    }
+
+    private static String normalise(String s) {
+        return (s == null || s.isBlank()) ? TAG_UNKNOWN : s;
     }
 
     private static String statusFamily(int status) {

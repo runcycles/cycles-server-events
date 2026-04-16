@@ -13,13 +13,26 @@ import java.util.Set;
 /**
  * Non-fatal event-payload shape validator.
  *
- * <p>Mirrors the warn+metric pattern introduced in cycles-server v0.1.25.12:
- * this validator <strong>never throws</strong>, <strong>never drops</strong> an
- * event, and <strong>never blocks delivery</strong>. It emits a WARN log line
- * and increments {@code cycles_webhook_event_validation_warnings_total} for
- * each shape discrepancy found, so operators can observe drift between the
- * producer (admin/runtime) and this dispatcher without destabilizing the
- * at-least-once delivery contract.
+ * <p>Mirrors the warn+metric pattern introduced in cycles-server-admin
+ * v0.1.25.12 (commit bc9f075, {@code EventService.validatePayloadShape}):
+ * this validator <strong>never throws</strong>, <strong>never drops</strong>
+ * an event, and <strong>never blocks delivery</strong>. It emits a WARN log
+ * line and increments {@code cycles_webhook_events_payload_invalid_total}
+ * for each shape discrepancy found, so operators can observe drift between
+ * the producer (admin/runtime) and this dispatcher without destabilising
+ * the at-least-once delivery contract.
+ *
+ * <p><b>Approach difference vs admin</b>: admin uses Jackson
+ * {@code ObjectMapper.convertValue(data, expected_class)} round-tripping
+ * against its {@code EventPayloadTypeMapping} registry of typed
+ * {@code EventDataBudgetLifecycle}/{@code EventDataTenantLifecycle}/etc.
+ * DTOs — which live in the admin-service-model module that this repo does
+ * not depend on. To avoid cross-module coupling, this validator applies
+ * hand-rolled rules keyed on the spec fields we care about in the
+ * webhook-dispatch plane. Tag schema on the metric
+ * ({@code type}, {@code rule}) intentionally parallels admin's
+ * ({@code type}, {@code expected_class}) so dashboards can pivot between
+ * the two services.
  *
  * <p>Validation rules (all informational):
  * <ol>
@@ -128,7 +141,7 @@ public class EventPayloadValidator {
     private void warn(String eventId, String eventType, String rule, String detail) {
         LOG.warn("Event payload validation warning: event_id={} event_type={} rule={} detail={}",
                 eventId, eventType, rule, detail);
-        metrics.recordEventValidationWarning(eventType, rule);
+        metrics.recordEventsPayloadInvalid(eventType, rule);
     }
 
     private static boolean isBlank(String s) {

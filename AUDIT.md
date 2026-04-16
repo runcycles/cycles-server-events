@@ -14,8 +14,8 @@
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 163 |
-| Unit tests | 160 |
+| Total tests | 167 |
+| Unit tests | 164 |
 | Integration tests | 3 (WebhookDeliveryIntegrationTest) |
 | JaCoCo minimum | 95% line coverage (enforced) |
 
@@ -27,7 +27,7 @@
 | Config | RedisConfig.java | RedisConfigTest (3) |
 | Config | EventsConfig.java | EventsConfigTest (1) |
 | Config | CryptoService.java | CryptoServiceTest (9) |
-| Metrics | CyclesMetrics.java | CyclesMetricsTest (13) |
+| Metrics | CyclesMetrics.java | CyclesMetricsTest (17) |
 | Model | Event.java | ModelTest (26 total) |
 | Model | EventType.java (41 types) | ModelTest |
 | Model | EventCategory.java | ModelTest |
@@ -146,8 +146,9 @@
 | 2026-04-08 | 0.1.25.5 | Fix: force HTTP/1.1 in WebhookTransport to prevent h2c upgrade body drop (#16) |
 | 2026-04-08 | 0.1.25.5 | Bump version to 0.1.25.5 |
 | 2026-04-16 | 0.1.25.6 | Add BUDGET_RESET_SPENT to EventType enum (admin-spec v0.1.25.18 alignment; 40→41 types) |
-| 2026-04-16 | 0.1.25.6 | Add cycles_webhook_* Micrometer domain counters + delivery_latency timer (mirrors cycles-server v0.1.25.10) |
-| 2026-04-16 | 0.1.25.6 | Add non-fatal event-payload shape validation (warn + metric; mirrors cycles-server v0.1.25.12) |
+| 2026-04-16 | 0.1.25.6 | Add cycles.webhook.* Micrometer domain counters + delivery_latency timer (mirrors cycles-server v0.1.25.10) |
+| 2026-04-16 | 0.1.25.6 | Add non-fatal event-payload shape validation (warn + metric; mirrors cycles-server-admin v0.1.25.12 commit bc9f075) |
+| 2026-04-16 | 0.1.25.6 | Parity refactor: adopt cycles-server's dotted metric names, tags() helper, tenant-tag cardinality toggle, and UNKNOWN sentinel. Rename payload-validation metric to cycles.webhook.events.payload.invalid{type, rule} for alignment with admin's cycles_admin_events_payload_invalid_total{type, expected_class} |
 | 2026-04-16 | 0.1.25.6 | Docs: note admin v0.1.25.16 dual-auth on 6 tenant webhook REST endpoints (no code change; this service reads Redis directly) |
 | 2026-04-16 | 0.1.25.6 | Docs: make README JAR run command version-agnostic (target/cycles-server-events-*.jar) |
 | 2026-04-16 | 0.1.25.6 | Bump version to 0.1.25.6 |
@@ -156,9 +157,9 @@
 
 - **Date:** 2026-04-16
 - **Version:** 0.1.25.6
-- **Build:** PASS (160 unit tests, 0 failures, 95%+ coverage)
+- **Build:** PASS (164 unit tests, 0 failures, 95%+ coverage)
 - **Integration test:** PASS (3 tests with Testcontainers Redis)
-- **Total:** 163 tests (160 unit + 3 integration)
+- **Total:** 167 tests (164 unit + 3 integration)
 
 ## Cross-Repo Spec Drift Notes (informational)
 
@@ -176,11 +177,23 @@ require code changes here, but are worth knowing:
   note so operators know this is available.
 - **admin v0.1.25.17** — cjson round-trip sweep for ApiKey/Policy/Tenant reads
   (admin-plane persistence; no effect here).
-- **server v0.1.25.12** — runtime event-payload shape validation (warn + metric).
-  Mirrored in this repo at v0.1.25.6 via `EventPayloadValidator` +
-  `cycles_webhook_event_validation_warnings_total`.
-- **server v0.1.25.10** — `cycles_*` Micrometer domain counters. Mirrored at
-  v0.1.25.6 via `CyclesMetrics` + `cycles_webhook_*` counter family.
+- **admin v0.1.25.12** — runtime event-payload shape validation (warn + metric;
+  commit bc9f075 in cycles-server-admin, `EventService.validatePayloadShape`).
+  Mirrored here at v0.1.25.6 via `EventPayloadValidator` +
+  `cycles_webhook_events_payload_invalid_total`. Approach differs: admin uses
+  Jackson `convertValue` round-trip through its typed payload DTOs
+  (`EventPayloadTypeMapping`); we apply hand-rolled rules because admin's DTOs
+  live in a module we don't depend on. Metric tag schema
+  (`type`, `rule`) parallels admin's (`type`, `expected_class`).
+- **server v0.1.25.10** — `cycles.*` Micrometer domain counters. Mirrored at
+  v0.1.25.6 via `CyclesMetrics` + `cycles.webhook.*` counter family,
+  adopting cycles-server's exact idiom: dotted source names (Prometheus
+  normalises to `_total` on scrape), `tags(String tenant, String... kvs)`
+  helper, `cycles.metrics.tenant-tag.enabled` toggle for high-cardinality
+  deployments, `UNKNOWN` sentinel for null/blank tag values. Added a Timer
+  for outbound webhook latency — deliberate deviation since cycles-server
+  relies on Spring's auto-emitted `http.server.requests` which only covers
+  inbound traffic.
 - **server / admin v0.1.25.18** — `budget.reset_spent` event type and
   `EventDataBudgetLifecycle` additions (`spent`, `reserved`, `spent_override_provided`).
   `Event.data` is `Map<String,Object>` so the new payload fields pass through

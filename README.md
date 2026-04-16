@@ -254,26 +254,30 @@ scrape_configs:
 
 ### Domain metrics (`cycles_webhook_*`, v0.1.25.6)
 
-Mirrors the naming introduced in `cycles-server` v0.1.25.10. All counters end in `_total`.
+Mirrors cycles-server's `CyclesMetrics` idiom (v0.1.25.10): source names use the dotted namespace (`cycles.webhook.*`); Micrometer's Prometheus registry rewrites them to `cycles_webhook_*_total` on scrape.
 
-| Metric | Type | Tags | Description |
-|---|---|---|---|
-| `cycles_webhook_delivery_attempts_total` | counter | tenant, event_type | Every HTTP POST to a subscriber endpoint |
-| `cycles_webhook_delivery_success_total` | counter | tenant, event_type, status_code_family | Delivery returned 2xx |
-| `cycles_webhook_delivery_failed_total` | counter | tenant, event_type, reason | Delivery failed (reason: `http_4xx`, `http_5xx`, `transport_error`, `event_not_found`, `subscription_not_found`, `subscription_inactive`) |
-| `cycles_webhook_delivery_retried_total` | counter | tenant, event_type | Delivery requeued for exponential-backoff retry |
-| `cycles_webhook_delivery_stale_total` | counter | tenant | Delivery exceeded `MAX_DELIVERY_AGE_MS` and was auto-failed without retry |
-| `cycles_webhook_subscription_auto_disabled_total` | counter | tenant, reason | Subscription flipped to `DISABLED` (reason: `consecutive_failures`) |
-| `cycles_webhook_delivery_latency_seconds` | timer | tenant, event_type, outcome | End-to-end HTTP latency; outcome = `success` or `failure` (skipped on upstream failures with no round-trip) |
-| `cycles_webhook_event_validation_warnings_total` | counter | event_type, rule | Non-fatal event-payload shape discrepancy (see "Event payload validation" below) |
+| Scrape name (Prometheus) | Source name | Type | Tags | Description |
+|---|---|---|---|---|
+| `cycles_webhook_delivery_attempts_total` | `cycles.webhook.delivery.attempts` | counter | tenant, event_type | Every HTTP POST to a subscriber endpoint |
+| `cycles_webhook_delivery_success_total` | `cycles.webhook.delivery.success` | counter | tenant, event_type, status_code_family | Delivery returned 2xx |
+| `cycles_webhook_delivery_failed_total` | `cycles.webhook.delivery.failed` | counter | tenant, event_type, reason | Delivery failed (reason: `http_4xx`, `http_5xx`, `transport_error`, `event_not_found`, `subscription_not_found`, `subscription_inactive`) |
+| `cycles_webhook_delivery_retried_total` | `cycles.webhook.delivery.retried` | counter | tenant, event_type | Delivery requeued for exponential-backoff retry |
+| `cycles_webhook_delivery_stale_total` | `cycles.webhook.delivery.stale` | counter | tenant | Delivery exceeded `MAX_DELIVERY_AGE_MS` and was auto-failed without retry |
+| `cycles_webhook_subscription_auto_disabled_total` | `cycles.webhook.subscription.auto_disabled` | counter | tenant, reason | Subscription flipped to `DISABLED` (reason: `consecutive_failures`) |
+| `cycles_webhook_delivery_latency_seconds` | `cycles.webhook.delivery.latency` | timer | tenant, event_type, outcome | End-to-end outbound HTTP latency; outcome = `success` or `failure` (skipped on upstream failures with no round-trip). Timer is an events-service-specific extension — cycles-server relies on Spring's auto-emitted `http.server.requests` for inbound latency, which doesn't apply here (we're the HTTP client). |
+| `cycles_webhook_events_payload_invalid_total` | `cycles.webhook.events.payload.invalid` | counter | type, rule | Non-fatal event-payload shape discrepancy; tag schema parallels cycles-server-admin's `cycles_admin_events_payload_invalid_total{type, expected_class}`. See "Event payload validation" below. |
 
-Null/blank `tenant` or `event_type` tags are emitted as the literal `unknown`.
+Null/blank `tenant` or `event_type` tags are normalised to the uppercase sentinel `UNKNOWN` (matches cycles-server for dashboard consistency).
+
+**Cardinality control**: set `cycles.metrics.tenant-tag.enabled=false` (default `true`) to drop the `tenant` tag from all counters/timers. Same semantics and property name as cycles-server — flip consistently across services for deployments with thousands of tenants where the per-tenant series count stresses Prometheus.
 
 ### Event payload validation (v0.1.25.6)
 
-Every event loaded from Redis is shape-checked against the admin spec before delivery. This is **non-fatal**: discrepancies emit a WARN log + `cycles_webhook_event_validation_warnings_total` metric, but delivery always proceeds (at-least-once contract preserved).
+Every event loaded from Redis is shape-checked against the admin spec before delivery. **Non-fatal**: discrepancies emit a WARN log + `cycles_webhook_events_payload_invalid_total` metric, but delivery always proceeds (at-least-once contract preserved).
 
-Rules: `missing_required` (event_id, event_type, category, timestamp, tenant_id, source), `unknown_event_type`, `category_mismatch`, `budget_data_shape` (ledger_id + `operation` enum), `reset_spent_shape` (`spent_override_provided` must be boolean). Mirrors cycles-server v0.1.25.12 runtime payload validation.
+Mirrors the warn+metric pattern from cycles-server-admin v0.1.25.12 (commit `bc9f075`, `EventService.validatePayloadShape`). Admin uses Jackson `convertValue` round-trip against its `EventPayloadTypeMapping` registry of typed payload DTOs (`EventDataBudgetLifecycle`, etc.); this service applies hand-rolled rules keyed on spec fields, because the admin's DTOs live in a module we don't depend on. The metric tag schema (`type`, `rule`) intentionally parallels admin's (`type`, `expected_class`) so dashboards can pivot between both services.
+
+Rules: `missing_required` (event_id, event_type, category, timestamp, tenant_id, source), `unknown_event_type`, `category_mismatch`, `budget_data_shape` (ledger_id + `operation` enum), `reset_spent_shape` (`spent_override_provided` must be boolean).
 
 ## Webhook Payload Example
 

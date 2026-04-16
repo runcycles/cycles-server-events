@@ -41,7 +41,7 @@ class DeliveryHandlerTest {
     @BeforeEach
     void setUp() {
         registry = new SimpleMeterRegistry();
-        metrics = new CyclesMetrics(registry);
+        metrics = new CyclesMetrics(registry, true); // tenant tag enabled
         validator = new EventPayloadValidator(metrics);
         handler = new DeliveryHandler(deliveryRepository, eventRepository,
                 subscriptionRepository, queueRepository, transport, metrics, validator, 86400000L);
@@ -669,9 +669,10 @@ class DeliveryHandlerTest {
 
         // Delivery still succeeded (validation never blocks)
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
-        // Validator warning fired
-        assertThat(counter(CyclesMetrics.EVENT_VALIDATION_WARNINGS,
-                "event_type", "tenant.created", "rule", "missing_required")).isEqualTo(1.0);
+        // Validator warning fired — parallel tag schema to cycles-server-admin's
+        // cycles_admin_events_payload_invalid_total{type, expected_class}
+        assertThat(counter(CyclesMetrics.EVENTS_PAYLOAD_INVALID,
+                "type", "tenant.created", "rule", "missing_required")).isEqualTo(1.0);
     }
 
     @Test
