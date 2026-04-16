@@ -1,4 +1,17 @@
-# AUDIT.md - cycles-server-events
+# Cycles Protocol v0.1.25 — Events Server Implementation Audit
+
+**Date:** 2026-04-16 (v0.1.25.6 — admin-spec v0.1.25.18 alignment: add `BUDGET_RESET_SPENT`; add `cycles_webhook_*` Micrometer counters + latency timer mirroring `cycles-server` v0.1.25.10; add non-fatal `EventPayloadValidator` mirroring `cycles-server-admin` v0.1.25.12; parity refactor adopting dotted metric names, `tags(...)` helper, tenant-tag toggle, `UNKNOWN` sentinel; add `CHANGELOG.md` + `OPERATIONS.md` for doc parity), 2026-04-08 (v0.1.25.5 — force HTTP/1.1 outbound transport to fix h2c body drop, #16), 2026-04-07 (v0.1.25.4 — partial subscription update to avoid overwriting admin config), 2026-04-03 (v0.1.25.3 — Prometheus registry dependency; typed `DeliveryStatus`/`WebhookStatus` enums), 2026-04-01 (v0.1.25.1 initial implementation — dispatch loop, delivery handler, retry scheduler, AES-256-GCM secret encryption, TTL-based retention, E2E integration test).
+
+**Spec:** `cycles-governance-admin-v0.1.25.yaml` (OpenAPI 3.1.0, v0.1.25.18) — authoritative source at `cycles-protocol` repo; served from `cycles-server-admin`.
+
+**Service:** Spring Boot 3.5.11 / Java 21 / Jedis 5.2.0 / Micrometer Prometheus registry. Redis-driven webhook dispatcher (no inbound API surface of its own).
+
+**Downstream docs:**
+- [`CHANGELOG.md`](CHANGELOG.md) — release notes for consumers (Keep-a-Changelog format)
+- [`OPERATIONS.md`](OPERATIONS.md) — operator runbook (metrics, alerts, SLOs, incident playbook)
+- [`README.md`](README.md) — quickstart, architecture, configuration
+
+---
 
 ## Service Overview
 
