@@ -13,6 +13,7 @@ import io.runcycles.events.repository.EventRepository;
 import io.runcycles.events.repository.SubscriptionRepository;
 import io.runcycles.events.transport.Transport;
 import io.runcycles.events.transport.TransportResult;
+import io.runcycles.events.validation.EventPayloadValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -40,12 +41,14 @@ public class DeliveryHandler {
     private final DeliveryQueueRepository queueRepository;
     private final Transport transport;
     private final CyclesMetrics metrics;
+    private final EventPayloadValidator validator;
     private final long maxDeliveryAgeMs;
 
     public DeliveryHandler(DeliveryRepository deliveryRepository, EventRepository eventRepository,
                            SubscriptionRepository subscriptionRepository, DeliveryQueueRepository queueRepository,
                            Transport transport,
                            CyclesMetrics metrics,
+                           EventPayloadValidator validator,
                            @Value("${dispatch.max-delivery-age-ms:86400000}") long maxDeliveryAgeMs) {
         this.deliveryRepository = deliveryRepository;
         this.eventRepository = eventRepository;
@@ -53,6 +56,7 @@ public class DeliveryHandler {
         this.queueRepository = queueRepository;
         this.transport = transport;
         this.metrics = metrics;
+        this.validator = validator;
         this.maxDeliveryAgeMs = maxDeliveryAgeMs;
     }
 
@@ -88,6 +92,9 @@ public class DeliveryHandler {
             markFailed(delivery, "Event not found: " + delivery.getEventId());
             return;
         }
+
+        // Non-fatal shape check (warn + metric, never blocks delivery)
+        validator.validate(event);
 
         Subscription sub = subscriptionRepository.findById(delivery.getSubscriptionId());
         if (sub == null) {

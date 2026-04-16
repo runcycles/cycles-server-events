@@ -9,6 +9,7 @@ import io.runcycles.events.repository.EventRepository;
 import io.runcycles.events.repository.SubscriptionRepository;
 import io.runcycles.events.transport.Transport;
 import io.runcycles.events.transport.TransportResult;
+import io.runcycles.events.validation.EventPayloadValidator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -34,14 +35,16 @@ class DeliveryHandlerTest {
 
     private SimpleMeterRegistry registry;
     private CyclesMetrics metrics;
+    private EventPayloadValidator validator;
     private DeliveryHandler handler;
 
     @BeforeEach
     void setUp() {
         registry = new SimpleMeterRegistry();
         metrics = new CyclesMetrics(registry);
+        validator = new EventPayloadValidator(metrics);
         handler = new DeliveryHandler(deliveryRepository, eventRepository,
-                subscriptionRepository, queueRepository, transport, metrics, 86400000L);
+                subscriptionRepository, queueRepository, transport, metrics, validator, 86400000L);
     }
 
     private double counter(String name, String... tags) {
@@ -643,6 +646,32 @@ class DeliveryHandlerTest {
 
         assertThat(counter(CyclesMetrics.SUBSCRIPTION_AUTO_DISABLED,
                 "tenant", "t-1", "reason", "consecutive_failures")).isEqualTo(1.0);
+    }
+
+    @Test
+    void validator_warningOnMalformedEvent_doesNotBlockDelivery() {
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        // Malformed event: missing required tenant_id + source
+        Event malformed = Event.builder()
+                .eventId("evt-1")
+                .eventType("tenant.created")
+                .category(EventCategory.TENANT)
+                .timestamp(Instant.now())
+                .build();
+        when(eventRepository.findById("evt-1")).thenReturn(malformed);
+        Subscription sub = activeSubscription();
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any())).thenReturn(successResult());
+
+        handler.handle("del-1");
+
+        // Delivery still succeeded (validation never blocks)
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
+        // Validator warning fired
+        assertThat(counter(CyclesMetrics.EVENT_VALIDATION_WARNINGS,
+                "event_type", "tenant.created", "rule", "missing_required")).isEqualTo(1.0);
     }
 
     @Test
