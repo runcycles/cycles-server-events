@@ -58,7 +58,7 @@ Services: Redis (6379), Admin (7979), Runtime Server (7878), Events (7980)
 ### Standalone (requires existing Redis)
 
 ```bash
-REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.25.5.jar
+REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 ```
 
 ## Configuration
@@ -133,7 +133,7 @@ def verify(body: bytes, secret: str, signature: str) -> bool:
 | `X-Cycles-Signature` | `sha256=<hex>` | HMAC-SHA256 of body (if signing secret configured) |
 | `X-Cycles-Event-Id` | `evt_abc123...` | For deduplication (at-least-once delivery) |
 | `X-Cycles-Event-Type` | `budget.exhausted` | Event type for routing |
-| `User-Agent` | `cycles-server-events/0.1.25.5` | Service identifier |
+| `User-Agent` | `cycles-server-events/0.1.25.6` | Service identifier |
 | Custom headers | Per subscription | From `WebhookSubscription.headers` map |
 
 ## Retry Policy
@@ -200,16 +200,26 @@ If `cycles-server-events` is not running or not deployed:
    - RetentionCleanupService trims orphaned ZSET index entries hourly
 5. **No data loss for events** — event records persist in Redis for 90 days regardless of delivery status
 
-## Event Types (40)
+### Admin dual-auth on tenant webhook endpoints (informational)
+
+As of admin-spec v0.1.25.16, six tenant-scoped webhook REST endpoints on `cycles-server-admin` accept both `ApiKeyAuth` and `AdminKeyAuth`:
+`GET /v1/webhooks`, `GET/PATCH/DELETE /v1/webhooks/{id}`, `POST /v1/webhooks/{id}/test`, `GET /v1/webhooks/{id}/deliveries`.
+Admin-initiated updates record `actor_type=admin_on_behalf_of` in audit metadata (vs `api_key` for tenant-initiated).
+
+**No functional impact on this service** — `cycles-server-events` reads subscriptions from Redis directly and does not call those admin HTTP endpoints. Noted here for observability and ops awareness.
+
+## Event Types (41)
 
 | Category | Count | Types |
 |----------|-------|-------|
-| `budget` | 15 | created, updated, funded, debited, reset, debt_repaid, frozen, unfrozen, closed, threshold_crossed, exhausted, over_limit_entered, over_limit_exited, debt_incurred, burn_rate_anomaly |
+| `budget` | 16 | created, updated, funded, debited, reset, **reset_spent**, debt_repaid, frozen, unfrozen, closed, threshold_crossed, exhausted, over_limit_entered, over_limit_exited, debt_incurred, burn_rate_anomaly |
 | `reservation` | 5 | denied, denial_rate_spike, expired, expiry_rate_spike, commit_overage |
 | `tenant` | 6 | created, updated, suspended, reactivated, closed, settings_changed |
 | `api_key` | 6 | created, revoked, expired, permissions_changed, auth_failed, auth_failure_rate_spike |
 | `policy` | 3 | created, updated, deleted |
 | `system` | 5 | store_connection_lost, store_connection_restored, high_latency, webhook_delivery_failed, webhook_test |
+
+`budget.reset_spent` (v0.1.25.6, admin-spec v0.1.25.18) is emitted for billing-period rollovers and is distinct from `budget.reset` (which is a ceiling resize that preserves spent). Consumers can route these separately. The payload's `spent_override_provided` flag indicates whether `spent` was explicitly supplied (migration / proration / correction) vs defaulted to 0 (routine rollover).
 
 ## Transport Layer
 
@@ -242,6 +252,10 @@ scrape_configs:
       - targets: ['localhost:7980']
 ```
 
+In addition to Spring Boot's auto-emitted `http_server_requests_seconds` (which covers the actuator endpoints, not the outbound webhook traffic), this service exposes eight domain-level meters under the `cycles_webhook_*` namespace — seven counters plus one latency timer. Operators can alert on fleet-wide failure rates, stale-delivery backlogs, subscription auto-disables, and payload-validator warnings without grepping logs.
+
+Full metric inventory, tag semantics, ready-to-paste Prometheus alert rules, SLO definitions, dashboard queries, and an incident playbook live in [`OPERATIONS.md`](OPERATIONS.md).
+
 ## Webhook Payload Example
 
 The webhook POST body is the full event JSON. Null fields are omitted.
@@ -271,15 +285,24 @@ The webhook POST body is the full event JSON. Null fields are omitted.
 ## Build & Test
 
 ```bash
-# Build and run unit tests (117 tests, 95%+ coverage)
+# Build and run unit tests (165 unit tests, 95%+ line coverage enforced by JaCoCo)
 mvn verify
 
 # Run all tests including integration (requires Docker for Testcontainers Redis)
 mvn verify -Pintegration-tests
 
 # Run
-REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.25.5.jar
+REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 ```
+
+## Documentation
+
+- [`CHANGELOG.md`](CHANGELOG.md) — release notes for downstream consumers (Docker / JAR / operators)
+- [`OPERATIONS.md`](OPERATIONS.md) — operator runbook: metrics inventory, alert recipes, SLOs, incident playbook
+- [`AUDIT.md`](AUDIT.md) — engineering history, audit posture, and cross-repo drift notes
+- Sibling services (same conventions, dashboards carry over):
+  - [`cycles-server`](https://github.com/runcycles/cycles-server) — runtime reservation + budget authority
+  - [`cycles-server-admin`](https://github.com/runcycles/cycles-server-admin) — admin plane (tenants, budgets, webhooks, API keys)
 
 ## License
 

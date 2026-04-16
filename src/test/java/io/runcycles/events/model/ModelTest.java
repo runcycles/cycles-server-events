@@ -254,9 +254,10 @@ class ModelTest {
     @Test
     void eventType_allValues() {
         EventType[] values = EventType.values();
-        assertThat(values.length).isEqualTo(40);
+        assertThat(values.length).isEqualTo(41);
         // Spot-check a few
         assertThat(EventType.valueOf("BUDGET_CREATED")).isNotNull();
+        assertThat(EventType.valueOf("BUDGET_RESET_SPENT")).isNotNull();
         assertThat(EventType.valueOf("TENANT_CREATED")).isNotNull();
         assertThat(EventType.valueOf("API_KEY_CREATED")).isNotNull();
         assertThat(EventType.valueOf("SYSTEM_HIGH_LATENCY")).isNotNull();
@@ -265,10 +266,21 @@ class ModelTest {
     @Test
     void eventType_fromValue() {
         assertThat(EventType.fromValue("budget.created")).isEqualTo(EventType.BUDGET_CREATED);
+        assertThat(EventType.fromValue("budget.reset_spent")).isEqualTo(EventType.BUDGET_RESET_SPENT);
         assertThat(EventType.fromValue("tenant.created")).isEqualTo(EventType.TENANT_CREATED);
         assertThat(EventType.fromValue("system.high_latency")).isEqualTo(EventType.SYSTEM_HIGH_LATENCY);
         assertThatThrownBy(() -> EventType.fromValue("nonexistent"))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void eventType_budgetResetSpent_specAlignment() {
+        // v0.1.25.18 admin-spec alignment: new event type distinct from budget.reset.
+        // See cycles-governance-admin-v0.1.25.yaml line 1835.
+        assertThat(EventType.BUDGET_RESET_SPENT.getValue()).isEqualTo("budget.reset_spent");
+        assertThat(EventType.BUDGET_RESET_SPENT.getCategory()).isEqualTo(EventCategory.BUDGET);
+        assertThat(EventType.BUDGET_RESET_SPENT.isTenantAccessible()).isTrue();
+        assertThat(EventType.BUDGET_RESET_SPENT).isNotEqualTo(EventType.BUDGET_RESET);
     }
 
     @Test

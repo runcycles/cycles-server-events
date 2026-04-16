@@ -1,5 +1,6 @@
 package io.runcycles.events.service;
 
+import io.runcycles.events.metrics.CyclesMetrics;
 import io.runcycles.events.model.Delivery;
 import io.runcycles.events.model.DeliveryStatus;
 import io.runcycles.events.model.Event;
@@ -12,6 +13,7 @@ import io.runcycles.events.repository.EventRepository;
 import io.runcycles.events.repository.SubscriptionRepository;
 import io.runcycles.events.transport.Transport;
 import io.runcycles.events.transport.TransportResult;
+import io.runcycles.events.validation.EventPayloadValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -24,22 +26,37 @@ public class DeliveryHandler {
 
     private static final Logger LOG = LoggerFactory.getLogger(DeliveryHandler.class);
 
+    // Failure reason codes for cycles_webhook_delivery_failed_total
+    static final String REASON_EVENT_NOT_FOUND = "event_not_found";
+    static final String REASON_SUBSCRIPTION_NOT_FOUND = "subscription_not_found";
+    static final String REASON_SUBSCRIPTION_INACTIVE = "subscription_inactive";
+    static final String REASON_HTTP_4XX = "http_4xx";
+    static final String REASON_HTTP_5XX = "http_5xx";
+    static final String REASON_TRANSPORT_ERROR = "transport_error";
+    static final String REASON_CONSECUTIVE_FAILURES = "consecutive_failures";
+
     private final DeliveryRepository deliveryRepository;
     private final EventRepository eventRepository;
     private final SubscriptionRepository subscriptionRepository;
     private final DeliveryQueueRepository queueRepository;
     private final Transport transport;
+    private final CyclesMetrics metrics;
+    private final EventPayloadValidator validator;
     private final long maxDeliveryAgeMs;
 
     public DeliveryHandler(DeliveryRepository deliveryRepository, EventRepository eventRepository,
                            SubscriptionRepository subscriptionRepository, DeliveryQueueRepository queueRepository,
                            Transport transport,
+                           CyclesMetrics metrics,
+                           EventPayloadValidator validator,
                            @Value("${dispatch.max-delivery-age-ms:86400000}") long maxDeliveryAgeMs) {
         this.deliveryRepository = deliveryRepository;
         this.eventRepository = eventRepository;
         this.subscriptionRepository = subscriptionRepository;
         this.queueRepository = queueRepository;
         this.transport = transport;
+        this.metrics = metrics;
+        this.validator = validator;
         this.maxDeliveryAgeMs = maxDeliveryAgeMs;
     }
 
@@ -64,22 +81,29 @@ public class DeliveryHandler {
         }
         long ageMs = System.currentTimeMillis() - attemptedAt.toEpochMilli();
         if (ageMs > maxDeliveryAgeMs) {
+            metrics.recordDeliveryStale(null); // tenant unknown — subscription not yet loaded
             markFailed(delivery, "Delivery expired: " + (ageMs / 3600000) + "h old (max " + (maxDeliveryAgeMs / 3600000) + "h)");
             return;
         }
 
         Event event = eventRepository.findById(delivery.getEventId());
         if (event == null) {
+            metrics.recordDeliveryFailure(null, delivery.getEventType(), REASON_EVENT_NOT_FOUND, 0);
             markFailed(delivery, "Event not found: " + delivery.getEventId());
             return;
         }
 
+        // Non-fatal shape check (warn + metric, never blocks delivery)
+        validator.validate(event);
+
         Subscription sub = subscriptionRepository.findById(delivery.getSubscriptionId());
         if (sub == null) {
+            metrics.recordDeliveryFailure(null, delivery.getEventType(), REASON_SUBSCRIPTION_NOT_FOUND, 0);
             markFailed(delivery, "Subscription not found");
             return;
         }
         if (sub.getStatus() != WebhookStatus.ACTIVE) {
+            metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(), REASON_SUBSCRIPTION_INACTIVE, 0);
             markFailed(delivery, "Subscription not active: " + sub.getStatus());
             return;
         }
@@ -87,6 +111,7 @@ public class DeliveryHandler {
         String secret = subscriptionRepository.getSigningSecret(delivery.getSubscriptionId());
 
         delivery.setAttempts(delivery.getAttempts() != null ? delivery.getAttempts() + 1 : 1);
+        metrics.recordDeliveryAttempt(sub.getTenantId(), delivery.getEventType());
         TransportResult result = transport.deliver(event, sub, secret);
 
         if (result.isSuccess()) {
@@ -107,12 +132,18 @@ public class DeliveryHandler {
         subscriptionRepository.updateDeliveryState(
                 sub.getSubscriptionId(), 0, now, now, null, null);
 
+        metrics.recordDeliverySuccess(sub.getTenantId(), delivery.getEventType(),
+                result.getStatusCode(), result.getLatencyMs());
+
         LOG.info("Delivery {} succeeded (HTTP {})", delivery.getDeliveryId(), result.getStatusCode());
     }
 
     private void handleFailure(Delivery delivery, Subscription sub, TransportResult result) {
         RetryPolicy policy = sub.getRetryPolicy() != null ? sub.getRetryPolicy() : RetryPolicy.builder().build();
         int maxRetries = policy.getMaxRetries() != null ? policy.getMaxRetries() : 5;
+
+        String reason = failureReason(result.getStatusCode());
+        metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(), reason, result.getLatencyMs());
 
         if (delivery.getAttempts() > maxRetries) {
             markFailed(delivery, result.getErrorMessage());
@@ -135,6 +166,8 @@ public class DeliveryHandler {
         deliveryRepository.update(delivery);
         queueRepository.scheduleRetry(delivery.getDeliveryId(), nextRetryAt);
 
+        metrics.recordDeliveryRetried(sub.getTenantId(), delivery.getEventType());
+
         LOG.info("Delivery {} failed (attempt {}/{}), retry at {}",
                 delivery.getDeliveryId(), delivery.getAttempts(), maxRetries, delivery.getNextRetryAt());
     }
@@ -153,6 +186,7 @@ public class DeliveryHandler {
         WebhookStatus newStatus = null;
         if (failures >= disableAfter) {
             newStatus = WebhookStatus.DISABLED;
+            metrics.recordSubscriptionAutoDisabled(sub.getTenantId(), REASON_CONSECUTIVE_FAILURES);
             LOG.warn("Subscription {} auto-disabled after {} consecutive failures",
                     sub.getSubscriptionId(), failures);
         }
@@ -160,5 +194,11 @@ public class DeliveryHandler {
         Instant now = Instant.now();
         subscriptionRepository.updateDeliveryState(
                 sub.getSubscriptionId(), failures, now, null, now, newStatus);
+    }
+
+    private static String failureReason(int statusCode) {
+        if (statusCode >= 400 && statusCode < 500) return REASON_HTTP_4XX;
+        if (statusCode >= 500 && statusCode < 600) return REASON_HTTP_5XX;
+        return REASON_TRANSPORT_ERROR;
     }
 }

@@ -32,7 +32,7 @@ REDIS_HOST=localhost REDIS_PORT=6379 REDIS_PASSWORD="" \
 
 Uses Maven CI-friendly `${revision}` property. Version is set **once** in `pom.xml`:
 ```xml
-<revision>0.1.25.5</revision>
+<revision>0.1.25.6</revision>
 ```
 The `flatten-maven-plugin` resolves `${revision}` at build time.
 
@@ -44,4 +44,6 @@ If empty/unset, signing secrets are stored and read as plaintext (backward compa
 
 ## Test Coverage
 
-117 tests (114 unit + 3 integration), 95%+ line coverage enforced via JaCoCo.
+168 tests (165 unit + 3 integration), 95%+ line coverage enforced via JaCoCo.
+
+See [`AUDIT.md`](AUDIT.md) for the full source-file → test-class inventory.
