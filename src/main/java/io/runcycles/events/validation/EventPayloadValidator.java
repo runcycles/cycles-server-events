@@ -2,6 +2,7 @@ package io.runcycles.events.validation;
 
 import io.runcycles.events.metrics.CyclesMetrics;
 import io.runcycles.events.model.Event;
+import io.runcycles.events.model.EventCategory;
 import io.runcycles.events.model.EventType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -112,8 +113,7 @@ public class EventPayloadValidator {
         }
 
         // Rule 4 + 5: BUDGET-category data shape
-        if (resolved != null && resolved.getCategory() != null
-                && "BUDGET".equals(resolved.getCategory().name())) {
+        if (resolved != null && resolved.getCategory() == EventCategory.BUDGET) {
             Map<String, Object> data = event.getData();
             if (data != null) {
                 if (!(data.get("ledger_id") instanceof String s) || s.isBlank()) {
@@ -139,12 +139,21 @@ public class EventPayloadValidator {
     }
 
     private void warn(String eventId, String eventType, String rule, String detail) {
+        // Sanitise producer-supplied strings before logging: strip CR/LF so a
+        // malicious or malformed event_type/event_id can't inject fake log
+        // lines. Same mitigation cycles-server-admin applied in v0.1.25.8
+        // (commit ad77546, "log injection + comments").
         LOG.warn("Event payload validation warning: event_id={} event_type={} rule={} detail={}",
-                eventId, eventType, rule, detail);
+                stripCrLf(eventId), stripCrLf(eventType), rule, detail);
         metrics.recordEventsPayloadInvalid(eventType, rule);
     }
 
     private static boolean isBlank(String s) {
         return s == null || s.isBlank();
+    }
+
+    private static String stripCrLf(String s) {
+        if (s == null) return null;
+        return s.replace('\r', '_').replace('\n', '_');
     }
 }

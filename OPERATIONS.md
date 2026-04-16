@@ -118,19 +118,30 @@ Per-subscriber failures are expected — subscriber endpoints have their own
 uptime problems. What you care about is *sustained* failure rates across
 the whole fleet.
 
+**Denominator note**: `cycles_webhook_delivery_attempts_total` increments
+only when an actual HTTP POST is about to be issued (i.e., after upstream
+resolution succeeds). Upstream-layer failures (`reason=event_not_found`,
+`subscription_not_found`, `subscription_inactive`) still increment
+`cycles_webhook_delivery_failed_total` but do **not** increment `attempts`,
+so a naive `failed/attempts` ratio overstates the HTTP-layer problem when
+upstream failures dominate. The recipe below restricts the numerator to
+transport-layer reasons to make the ratio meaningful; pair it with a
+separate alert on upstream failures (next block).
+
 ```yaml
 - alert: CyclesWebhookDeliveryFailureRateHigh
-  # >20% of delivery attempts failing over 15 minutes = something systemic.
-  # Ignore the per-tenant noise; this is the fleet-wide signal.
+  # >20% of *HTTP* delivery attempts failing over 15 minutes = something
+  # systemic at the transport layer (DNS, TLS, outbound egress, or
+  # widespread subscriber 5xx).
   expr: |
-    sum(rate(cycles_webhook_delivery_failed_total[15m]))
+    sum(rate(cycles_webhook_delivery_failed_total{reason=~"http_4xx|http_5xx|transport_error"}[15m]))
       / sum(rate(cycles_webhook_delivery_attempts_total[15m]))
     > 0.20
   for: 15m
   labels: {severity: ticket}
   annotations:
-    summary: "fleet-wide webhook delivery failure rate > 20%"
-    description: "Check Redis, outbound DNS, and the reason breakdown:
+    summary: "fleet-wide webhook HTTP-layer failure rate > 20%"
+    description: "Check Redis, outbound DNS, and the full reason breakdown:
                   sum by (reason) (rate(cycles_webhook_delivery_failed_total[15m]))"
 ```
 

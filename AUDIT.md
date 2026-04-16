@@ -27,8 +27,8 @@
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 167 |
-| Unit tests | 164 |
+| Total tests | 168 |
+| Unit tests | 165 |
 | Integration tests | 3 (WebhookDeliveryIntegrationTest) |
 | JaCoCo minimum | 95% line coverage (enforced) |
 
@@ -61,7 +61,7 @@
 | Transport | TransportResult.java | ModelTest |
 | Transport | PayloadSigner.java | PayloadSignerTest (5) |
 | Transport | WebhookTransport.java | WebhookTransportTest (12) |
-| Validation | EventPayloadValidator.java | EventPayloadValidatorTest (19) |
+| Validation | EventPayloadValidator.java | EventPayloadValidatorTest (20) |
 | Integration | - | WebhookDeliveryIntegrationTest (3) |
 
 *Note: Surefire excludes \*IntegrationTest by default. `mvn verify` runs unit tests only; `mvn verify -Pintegration-tests` includes integration (removes exclusion).*
@@ -170,9 +170,9 @@
 
 - **Date:** 2026-04-16
 - **Version:** 0.1.25.6
-- **Build:** PASS (164 unit tests, 0 failures, 95%+ coverage)
+- **Build:** PASS (165 unit tests, 0 failures, 95%+ coverage)
 - **Integration test:** PASS (3 tests with Testcontainers Redis)
-- **Total:** 167 tests (164 unit + 3 integration)
+- **Total:** 168 tests (165 unit + 3 integration)
 
 ## Cross-Repo Spec Drift Notes (informational)
 
