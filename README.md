@@ -58,7 +58,7 @@ Services: Redis (6379), Admin (7979), Runtime Server (7878), Events (7980)
 ### Standalone (requires existing Redis)
 
 ```bash
-REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.25.5.jar
+REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 ```
 
 ## Configuration
@@ -133,7 +133,7 @@ def verify(body: bytes, secret: str, signature: str) -> bool:
 | `X-Cycles-Signature` | `sha256=<hex>` | HMAC-SHA256 of body (if signing secret configured) |
 | `X-Cycles-Event-Id` | `evt_abc123...` | For deduplication (at-least-once delivery) |
 | `X-Cycles-Event-Type` | `budget.exhausted` | Event type for routing |
-| `User-Agent` | `cycles-server-events/0.1.25.5` | Service identifier |
+| `User-Agent` | `cycles-server-events/0.1.25.6` | Service identifier |
 | Custom headers | Per subscription | From `WebhookSubscription.headers` map |
 
 ## Retry Policy
@@ -200,16 +200,26 @@ If `cycles-server-events` is not running or not deployed:
    - RetentionCleanupService trims orphaned ZSET index entries hourly
 5. **No data loss for events** — event records persist in Redis for 90 days regardless of delivery status
 
-## Event Types (40)
+### Admin dual-auth on tenant webhook endpoints (informational)
+
+As of admin-spec v0.1.25.16, six tenant-scoped webhook REST endpoints on `cycles-server-admin` accept both `ApiKeyAuth` and `AdminKeyAuth`:
+`GET /v1/webhooks`, `GET/PATCH/DELETE /v1/webhooks/{id}`, `POST /v1/webhooks/{id}/test`, `GET /v1/webhooks/{id}/deliveries`.
+Admin-initiated updates record `actor_type=admin_on_behalf_of` in audit metadata (vs `api_key` for tenant-initiated).
+
+**No functional impact on this service** — `cycles-server-events` reads subscriptions from Redis directly and does not call those admin HTTP endpoints. Noted here for observability and ops awareness.
+
+## Event Types (41)
 
 | Category | Count | Types |
 |----------|-------|-------|
-| `budget` | 15 | created, updated, funded, debited, reset, debt_repaid, frozen, unfrozen, closed, threshold_crossed, exhausted, over_limit_entered, over_limit_exited, debt_incurred, burn_rate_anomaly |
+| `budget` | 16 | created, updated, funded, debited, reset, **reset_spent**, debt_repaid, frozen, unfrozen, closed, threshold_crossed, exhausted, over_limit_entered, over_limit_exited, debt_incurred, burn_rate_anomaly |
 | `reservation` | 5 | denied, denial_rate_spike, expired, expiry_rate_spike, commit_overage |
 | `tenant` | 6 | created, updated, suspended, reactivated, closed, settings_changed |
 | `api_key` | 6 | created, revoked, expired, permissions_changed, auth_failed, auth_failure_rate_spike |
 | `policy` | 3 | created, updated, deleted |
 | `system` | 5 | store_connection_lost, store_connection_restored, high_latency, webhook_delivery_failed, webhook_test |
+
+`budget.reset_spent` (v0.1.25.6, admin-spec v0.1.25.18) is emitted for billing-period rollovers and is distinct from `budget.reset` (which is a ceiling resize that preserves spent). Consumers can route these separately. The payload's `spent_override_provided` flag indicates whether `spent` was explicitly supplied (migration / proration / correction) vs defaulted to 0 (routine rollover).
 
 ## Transport Layer
 
@@ -241,6 +251,29 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:7980']
 ```
+
+### Domain metrics (`cycles_webhook_*`, v0.1.25.6)
+
+Mirrors the naming introduced in `cycles-server` v0.1.25.10. All counters end in `_total`.
+
+| Metric | Type | Tags | Description |
+|---|---|---|---|
+| `cycles_webhook_delivery_attempts_total` | counter | tenant, event_type | Every HTTP POST to a subscriber endpoint |
+| `cycles_webhook_delivery_success_total` | counter | tenant, event_type, status_code_family | Delivery returned 2xx |
+| `cycles_webhook_delivery_failed_total` | counter | tenant, event_type, reason | Delivery failed (reason: `http_4xx`, `http_5xx`, `transport_error`, `event_not_found`, `subscription_not_found`, `subscription_inactive`) |
+| `cycles_webhook_delivery_retried_total` | counter | tenant, event_type | Delivery requeued for exponential-backoff retry |
+| `cycles_webhook_delivery_stale_total` | counter | tenant | Delivery exceeded `MAX_DELIVERY_AGE_MS` and was auto-failed without retry |
+| `cycles_webhook_subscription_auto_disabled_total` | counter | tenant, reason | Subscription flipped to `DISABLED` (reason: `consecutive_failures`) |
+| `cycles_webhook_delivery_latency_seconds` | timer | tenant, event_type, outcome | End-to-end HTTP latency; outcome = `success` or `failure` (skipped on upstream failures with no round-trip) |
+| `cycles_webhook_event_validation_warnings_total` | counter | event_type, rule | Non-fatal event-payload shape discrepancy (see "Event payload validation" below) |
+
+Null/blank `tenant` or `event_type` tags are emitted as the literal `unknown`.
+
+### Event payload validation (v0.1.25.6)
+
+Every event loaded from Redis is shape-checked against the admin spec before delivery. This is **non-fatal**: discrepancies emit a WARN log + `cycles_webhook_event_validation_warnings_total` metric, but delivery always proceeds (at-least-once contract preserved).
+
+Rules: `missing_required` (event_id, event_type, category, timestamp, tenant_id, source), `unknown_event_type`, `category_mismatch`, `budget_data_shape` (ledger_id + `operation` enum), `reset_spent_shape` (`spent_override_provided` must be boolean). Mirrors cycles-server v0.1.25.12 runtime payload validation.
 
 ## Webhook Payload Example
 
@@ -278,7 +311,7 @@ mvn verify
 mvn verify -Pintegration-tests
 
 # Run
-REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-0.1.25.5.jar
+REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 ```
 
 ## License

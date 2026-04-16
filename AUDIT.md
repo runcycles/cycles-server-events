@@ -5,7 +5,7 @@
 | Field | Value |
 |-------|-------|
 | Service | cycles-server-events |
-| Version | 0.1.25.5 |
+| Version | 0.1.25.6 |
 | Java | 21 |
 | Spring Boot | 3.5.11 |
 | Spec Authority | [complete-budget-governance-v0.1.25.yaml](https://github.com/runcycles/cycles-server-admin/blob/main/complete-budget-governance-v0.1.25.yaml) |
@@ -14,13 +14,12 @@
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 119 |
-| Unit tests | 116 |
+| Total tests | 163 |
+| Unit tests | 160 |
 | Integration tests | 3 (WebhookDeliveryIntegrationTest) |
 | JaCoCo minimum | 95% line coverage (enforced) |
-| Test-to-source ratio | 1.73:1 |
 
-## Source File Inventory (19 classes)
+## Source File Inventory (21 classes)
 
 | Layer | File | Tests |
 |-------|------|-------|
@@ -28,8 +27,9 @@
 | Config | RedisConfig.java | RedisConfigTest (3) |
 | Config | EventsConfig.java | EventsConfigTest (1) |
 | Config | CryptoService.java | CryptoServiceTest (9) |
-| Model | Event.java | ModelTest (25 total) |
-| Model | EventType.java (40 types) | ModelTest |
+| Metrics | CyclesMetrics.java | CyclesMetricsTest (13) |
+| Model | Event.java | ModelTest (26 total) |
+| Model | EventType.java (41 types) | ModelTest |
 | Model | EventCategory.java | ModelTest |
 | Model | Actor.java, ActorType.java | ModelTest |
 | Model | Delivery.java, DeliveryStatus.java | ModelTest |
@@ -40,7 +40,7 @@
 | Repository | DeliveryRepository.java | DeliveryRepositoryTest (6) |
 | Repository | SubscriptionRepository.java | SubscriptionRepositoryTest (11) |
 | Repository | DeliveryQueueRepository.java | DeliveryQueueRepositoryTest (8) |
-| Service | DeliveryHandler.java | DeliveryHandlerTest (22) |
+| Service | DeliveryHandler.java | DeliveryHandlerTest (33) |
 | Service | DispatchLoop.java | DispatchLoopTest (4) |
 | Service | RetryScheduler.java | RetrySchedulerTest (3) |
 | Service | RetentionCleanupService.java | RetentionCleanupServiceTest (3) |
@@ -48,9 +48,10 @@
 | Transport | TransportResult.java | ModelTest |
 | Transport | PayloadSigner.java | PayloadSignerTest (5) |
 | Transport | WebhookTransport.java | WebhookTransportTest (12) |
+| Validation | EventPayloadValidator.java | EventPayloadValidatorTest (19) |
 | Integration | - | WebhookDeliveryIntegrationTest (3) |
 
-*Note: Surefire excludes \*IntegrationTest by default. `mvn verify` runs 114 unit tests; `mvn verify -Pintegration-tests` runs all 117 (removes exclusion).*
+*Note: Surefire excludes \*IntegrationTest by default. `mvn verify` runs unit tests only; `mvn verify -Pintegration-tests` includes integration (removes exclusion).*
 
 ## Security Audit
 
@@ -116,7 +117,7 @@
 
 | Requirement | Status |
 |-------------|--------|
-| 40 event types across 6 categories | PASS |
+| 41 event types across 6 categories (v0.1.25.18 incl. budget.reset_spent) | PASS |
 | Enum serialization (lowercase) | PASS - ActorType, EventCategory, EventType |
 | Status fields use enums | PASS - DeliveryStatus, WebhookStatus (not string literals) |
 | Subscription model fields | PASS - all spec fields present |
@@ -144,11 +145,44 @@
 | 2026-04-07 | 0.1.25.4 | Bump version to 0.1.25.4 |
 | 2026-04-08 | 0.1.25.5 | Fix: force HTTP/1.1 in WebhookTransport to prevent h2c upgrade body drop (#16) |
 | 2026-04-08 | 0.1.25.5 | Bump version to 0.1.25.5 |
+| 2026-04-16 | 0.1.25.6 | Add BUDGET_RESET_SPENT to EventType enum (admin-spec v0.1.25.18 alignment; 40→41 types) |
+| 2026-04-16 | 0.1.25.6 | Add cycles_webhook_* Micrometer domain counters + delivery_latency timer (mirrors cycles-server v0.1.25.10) |
+| 2026-04-16 | 0.1.25.6 | Add non-fatal event-payload shape validation (warn + metric; mirrors cycles-server v0.1.25.12) |
+| 2026-04-16 | 0.1.25.6 | Docs: note admin v0.1.25.16 dual-auth on 6 tenant webhook REST endpoints (no code change; this service reads Redis directly) |
+| 2026-04-16 | 0.1.25.6 | Docs: make README JAR run command version-agnostic (target/cycles-server-events-*.jar) |
+| 2026-04-16 | 0.1.25.6 | Bump version to 0.1.25.6 |
 
 ## Last Audited
 
-- **Date:** 2026-04-08
-- **Version:** 0.1.25.5
-- **Build:** PASS (116 unit tests, 0 failures, 95%+ coverage)
+- **Date:** 2026-04-16
+- **Version:** 0.1.25.6
+- **Build:** PASS (160 unit tests, 0 failures, 95%+ coverage)
 - **Integration test:** PASS (3 tests with Testcontainers Redis)
-- **Total:** 119 tests (116 unit + 3 integration)
+- **Total:** 163 tests (160 unit + 3 integration)
+
+## Cross-Repo Spec Drift Notes (informational)
+
+Changes in sibling repos between v0.1.25.5 and v0.1.25.18 that did **not**
+require code changes here, but are worth knowing:
+
+- **admin v0.1.25.13** — CORS allowedMethods + PUT (admin-plane only).
+- **admin v0.1.25.14** — dual-auth on createBudget/createPolicy/updatePolicy (admin-plane).
+- **admin v0.1.25.15** — canonical `ScopeValidator` (admin write-time validation;
+  scopes stored in Redis are unchanged; pass-through here).
+- **admin v0.1.25.16** — dual-auth (ApiKeyAuth + AdminKeyAuth) on 6 tenant-scoped
+  webhook REST endpoints; adds `actor_type=admin_on_behalf_of` audit metadata on
+  PATCH/DELETE/test. This service reads subscriptions from Redis and does not call
+  those REST endpoints, so no code change was required. README updated with a
+  note so operators know this is available.
+- **admin v0.1.25.17** — cjson round-trip sweep for ApiKey/Policy/Tenant reads
+  (admin-plane persistence; no effect here).
+- **server v0.1.25.12** — runtime event-payload shape validation (warn + metric).
+  Mirrored in this repo at v0.1.25.6 via `EventPayloadValidator` +
+  `cycles_webhook_event_validation_warnings_total`.
+- **server v0.1.25.10** — `cycles_*` Micrometer domain counters. Mirrored at
+  v0.1.25.6 via `CyclesMetrics` + `cycles_webhook_*` counter family.
+- **server / admin v0.1.25.18** — `budget.reset_spent` event type and
+  `EventDataBudgetLifecycle` additions (`spent`, `reserved`, `spent_override_provided`).
+  `Event.data` is `Map<String,Object>` so the new payload fields pass through
+  serialization untouched; only the `EventType` vocabulary needed the new
+  `BUDGET_RESET_SPENT` value (added at v0.1.25.6).
