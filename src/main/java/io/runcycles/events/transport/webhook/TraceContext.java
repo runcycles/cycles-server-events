@@ -35,6 +35,7 @@ public class TraceContext {
 
     static final Pattern TRACE_ID_PATTERN = Pattern.compile("^[0-9a-f]{32}$");
     static final Pattern SPAN_ID_PATTERN = Pattern.compile("^[0-9a-f]{16}$");
+    static final Pattern TRACE_FLAGS_PATTERN = Pattern.compile("^[0-9a-f]{2}$");
     private static final String DEFAULT_TRACE_FLAGS = "01";
     private static final char[] HEX = "0123456789abcdef".toCharArray();
 
@@ -56,10 +57,14 @@ public class TraceContext {
 
     /**
      * Build a W3C Trace Context v00 {@code traceparent} header value:
-     * {@code 00-{traceId}-{freshSpanId}-01}.
+     * {@code 00-{traceId}-{freshSpanId}-{traceFlags-or-01}}.
+     * Falls back to {@link #DEFAULT_TRACE_FLAGS} ("01", sampled) when
+     * {@code traceFlags} is null, blank, or not 2 lowercase hex chars.
      */
-    public String buildTraceparent(String traceId) {
-        return "00-" + traceId + "-" + freshSpanId() + "-" + DEFAULT_TRACE_FLAGS;
+    public String buildTraceparent(String traceId, String traceFlags) {
+        String flags = (traceFlags != null && TRACE_FLAGS_PATTERN.matcher(traceFlags).matches())
+                ? traceFlags : DEFAULT_TRACE_FLAGS;
+        return "00-" + traceId + "-" + freshSpanId() + "-" + flags;
     }
 
     /** Fresh 64-bit span-id as 16 lowercase hex characters. */

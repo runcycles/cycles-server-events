@@ -62,12 +62,41 @@ class TraceContextTest {
     }
 
     @Test
-    void buildTraceparent_hasW3CShape() {
+    void buildTraceparent_nullTraceFlags_defaultsToSampledFlag() {
         String traceId = "0123456789abcdef0123456789abcdef";
 
-        String traceparent = context.buildTraceparent(traceId);
+        String traceparent = context.buildTraceparent(traceId, null);
 
         assertThat(traceparent).matches("^00-0123456789abcdef0123456789abcdef-[0-9a-f]{16}-01$");
+    }
+
+    @Test
+    void buildTraceparent_validTraceFlags_passesThrough() {
+        String traceId = "0123456789abcdef0123456789abcdef";
+
+        // trace-flags "00" means sampled=0 — upstream explicitly chose not to sample.
+        String traceparent = context.buildTraceparent(traceId, "00");
+
+        assertThat(traceparent).matches("^00-0123456789abcdef0123456789abcdef-[0-9a-f]{16}-00$");
+    }
+
+    @Test
+    void buildTraceparent_blankTraceFlags_fallsBackTo01() {
+        String traceparent = context.buildTraceparent(
+                "0123456789abcdef0123456789abcdef", "");
+
+        assertThat(traceparent).endsWith("-01");
+    }
+
+    @Test
+    void buildTraceparent_malformedTraceFlags_fallsBackTo01() {
+        // Uppercase, wrong length, and non-hex all fall back.
+        assertThat(context.buildTraceparent(
+                "0123456789abcdef0123456789abcdef", "FF")).endsWith("-01");
+        assertThat(context.buildTraceparent(
+                "0123456789abcdef0123456789abcdef", "0")).endsWith("-01");
+        assertThat(context.buildTraceparent(
+                "0123456789abcdef0123456789abcdef", "zz")).endsWith("-01");
     }
 
     @Test

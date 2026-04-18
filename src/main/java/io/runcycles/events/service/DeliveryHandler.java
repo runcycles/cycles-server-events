@@ -111,8 +111,19 @@ public class DeliveryHandler {
         String secret = subscriptionRepository.getSigningSecret(delivery.getSubscriptionId());
 
         delivery.setAttempts(delivery.getAttempts() != null ? delivery.getAttempts() + 1 : 1);
+        // Proactive trace_id stamping on the Delivery record (spec
+        // v0.1.25.28). Fills the gap while admin hasn't yet populated
+        // trace_id on delivery creation — the persisted Delivery
+        // becomes self-correlated for admin's readback without a
+        // cross-service round trip. Only write when the event actually
+        // carries a trace_id; otherwise leave the field null (OPTIONAL
+        // on the spec wire). Never overwrite a value admin has already
+        // set: admin-authored stamps remain authoritative.
+        if (delivery.getTraceId() == null && event.getTraceId() != null) {
+            delivery.setTraceId(event.getTraceId());
+        }
         metrics.recordDeliveryAttempt(sub.getTenantId(), delivery.getEventType());
-        TransportResult result = transport.deliver(event, sub, secret);
+        TransportResult result = transport.deliver(event, sub, secret, delivery);
 
         if (result.isSuccess()) {
             handleSuccess(delivery, sub, result);
