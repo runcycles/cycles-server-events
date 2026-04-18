@@ -305,6 +305,10 @@ class WebhookDeliveryIntegrationTest {
                     Map.entry("source", "test"),
                     Map.entry("trace_id", traceId))));
 
+            // This mirrors EXACTLY what cycles-server-admin v0.1.25.31's
+            // WebhookDispatchService.createDelivery(...) writes: trace_id +
+            // trace_flags + traceparent_inbound_valid are all stamped at
+            // delivery creation from the TraceContextFilter request attributes.
             String deliveryId = "del_flags_" + UUID.randomUUID().toString().substring(0, 8);
             jedis.set("delivery:" + deliveryId, objectMapper.writeValueAsString(Map.ofEntries(
                     Map.entry("delivery_id", deliveryId),
@@ -314,9 +318,9 @@ class WebhookDeliveryIntegrationTest {
                     Map.entry("status", "PENDING"),
                     Map.entry("attempted_at", Instant.now().toString()),
                     Map.entry("attempts", 0),
-                    // Admin's v0.1.25.28 contract (simulated here): upstream request
-                    // carried a valid traceparent with sampled=0. Dispatcher MUST
-                    // preserve that on the outbound header.
+                    Map.entry("trace_id", traceId),
+                    // Upstream request carried a valid traceparent with sampled=0.
+                    // Dispatcher MUST preserve that on the outbound header.
                     Map.entry("trace_flags", "00"),
                     Map.entry("traceparent_inbound_valid", Boolean.TRUE))));
             jedis.lpush("dispatch:pending", deliveryId);
@@ -328,6 +332,16 @@ class WebhookDeliveryIntegrationTest {
             assertThat(webhook.get("trace_id")).isEqualTo(traceId);
             assertThat(webhook.get("traceparent"))
                     .matches("^00-" + traceId + "-[0-9a-f]{16}-00$");
+
+            // After the delivery lands, verify the persisted delivery record
+            // still carries admin's authoritative trace_id (dispatcher MUST
+            // NOT overwrite admin-authored values — forward-compat guarantee).
+            String persistedJson = jedis.get("delivery:" + deliveryId);
+            assertThat(persistedJson)
+                    .as("admin-authored trace_id must survive the dispatcher write-back")
+                    .contains("\"trace_id\":\"" + traceId + "\"")
+                    .contains("\"trace_flags\":\"00\"")
+                    .contains("\"traceparent_inbound_valid\":true");
 
             jedis.srem("webhooks:" + TENANT_ID, subId);
         }

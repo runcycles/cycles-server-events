@@ -74,16 +74,24 @@ breaking.
 - HMAC-SHA256 canonical string, Redis schema, metric names, tag
   schemas, retry policy.
 
-### Spec-impl gap note
+### Spec-impl wiring note
 
-Admin server (`cycles-server-admin`) has not yet implemented its v0.1.25.28
-half — the spec landed, the impl hasn't. This release ships the
-dispatcher-side contract in advance so that when admin starts
-stamping `trace_flags` / `traceparent_inbound_valid` on delivery
-creation, events-server honours them immediately without another
-release. Until then, behaviour is byte-identical to v0.1.25.7 except
-for the proactive `Delivery.trace_id` stamping, which is a
-pure-additive field on the persisted delivery record.
+`cycles-server-admin` v0.1.25.31 (shipped 2026-04-18) implemented the
+admin-side half of spec v0.1.25.28. Admin's
+`WebhookDispatchService.createDelivery` now writes `trace_id` +
+`trace_flags` + `traceparent_inbound_valid` on every delivery record
+from its `TraceContextFilter` request attributes (fallback to
+`event.trace_id` when off-request). Events-server v0.1.25.8 consumes
+those fields unchanged — **field names, JSON types, enum values, and
+`@JsonIgnoreProperties` strictness are all wire-compatible**, verified
+by the `inboundTraceFlagsPreserved` integration test which mirrors
+admin's exact write format.
+
+The proactive `Delivery.trace_id` stamping in this release remains
+useful as a rolling-upgrade safety net: in-flight delivery records
+written by a pre-v0.1.25.31 admin still get their `trace_id` back-filled
+from `Event.trace_id` so admin's `GET /v1/admin/webhooks/deliveries`
+readback is consistent across the rollout window.
 
 ## [0.1.25.7] — 2026-04-18
 

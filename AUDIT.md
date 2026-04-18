@@ -146,6 +146,7 @@
 | Outbound `traceparent` preserves inbound sampling when `traceparent_inbound_valid=true`, else defaults to `01` | PASS |
 | `DeliveryHandler` proactively stamps `Event.trace_id` → `Delivery.trace_id` when admin has not pre-populated | PASS |
 | Admin-authored `Delivery.trace_id` is never overwritten by the dispatcher | PASS |
+| Wire-verified against `cycles-server-admin` v0.1.25.31 — field names, JSON types, enum values, `@JsonIgnoreProperties` strictness all compatible | PASS |
 
 ## Changelog
 
@@ -185,6 +186,7 @@
 | 2026-04-18 | 0.1.25.8 | `Transport.deliver` gains `Delivery` parameter; WebhookTransport reads `delivery.traceFlags` only when `traceparent_inbound_valid=true`, else defaults `01` |
 | 2026-04-18 | 0.1.25.8 | Proactive `trace_id` stamping in `DeliveryHandler`: copies `Event.trace_id` onto `Delivery.trace_id` when admin has not pre-set; never overwrites admin-authored values |
 | 2026-04-18 | 0.1.25.8 | Bump version to 0.1.25.8 |
+| 2026-04-18 | 0.1.25.8 | Wire-verified against `cycles-server-admin` v0.1.25.31 (shipped 2026-04-18). Admin's `WebhookDispatchService.createDelivery` writes `trace_id` + `trace_flags` + `traceparent_inbound_valid` from `TraceContextFilter` request attributes (fallback `event.trace_id`). Events-server's `Delivery` model reads them unchanged. Admin's `WebhookDelivery` is `@JsonIgnoreProperties(ignoreUnknown=false)` (strict); events-server's field set matches exactly — safe. Integration test `inboundTraceFlagsPreserved` extended to mirror admin's exact write format and to assert admin-authored `trace_id` survives the dispatcher's write-back. |
 
 ### Not applicable to events server (v0.1.25.19 → v0.1.25.27 negative findings)
 
