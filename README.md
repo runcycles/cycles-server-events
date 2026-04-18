@@ -133,7 +133,10 @@ def verify(body: bytes, secret: str, signature: str) -> bool:
 | `X-Cycles-Signature` | `sha256=<hex>` | HMAC-SHA256 of body (if signing secret configured) |
 | `X-Cycles-Event-Id` | `evt_abc123...` | For deduplication (at-least-once delivery) |
 | `X-Cycles-Event-Type` | `budget.exhausted` | Event type for routing |
-| `User-Agent` | `cycles-server-events/0.1.25.6` | Service identifier |
+| `User-Agent` | `cycles-server-events/0.1.25.7` | Service identifier |
+| `X-Cycles-Trace-Id` | `<32-hex-lowercase>` | W3C trace-id (spec v0.1.25.27) — always present |
+| `traceparent` | `00-<trace-id>-<16-hex-span>-01` | W3C Trace Context v00 — always present |
+| `X-Request-Id` | `<request-id>` | Originating HTTP request id — present when `event.request_id` is populated |
 | Custom headers | Per subscription | From `WebhookSubscription.headers` map |
 
 ## Retry Policy
