@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Non-fatal event-payload shape validator.
@@ -50,6 +51,10 @@ import java.util.Set;
  *       CREATE, UPDATE).</li>
  *   <li><b>reset_spent_shape</b>: budget.reset_spent event has a non-boolean
  *       spent_override_provided field.</li>
+ *   <li><b>trace_id_shape</b>: trace_id is present but does not match the
+ *       W3C Trace Context pattern {@code ^[0-9a-f]{32}$}
+ *       (spec: cycles-governance-admin-v0.1.25.yaml line 1546,
+ *       landed in spec v0.1.25.27).</li>
  * </ol>
  */
 @Component
@@ -62,11 +67,15 @@ public class EventPayloadValidator {
     static final String RULE_CATEGORY_MISMATCH = "category_mismatch";
     static final String RULE_BUDGET_DATA_SHAPE = "budget_data_shape";
     static final String RULE_RESET_SPENT_SHAPE = "reset_spent_shape";
+    static final String RULE_TRACE_ID_SHAPE = "trace_id_shape";
 
     /** Per spec EventDataBudgetLifecycle.operation enum (yaml line 1981). */
     private static final Set<String> VALID_BUDGET_OPERATIONS = Set.of(
             "CREDIT", "DEBIT", "RESET", "RESET_SPENT", "REPAY_DEBT",
             "STATUS_CHANGE", "CREATE", "UPDATE");
+
+    /** Per spec Event.trace_id pattern (yaml line 1546). */
+    private static final Pattern TRACE_ID_PATTERN = Pattern.compile("^[0-9a-f]{32}$");
 
     private final CyclesMetrics metrics;
 
@@ -110,6 +119,13 @@ public class EventPayloadValidator {
             warn(eventIdForLog, eventType, RULE_CATEGORY_MISMATCH,
                     "category " + event.getCategory() + " does not match "
                             + resolved + " (expected " + resolved.getCategory() + ")");
+        }
+
+        // Rule 6: trace_id format (optional field; only warn if present and malformed)
+        String traceId = event.getTraceId();
+        if (traceId != null && !TRACE_ID_PATTERN.matcher(traceId).matches()) {
+            warn(eventIdForLog, eventType, RULE_TRACE_ID_SHAPE,
+                    "trace_id does not match ^[0-9a-f]{32}$");
         }
 
         // Rule 4 + 5: BUDGET-category data shape

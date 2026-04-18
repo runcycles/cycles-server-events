@@ -31,6 +31,7 @@ class WebhookTransportTest {
     private WebhookTransport transport;
     private ObjectMapper objectMapper;
     private PayloadSigner payloadSigner;
+    private TraceContext traceContext;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -38,12 +39,13 @@ class WebhookTransportTest {
         objectMapper.registerModule(new JavaTimeModule());
         objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         payloadSigner = new PayloadSigner();
+        traceContext = new TraceContext();
 
         server = HttpServer.create(new InetSocketAddress(0), 0);
         port = server.getAddress().getPort();
         server.start();
 
-        transport = new WebhookTransport(objectMapper, payloadSigner, 5, 2, null);
+        transport = new WebhookTransport(objectMapper, payloadSigner, traceContext, 5, 2, null);
     }
 
     @AfterEach
@@ -267,5 +269,87 @@ class WebhookTransportTest {
         TransportResult result = transport.deliver(testEvent(), sub, null);
 
         assertThat(result.isSuccess()).isTrue();
+    }
+
+    @Test
+    void deliver_withTraceId_propagatesHeader() {
+        ConcurrentHashMap<String, String> captured = new ConcurrentHashMap<>();
+
+        server.createContext("/trace", exchange -> {
+            captured.put("X-Cycles-Trace-Id", exchange.getRequestHeaders().getFirst("X-Cycles-Trace-Id"));
+            captured.put("traceparent", exchange.getRequestHeaders().getFirst("traceparent"));
+            exchange.sendResponseHeaders(200, 2);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write("OK".getBytes());
+            }
+        });
+
+        Event e = testEvent();
+        e.setTraceId("0123456789abcdef0123456789abcdef");
+
+        transport.deliver(e, testSubscription("/trace"), null);
+
+        assertThat(captured.get("X-Cycles-Trace-Id")).isEqualTo("0123456789abcdef0123456789abcdef");
+        assertThat(captured.get("traceparent"))
+                .matches("^00-0123456789abcdef0123456789abcdef-[0-9a-f]{16}-01$");
+    }
+
+    @Test
+    void deliver_withoutTraceId_mintsFreshHeader() {
+        ConcurrentHashMap<String, String> captured = new ConcurrentHashMap<>();
+
+        server.createContext("/mint", exchange -> {
+            captured.put("X-Cycles-Trace-Id", exchange.getRequestHeaders().getFirst("X-Cycles-Trace-Id"));
+            captured.put("traceparent", exchange.getRequestHeaders().getFirst("traceparent"));
+            exchange.sendResponseHeaders(200, 2);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write("OK".getBytes());
+            }
+        });
+
+        transport.deliver(testEvent(), testSubscription("/mint"), null);
+
+        assertThat(captured.get("X-Cycles-Trace-Id")).matches("^[0-9a-f]{32}$");
+        assertThat(captured.get("traceparent")).matches("^00-[0-9a-f]{32}-[0-9a-f]{16}-01$");
+        // And the trace-id inside the traceparent matches the header
+        String hdr = captured.get("X-Cycles-Trace-Id");
+        assertThat(captured.get("traceparent")).startsWith("00-" + hdr + "-");
+    }
+
+    @Test
+    void deliver_withRequestId_propagatesHeader() {
+        AtomicReference<String> captured = new AtomicReference<>("NOT_SET");
+
+        server.createContext("/req", exchange -> {
+            captured.set(exchange.getRequestHeaders().getFirst("X-Request-Id"));
+            exchange.sendResponseHeaders(200, 2);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write("OK".getBytes());
+            }
+        });
+
+        Event e = testEvent();
+        e.setRequestId("req-abc-123");
+
+        transport.deliver(e, testSubscription("/req"), null);
+
+        assertThat(captured.get()).isEqualTo("req-abc-123");
+    }
+
+    @Test
+    void deliver_withoutRequestId_noHeader() {
+        AtomicReference<String> captured = new AtomicReference<>("NOT_SET");
+
+        server.createContext("/no-req", exchange -> {
+            captured.set(exchange.getRequestHeaders().getFirst("X-Request-Id"));
+            exchange.sendResponseHeaders(200, 2);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write("OK".getBytes());
+            }
+        });
+
+        transport.deliver(testEvent(), testSubscription("/no-req"), null);
+
+        assertThat(captured.get()).isNull();
     }
 }

@@ -367,6 +367,72 @@ class EventPayloadValidatorTest {
         // exceptions on control characters.
     }
 
+    // --- Rule 6: trace_id_shape ---
+
+    @Test
+    void trace_id_well_formed_noWarning() {
+        Event event = Event.builder()
+                .eventId("evt-1")
+                .eventType("tenant.created")
+                .category(EventCategory.TENANT)
+                .timestamp(Instant.now())
+                .tenantId("t-1")
+                .source("admin")
+                .traceId("0123456789abcdef0123456789abcdef")
+                .build();
+        validator.validate(event);
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID)
+                .tag("rule", EventPayloadValidator.RULE_TRACE_ID_SHAPE).counters()).isEmpty();
+    }
+
+    @Test
+    void trace_id_absent_noWarning() {
+        Event event = Event.builder()
+                .eventId("evt-1")
+                .eventType("tenant.created")
+                .category(EventCategory.TENANT)
+                .timestamp(Instant.now())
+                .tenantId("t-1")
+                .source("admin")
+                .build();
+        validator.validate(event);
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID)
+                .tag("rule", EventPayloadValidator.RULE_TRACE_ID_SHAPE).counters()).isEmpty();
+    }
+
+    @Test
+    void trace_id_malformed_emitsWarning() {
+        Event event = Event.builder()
+                .eventId("evt-1")
+                .eventType("tenant.created")
+                .category(EventCategory.TENANT)
+                .timestamp(Instant.now())
+                .tenantId("t-1")
+                .source("admin")
+                .traceId("NOT-A-VALID-TRACE-ID") // not 32 lowercase hex
+                .build();
+        validator.validate(event);
+        assertThat(warningCount("tenant.created",
+                EventPayloadValidator.RULE_TRACE_ID_SHAPE)).isEqualTo(1.0);
+    }
+
+    @Test
+    void trace_id_uppercase_emitsWarning() {
+        // Spec requires lowercase hex; uppercase is malformed.
+        Event event = Event.builder()
+                .eventId("evt-1")
+                .eventType("tenant.created")
+                .category(EventCategory.TENANT)
+                .timestamp(Instant.now())
+                .tenantId("t-1")
+                .source("admin")
+                .traceId("0123456789ABCDEF0123456789ABCDEF")
+                .build();
+        validator.validate(event);
+        assertThat(warningCount("tenant.created",
+                EventPayloadValidator.RULE_TRACE_ID_SHAPE)).isEqualTo(1.0);
+    }
+
     @Test
     void non_budget_category_skipsBudgetShapeCheck() {
         // Even if data is missing ledger_id, non-BUDGET events shouldn't trigger that rule.

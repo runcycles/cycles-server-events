@@ -1,5 +1,6 @@
 package io.runcycles.events.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
@@ -14,6 +15,7 @@ import java.util.Map;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class Event {
 
     @JsonProperty("event_id")
@@ -53,6 +55,10 @@ public class Event {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     @JsonProperty("request_id")
     private String requestId;
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonProperty("trace_id")
+    private String traceId;
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     @JsonProperty("metadata")

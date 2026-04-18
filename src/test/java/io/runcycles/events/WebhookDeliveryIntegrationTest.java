@@ -92,6 +92,9 @@ class WebhookDeliveryIntegrationTest {
             captured.put("event_type", exchange.getRequestHeaders().getFirst("X-Cycles-Event-Type"));
             captured.put("content_type", exchange.getRequestHeaders().getFirst("Content-Type"));
             captured.put("user_agent", exchange.getRequestHeaders().getFirst("User-Agent"));
+            captured.put("trace_id", exchange.getRequestHeaders().getFirst("X-Cycles-Trace-Id"));
+            captured.put("traceparent", exchange.getRequestHeaders().getFirst("traceparent"));
+            captured.put("request_id", exchange.getRequestHeaders().getFirst("X-Request-Id"));
             receivedWebhooks.add(captured);
 
             exchange.sendResponseHeaders(200, 2);
@@ -168,6 +171,11 @@ class WebhookDeliveryIntegrationTest {
             assertThat(webhook.get("event_type")).isEqualTo("tenant.created");
             assertThat(webhook.get("content_type")).isEqualTo("application/json");
             assertThat(webhook.get("user_agent")).startsWith("cycles-server-events/");
+
+            // Spec v0.1.25.27 — correlation/tracing headers always present on delivery.
+            assertThat(webhook.get("trace_id")).matches("^[0-9a-f]{32}$");
+            assertThat(webhook.get("traceparent"))
+                    .matches("^00-[0-9a-f]{32}-[0-9a-f]{16}-01$");
 
             // 6. Verify HMAC signature
             String signature = webhook.get("signature");
