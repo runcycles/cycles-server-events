@@ -27,9 +27,9 @@
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 198 |
+| Total tests | 199 |
 | Unit tests | 195 |
-| Integration tests | 3 (WebhookDeliveryIntegrationTest) |
+| Integration tests | 4 (WebhookDeliveryIntegrationTest) |
 | JaCoCo minimum | 95% line coverage (enforced) |
 
 ## Source File Inventory (22 classes)
@@ -41,7 +41,7 @@
 | Config | EventsConfig.java | EventsConfigTest (1) |
 | Config | CryptoService.java | CryptoServiceTest (9) |
 | Metrics | CyclesMetrics.java | CyclesMetricsTest (17) |
-| Model | Event.java | ModelTest (26 total) |
+| Model | Event.java | ModelTest (31 total) |
 | Model | EventType.java (41 types) | ModelTest |
 | Model | EventCategory.java | ModelTest |
 | Model | Actor.java, ActorType.java | ModelTest |
@@ -63,7 +63,7 @@
 | Transport | WebhookTransport.java | WebhookTransportTest (19) |
 | Transport | TraceContext.java | TraceContextTest (11) |
 | Validation | EventPayloadValidator.java | EventPayloadValidatorTest (24) |
-| Integration | - | WebhookDeliveryIntegrationTest (3) |
+| Integration | - | WebhookDeliveryIntegrationTest (4) |
 
 *Note: Surefire excludes \*IntegrationTest by default. `mvn verify` runs unit tests only; `mvn verify -Pintegration-tests` includes integration (removes exclusion).*
 
@@ -206,8 +206,8 @@ Captured explicitly so a future reviewer doesn't re-litigate the gap analysis:
 - **Date:** 2026-04-18
 - **Version:** 0.1.25.8
 - **Build:** PASS (195 unit tests, 95%+ coverage enforced)
-- **Integration test:** PASS (3 Testcontainers Redis tests)
-- **Total:** 198 tests
+- **Integration test:** PASS (4 Testcontainers Redis tests — incl. end-to-end `traceparent_inbound_valid=true` trace-flags preservation)
+- **Total:** 199 tests
 
 ## Cross-Repo Spec Drift Notes (informational)
 
