@@ -106,7 +106,7 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
-        when(transport.deliver(any(), any(), eq("secret"))).thenReturn(successResult());
+        when(transport.deliver(any(), any(), eq("secret"), any())).thenReturn(successResult());
 
         handler.handle("del-1");
 
@@ -130,7 +130,7 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), isNull())).thenReturn(successResult());
+        when(transport.deliver(any(), any(), isNull(), any())).thenReturn(successResult());
 
         handler.handle("del-1");
 
@@ -147,7 +147,7 @@ class DeliveryHandlerTest {
         handler.handle("del-missing");
 
         verify(eventRepository, never()).findById(anyString());
-        verify(transport, never()).deliver(any(), any(), any());
+        verify(transport, never()).deliver(any(), any(), any(), any());
     }
 
     @Test
@@ -159,7 +159,7 @@ class DeliveryHandlerTest {
         handler.handle("del-1");
 
         verify(eventRepository, never()).findById(anyString());
-        verify(transport, never()).deliver(any(), any(), any());
+        verify(transport, never()).deliver(any(), any(), any(), any());
     }
 
     @Test
@@ -170,7 +170,7 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
-        verify(transport, never()).deliver(any(), any(), any());
+        verify(transport, never()).deliver(any(), any(), any(), any());
     }
 
     // --- Missing dependencies ---
@@ -240,7 +240,7 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(failureResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
         handler.handle("del-1");
 
@@ -266,7 +266,7 @@ class DeliveryHandlerTest {
                 .build());
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(failureResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
         handler.handle("del-1");
 
@@ -295,7 +295,7 @@ class DeliveryHandlerTest {
                 .build());
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(failureResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
         handler.handle("del-1");
 
@@ -317,7 +317,7 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(failureResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
         handler.handle("del-1");
 
@@ -335,7 +335,7 @@ class DeliveryHandlerTest {
         sub.setRetryPolicy(null); // use defaults
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(failureResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
         handler.handle("del-1");
 
@@ -355,7 +355,7 @@ class DeliveryHandlerTest {
         sub.setConsecutiveFailures(3);
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(failureResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
         handler.handle("del-1");
 
@@ -374,7 +374,7 @@ class DeliveryHandlerTest {
         sub.setConsecutiveFailures(9); // will become 10 == disableAfterFailures
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(failureResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
         handler.handle("del-1");
 
@@ -395,7 +395,7 @@ class DeliveryHandlerTest {
         sub.setConsecutiveFailures(9);
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(failureResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
         handler.handle("del-1");
 
@@ -414,7 +414,7 @@ class DeliveryHandlerTest {
         sub.setConsecutiveFailures(null); // null starts at 0
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(failureResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
         handler.handle("del-1");
 
@@ -433,12 +433,12 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), isNull())).thenReturn(successResult());
+        when(transport.deliver(any(), any(), isNull(), any())).thenReturn(successResult());
 
         handler.handle("del-1");
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
-        verify(transport).deliver(any(), eq(sub), isNull());
+        verify(transport).deliver(any(), eq(sub), isNull(), any());
     }
 
     // --- Null attempts ---
@@ -452,7 +452,7 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(successResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
         handler.handle("del-1");
 
@@ -471,7 +471,7 @@ class DeliveryHandlerTest {
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("expired");
-        verify(transport, never()).deliver(any(), any(), any());
+        verify(transport, never()).deliver(any(), any(), any(), any());
     }
 
     @Test
@@ -483,7 +483,7 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(successResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
         handler.handle("del-1");
 
@@ -500,7 +500,7 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("s");
-        when(transport.deliver(any(), any(), any())).thenReturn(successResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
         handler.handle("del-1");
 
@@ -521,7 +521,7 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(failureResult()); // 500
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult()); // 500
 
         handler.handle("del-1");
 
@@ -542,7 +542,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
         TransportResult r = TransportResult.builder().success(false).statusCode(422).latencyMs(25)
                 .errorMessage("unprocessable").build();
-        when(transport.deliver(any(), any(), any())).thenReturn(r);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(r);
 
         handler.handle("del-1");
 
@@ -561,7 +561,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
         TransportResult r = TransportResult.builder().success(false).statusCode(0).latencyMs(0)
                 .errorMessage("connection refused").build();
-        when(transport.deliver(any(), any(), any())).thenReturn(r);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(r);
 
         handler.handle("del-1");
 
@@ -640,7 +640,7 @@ class DeliveryHandlerTest {
         sub.setConsecutiveFailures(9); // will become 10 == disableAfterFailures
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(failureResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
         handler.handle("del-1");
 
@@ -663,7 +663,7 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(successResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
         handler.handle("del-1");
 
@@ -685,10 +685,72 @@ class DeliveryHandlerTest {
         sub.setConsecutiveFailures(3); // becomes 4, still below 10
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
-        when(transport.deliver(any(), any(), any())).thenReturn(failureResult());
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
         handler.handle("del-1");
 
         assertThat(registry.find(CyclesMetrics.SUBSCRIPTION_AUTO_DISABLED).counters()).isEmpty();
+    }
+
+    // --- Proactive trace_id stamping (spec v0.1.25.28) ---
+
+    @Test
+    void handle_stampsEventTraceIdOntoDelivery() {
+        // Admin hasn't populated Delivery.trace_id yet; dispatcher
+        // proactively copies it from the Event before persisting, so
+        // admin's GET /webhooks/deliveries readback has trace_id
+        // without a cross-service round trip.
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        Event e = testEvent();
+        e.setTraceId("0123456789abcdef0123456789abcdef");
+        when(eventRepository.findById("evt-1")).thenReturn(e);
+        when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getTraceId()).isEqualTo("0123456789abcdef0123456789abcdef");
+        verify(deliveryRepository).update(delivery);
+    }
+
+    @Test
+    void handle_preservesAdminAuthoredTraceIdOnDelivery() {
+        // If admin has already stamped trace_id (future v0.1.25.31+),
+        // the dispatcher MUST NOT overwrite it even if Event carries a
+        // different value — admin-authored stamps are authoritative.
+        Delivery delivery = pendingDelivery();
+        delivery.setTraceId("admin-stamped-aaaaaaaaaaaaaaaaaaa0");
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        Event e = testEvent();
+        e.setTraceId("event-trace-bbbbbbbbbbbbbbbbbbbbb0");
+        when(eventRepository.findById("evt-1")).thenReturn(e);
+        when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getTraceId()).isEqualTo("admin-stamped-aaaaaaaaaaaaaaaaaaa0");
+    }
+
+    @Test
+    void handle_eventWithoutTraceId_leavesDeliveryTraceIdNull() {
+        // Non-HTTP-originated events (e.g., sweepers) may lack trace_id.
+        // The dispatcher MUST NOT invent one at stamping time; the
+        // outbound traceparent gets a freshly-minted id via TraceContext
+        // but the persisted Delivery record stays null so downstream
+        // correlation isn't misattributed to a trace that never existed.
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent()); // no trace_id
+        when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getTraceId()).isNull();
     }
 }

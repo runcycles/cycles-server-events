@@ -1,8 +1,8 @@
 # Cycles Protocol v0.1.25 — Events Server Implementation Audit
 
-**Date:** 2026-04-16 (v0.1.25.6 — admin-spec v0.1.25.18 alignment: add `BUDGET_RESET_SPENT`; add `cycles_webhook_*` Micrometer counters + latency timer mirroring `cycles-server` v0.1.25.10; add non-fatal `EventPayloadValidator` mirroring `cycles-server-admin` v0.1.25.12; parity refactor adopting dotted metric names, `tags(...)` helper, tenant-tag toggle, `UNKNOWN` sentinel; add `CHANGELOG.md` + `OPERATIONS.md` for doc parity), 2026-04-08 (v0.1.25.5 — force HTTP/1.1 outbound transport to fix h2c body drop, #16), 2026-04-07 (v0.1.25.4 — partial subscription update to avoid overwriting admin config), 2026-04-03 (v0.1.25.3 — Prometheus registry dependency; typed `DeliveryStatus`/`WebhookStatus` enums), 2026-04-01 (v0.1.25.1 initial implementation — dispatch loop, delivery handler, retry scheduler, AES-256-GCM secret encryption, TTL-based retention, E2E integration test).
+**Date:** 2026-04-18 (v0.1.25.8 — admin-spec v0.1.25.28 alignment: extend correlation/tracing onto `WebhookDelivery`. Add three optional fields to `Delivery` model (`trace_id`, `trace_flags`, `traceparent_inbound_valid`); `TraceContext.buildTraceparent` now accepts a `trace_flags` byte so outbound `traceparent` preserves inbound sampling decisions when `traceparent_inbound_valid=true`; `Transport.deliver` gains a `Delivery` parameter so the transport can read the sampling hints. Proactive `trace_id` stamping: `DeliveryHandler` copies `Event.trace_id` onto the persisted `Delivery` record when admin hasn't set one, filling the gap while `cycles-server-admin` catches up to spec v0.1.25.28 (no overwrite if admin has already stamped).), 2026-04-18 (v0.1.25.7 — admin-spec v0.1.25.27 alignment: three-tier correlation/tracing. Add `Event.trace_id` (optional, `^[0-9a-f]{32}$`); new `TraceContext` helper resolves-or-mints trace-id and builds W3C `traceparent` v00 with fresh span-id per delivery; WebhookTransport emits `X-Cycles-Trace-Id` + `traceparent` on every outbound POST and forwards `X-Request-Id` when event carries `request_id`; EventPayloadValidator gains non-fatal `trace_id_shape` rule. Documents negative findings for spec v0.1.25.19–.26 (admin-plane-only changes that do not affect the dispatcher).), 2026-04-16 (v0.1.25.6 — admin-spec v0.1.25.18 alignment: add `BUDGET_RESET_SPENT`; add `cycles_webhook_*` Micrometer counters + latency timer mirroring `cycles-server` v0.1.25.10; add non-fatal `EventPayloadValidator` mirroring `cycles-server-admin` v0.1.25.12; parity refactor adopting dotted metric names, `tags(...)` helper, tenant-tag toggle, `UNKNOWN` sentinel; add `CHANGELOG.md` + `OPERATIONS.md` for doc parity), 2026-04-08 (v0.1.25.5 — force HTTP/1.1 outbound transport to fix h2c body drop, #16), 2026-04-07 (v0.1.25.4 — partial subscription update to avoid overwriting admin config), 2026-04-03 (v0.1.25.3 — Prometheus registry dependency; typed `DeliveryStatus`/`WebhookStatus` enums), 2026-04-01 (v0.1.25.1 initial implementation — dispatch loop, delivery handler, retry scheduler, AES-256-GCM secret encryption, TTL-based retention, E2E integration test).
 
-**Spec:** `cycles-governance-admin-v0.1.25.yaml` (OpenAPI 3.1.0, v0.1.25.18) — authoritative source at `cycles-protocol` repo; served from `cycles-server-admin`.
+**Spec:** `cycles-governance-admin-v0.1.25.yaml` (OpenAPI 3.1.0, v0.1.25.28) — authoritative source at `cycles-protocol` repo; served from `cycles-server-admin`.
 
 **Service:** Spring Boot 3.5.11 / Java 21 / Jedis 5.2.0 / Micrometer Prometheus registry. Redis-driven webhook dispatcher (no inbound API surface of its own).
 
@@ -18,7 +18,7 @@
 | Field | Value |
 |-------|-------|
 | Service | cycles-server-events |
-| Version | 0.1.25.6 |
+| Version | 0.1.25.8 |
 | Java | 21 |
 | Spring Boot | 3.5.11 |
 | Spec Authority | [complete-budget-governance-v0.1.25.yaml](https://github.com/runcycles/cycles-server-admin/blob/main/complete-budget-governance-v0.1.25.yaml) |
@@ -27,12 +27,12 @@
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 168 |
-| Unit tests | 165 |
-| Integration tests | 3 (WebhookDeliveryIntegrationTest) |
+| Total tests | 199 |
+| Unit tests | 195 |
+| Integration tests | 4 (WebhookDeliveryIntegrationTest) |
 | JaCoCo minimum | 95% line coverage (enforced) |
 
-## Source File Inventory (21 classes)
+## Source File Inventory (22 classes)
 
 | Layer | File | Tests |
 |-------|------|-------|
@@ -41,7 +41,7 @@
 | Config | EventsConfig.java | EventsConfigTest (1) |
 | Config | CryptoService.java | CryptoServiceTest (9) |
 | Metrics | CyclesMetrics.java | CyclesMetricsTest (17) |
-| Model | Event.java | ModelTest (26 total) |
+| Model | Event.java | ModelTest (31 total) |
 | Model | EventType.java (41 types) | ModelTest |
 | Model | EventCategory.java | ModelTest |
 | Model | Actor.java, ActorType.java | ModelTest |
@@ -53,16 +53,17 @@
 | Repository | DeliveryRepository.java | DeliveryRepositoryTest (6) |
 | Repository | SubscriptionRepository.java | SubscriptionRepositoryTest (11) |
 | Repository | DeliveryQueueRepository.java | DeliveryQueueRepositoryTest (8) |
-| Service | DeliveryHandler.java | DeliveryHandlerTest (33) |
+| Service | DeliveryHandler.java | DeliveryHandlerTest (36) |
 | Service | DispatchLoop.java | DispatchLoopTest (4) |
 | Service | RetryScheduler.java | RetrySchedulerTest (3) |
 | Service | RetentionCleanupService.java | RetentionCleanupServiceTest (3) |
 | Transport | Transport.java (interface) | (via WebhookTransportTest) |
 | Transport | TransportResult.java | ModelTest |
 | Transport | PayloadSigner.java | PayloadSignerTest (5) |
-| Transport | WebhookTransport.java | WebhookTransportTest (12) |
-| Validation | EventPayloadValidator.java | EventPayloadValidatorTest (20) |
-| Integration | - | WebhookDeliveryIntegrationTest (3) |
+| Transport | WebhookTransport.java | WebhookTransportTest (19) |
+| Transport | TraceContext.java | TraceContextTest (11) |
+| Validation | EventPayloadValidator.java | EventPayloadValidatorTest (24) |
+| Integration | - | WebhookDeliveryIntegrationTest (4) |
 
 *Note: Surefire excludes \*IntegrationTest by default. `mvn verify` runs unit tests only; `mvn verify -Pintegration-tests` includes integration (removes exclusion).*
 
@@ -137,6 +138,15 @@
 | HMAC-SHA256 webhook signing | PASS |
 | Retry with exponential backoff | PASS |
 | Event TTL 90 days | PASS |
+| Event.trace_id optional + `^[0-9a-f]{32}$` (spec v0.1.25.27) | PASS |
+| Outbound webhook headers X-Cycles-Trace-Id + traceparent always present (spec v0.1.25.27 + cycles-protocol-v0.yaml) | PASS |
+| Outbound X-Request-Id forwarded when Event.request_id present | PASS |
+| `@JsonIgnoreProperties(ignoreUnknown=true)` on Event — tolerates additive spec evolution | PASS |
+| `WebhookDelivery.trace_id` / `trace_flags` / `traceparent_inbound_valid` optional on wire (spec v0.1.25.28) | PASS |
+| Outbound `traceparent` preserves inbound sampling when `traceparent_inbound_valid=true`, else defaults to `01` | PASS |
+| `DeliveryHandler` proactively stamps `Event.trace_id` → `Delivery.trace_id` when admin has not pre-populated | PASS |
+| Admin-authored `Delivery.trace_id` is never overwritten by the dispatcher | PASS |
+| Wire-verified against `cycles-server-admin` v0.1.25.31 — field names, JSON types, enum values, `@JsonIgnoreProperties` strictness all compatible | PASS |
 
 ## Changelog
 
@@ -165,14 +175,41 @@
 | 2026-04-16 | 0.1.25.6 | Docs: note admin v0.1.25.16 dual-auth on 6 tenant webhook REST endpoints (no code change; this service reads Redis directly) |
 | 2026-04-16 | 0.1.25.6 | Docs: make README JAR run command version-agnostic (target/cycles-server-events-*.jar) |
 | 2026-04-16 | 0.1.25.6 | Bump version to 0.1.25.6 |
+| 2026-04-18 | 0.1.25.7 | Add `Event.trace_id` (optional `^[0-9a-f]{32}$`) — spec v0.1.25.27 three-tier correlation model |
+| 2026-04-18 | 0.1.25.7 | Add `TraceContext` helper — resolves event `trace_id` or mints fresh 128-bit id; builds W3C `traceparent` v00 with fresh span-id per delivery |
+| 2026-04-18 | 0.1.25.7 | WebhookTransport emits `X-Cycles-Trace-Id` + `traceparent` on every delivery (always-required per cycles-protocol-v0.yaml:261-266); forwards `X-Request-Id` when `event.request_id` present |
+| 2026-04-18 | 0.1.25.7 | EventPayloadValidator: new non-fatal `trace_id_shape` rule — warns + increments metric when `trace_id` present but doesn't match `^[0-9a-f]{32}$` |
+| 2026-04-18 | 0.1.25.7 | `@JsonIgnoreProperties(ignoreUnknown=true)` on `Event` to stay forward-compatible with additive spec evolution |
+| 2026-04-18 | 0.1.25.7 | Bump version to 0.1.25.7 |
+| 2026-04-18 | 0.1.25.8 | Add `Delivery.trace_id` / `trace_flags` / `traceparent_inbound_valid` optional fields — spec v0.1.25.28 |
+| 2026-04-18 | 0.1.25.8 | `TraceContext.buildTraceparent(traceId, traceFlags)` — honors inbound sampling byte, falls back to `01` on null/blank/malformed |
+| 2026-04-18 | 0.1.25.8 | `Transport.deliver` gains `Delivery` parameter; WebhookTransport reads `delivery.traceFlags` only when `traceparent_inbound_valid=true`, else defaults `01` |
+| 2026-04-18 | 0.1.25.8 | Proactive `trace_id` stamping in `DeliveryHandler`: copies `Event.trace_id` onto `Delivery.trace_id` when admin has not pre-set; never overwrites admin-authored values |
+| 2026-04-18 | 0.1.25.8 | Bump version to 0.1.25.8 |
+| 2026-04-18 | 0.1.25.8 | Wire-verified against `cycles-server-admin` v0.1.25.31 (shipped 2026-04-18). Admin's `WebhookDispatchService.createDelivery` writes `trace_id` + `trace_flags` + `traceparent_inbound_valid` from `TraceContextFilter` request attributes (fallback `event.trace_id`). Events-server's `Delivery` model reads them unchanged. Admin's `WebhookDelivery` is `@JsonIgnoreProperties(ignoreUnknown=false)` (strict); events-server's field set matches exactly — safe. Integration test `inboundTraceFlagsPreserved` extended to mirror admin's exact write format and to assert admin-authored `trace_id` survives the dispatcher's write-back. |
+
+### Not applicable to events server (v0.1.25.19 → v0.1.25.27 negative findings)
+
+Captured explicitly so a future reviewer doesn't re-litigate the gap analysis:
+
+| Spec ver | Change | Why events server is unaffected |
+|---|---|---|
+| v0.1.25.19 | `BudgetLedger.tenant_id` on wire | Events already carry `tenant_id`; no dependency on BudgetLedger serialization. |
+| v0.1.25.20 | `sort_by` / `sort_dir` on admin lists | Admin-read-only endpoints. |
+| v0.1.25.21 | `search` on admin lists + tenants/webhooks bulk-action | Admin-read/mutate only. `system.webhook_status_changed` events from bulk PAUSE/RESUME/DELETE already dispatchable under `WebhookStatus` enum. |
+| v0.1.25.22 | Editorial cleanup | No wire or schema change. |
+| v0.1.25.23 | `COUNT_MISMATCH` + `LIMIT_EXCEEDED` in `ErrorCode` enum | Dispatcher does not emit `ErrorResponse`. |
+| v0.1.25.24 | Audit log filter DSL upgrade | Admin-read only. |
+| v0.1.25.25 | Audit `__admin__` / `__unauth__` sentinel split | Events server does not write audit entries. |
+| v0.1.25.26 | `POST /v1/admin/budgets/bulk-action` | `BUDGET_RESET_SPENT` already landed in events-server v0.1.25.6; admin emits one event per row, dispatcher delivers unchanged. |
 
 ## Last Audited
 
-- **Date:** 2026-04-16
-- **Version:** 0.1.25.6
-- **Build:** PASS (165 unit tests, 0 failures, 95%+ coverage)
-- **Integration test:** PASS (3 tests with Testcontainers Redis)
-- **Total:** 168 tests (165 unit + 3 integration)
+- **Date:** 2026-04-18
+- **Version:** 0.1.25.8
+- **Build:** PASS (195 unit tests, 95%+ coverage enforced)
+- **Integration test:** PASS (4 Testcontainers Redis tests — incl. end-to-end `traceparent_inbound_valid=true` trace-flags preservation)
+- **Total:** 199 tests
 
 ## Cross-Repo Spec Drift Notes (informational)
 

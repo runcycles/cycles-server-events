@@ -20,6 +20,147 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.8] — 2026-04-18
+
+### Added
+
+- **Cross-surface correlation on the `WebhookDelivery` schema.** Aligns
+  with admin-spec `cycles-governance-admin-v0.1.25.yaml` info.version
+  `0.1.25.28`, which closes the gap left by v0.1.25.27 by extending
+  `trace_id` correlation onto `WebhookDelivery`. Three new OPTIONAL
+  fields on the `Delivery` model:
+  - `trace_id` (`^[0-9a-f]{32}$`) — captured at dispatch time from
+    the originating Event so operators can JOIN a delivery record with
+    the event that produced it, the audit entry for the originating
+    HTTP request, and sibling deliveries in the same fan-out.
+  - `trace_flags` (`^[0-9a-f]{2}$`) — the W3C Trace Context
+    trace-flags byte to use when constructing the outbound
+    `traceparent` header, preserving the inbound sampling decision.
+  - `traceparent_inbound_valid` (boolean) — whether the originating
+    request presented a valid W3C `traceparent`. When `true`, the
+    dispatcher honours `trace_flags`; when `false`/null, it defaults
+    to `01` (sampled) per cycles-protocol-v0 §CORRELATION AND TRACING.
+- **`TraceContext.buildTraceparent(traceId, traceFlags)`** — second
+  argument threads the sampling byte through to the outbound header.
+  Invalid / null / blank / non-2-hex values fall back to `01`, so the
+  existing always-required header contract remains unconditionally
+  satisfied.
+- **Proactive `trace_id` stamping on the `Delivery` record.**
+  `DeliveryHandler` copies `Event.trace_id` onto `Delivery.trace_id`
+  before persisting, when the delivery didn't already carry one. This
+  fills the gap while `cycles-server-admin` hasn't yet caught up to
+  spec v0.1.25.28 — admin's `GET /v1/admin/webhooks/deliveries`
+  readback now has a populated `trace_id` without a cross-service
+  round trip. Admin-authored values are never overwritten (forward
+  compatibility with the eventual admin v0.1.25.31+).
+
+### Changed
+
+- `Transport.deliver` signature gains a `Delivery` parameter so the
+  transport can read the sampling hints. Callers with no delivery
+  context (ad-hoc webhook-test POSTs, unit tests exercising just the
+  transport) pass `null`; the transport treats that as
+  `traceparent_inbound_valid=false` and uses `01`.
+- `WebhookTransport` version fallback bumped from `0.1.25.7` to
+  `0.1.25.8` (used when `BuildProperties` is unavailable, e.g., tests).
+
+### Unchanged
+
+- All existing outbound headers (`X-Cycles-Trace-Id`, `traceparent`,
+  `X-Request-Id`, `X-Cycles-Signature`, etc.) remain in place with
+  byte-identical wire format when `delivery` is null or missing the
+  new fields — which is true of every existing delivery record today
+  because admin hasn't yet implemented its half of spec v0.1.25.28.
+- HMAC-SHA256 canonical string, Redis schema, metric names, tag
+  schemas, retry policy.
+
+### Spec-impl wiring note
+
+`cycles-server-admin` v0.1.25.31 (shipped 2026-04-18) implemented the
+admin-side half of spec v0.1.25.28. Admin's
+`WebhookDispatchService.createDelivery` now writes `trace_id` +
+`trace_flags` + `traceparent_inbound_valid` on every delivery record
+from its `TraceContextFilter` request attributes (fallback to
+`event.trace_id` when off-request). Events-server v0.1.25.8 consumes
+those fields unchanged — **field names, JSON types, enum values, and
+`@JsonIgnoreProperties` strictness are all wire-compatible**, verified
+by the `inboundTraceFlagsPreserved` integration test which mirrors
+admin's exact write format.
+
+The proactive `Delivery.trace_id` stamping in this release remains
+useful as a rolling-upgrade safety net: in-flight delivery records
+written by a pre-v0.1.25.31 admin still get their `trace_id` back-filled
+from `Event.trace_id` so admin's `GET /v1/admin/webhooks/deliveries`
+readback is consistent across the rollout window.
+
+## [0.1.25.7] — 2026-04-18
+
+### Added
+
+- **Cross-surface correlation — `trace_id` and W3C Trace Context headers
+  on every outbound webhook delivery.** Aligns with admin-spec
+  `cycles-governance-admin-v0.1.25.yaml` info.version `0.1.25.27`, which
+  adds `Event.trace_id` (optional, `^[0-9a-f]{32}$`) as the JOIN key across
+  an HTTP request, its audit entry, and all events emitted as side effects
+  of that request. The authoritative header contract lives in
+  `cycles-protocol-v0.yaml:256-277`: outbound webhook POSTs MUST carry
+  `X-Cycles-Trace-Id` AND `traceparent` (W3C Trace Context v00).
+  - New `Event.trace_id` field, snake-case JSON, `@JsonInclude(NON_NULL)`.
+    Older Event rows (pre-v0.1.25.27) that lack the field are tolerated;
+    `@JsonIgnoreProperties(ignoreUnknown=true)` on the model keeps the
+    deserializer forward-compatible with further additive spec evolution.
+  - New `TraceContext` helper (transport layer). Resolves the event's
+    `trace_id` if present and well-formed; otherwise mints a fresh 128-bit
+    id via `SecureRandom` so the outbound-header "always required"
+    contract is unconditionally honoured. The W3C `traceparent` is
+    assembled with a **freshly generated span-id per delivery** (never
+    reused from any inbound source) and `trace-flags=01` — the dispatcher
+    has no inbound W3C parent to inherit from.
+  - `WebhookTransport` now emits three new headers on every POST:
+    - `X-Cycles-Trace-Id: <32-hex-lowercase>` (always present)
+    - `traceparent: 00-<trace_id>-<16-hex-span>-01` (always present)
+    - `X-Request-Id: <event.request_id>` (present only when the Event
+      carries `request_id`; follows the spec v0.1.25.27 strengthened
+      contract that `request_id` MUST be propagated across
+      thread / queue / process boundaries when it originated upstream)
+- **Non-fatal `trace_id_shape` validation rule** in
+  `EventPayloadValidator`. If a producer writes a malformed `trace_id`
+  (anything other than exactly 32 lowercase hex characters), the validator
+  emits a WARN log line and increments
+  `cycles_webhook_events_payload_invalid_total{type, rule="trace_id_shape"}`
+  — same observability pattern as the existing rules. Delivery is never
+  blocked or dropped; the dispatcher falls back to minting a fresh id so
+  the outbound header stays well-formed regardless of producer drift.
+
+### Changed
+
+- `Event` model gains `@JsonIgnoreProperties(ignoreUnknown = true)`,
+  matching `Subscription`'s defensive posture. Spring Boot's default
+  `ObjectMapper` already has `FAIL_ON_UNKNOWN_PROPERTIES=false`, so this is
+  belt-and-braces insurance against alternate mapper configurations (e.g.,
+  tests constructing their own ObjectMapper).
+- `WebhookTransport` constructor now takes `TraceContext` as a required
+  dependency. The hard-coded version fallback (used when `BuildProperties`
+  is unavailable, e.g., in tests) is bumped from `0.1.25.6` to `0.1.25.7`.
+
+### Unchanged
+
+- HMAC-SHA256 signing algorithm and the canonical string (raw JSON body
+  bytes) — no change per `cycles-protocol-v0.yaml:279-285`.
+- Redis schema, key naming, queue contract, TTL / retention policy.
+- Metric names, tag schema, and default tenant-tag behaviour.
+- All pre-existing headers (`Content-Type`, `User-Agent`,
+  `X-Cycles-Event-Id`, `X-Cycles-Event-Type`, `X-Cycles-Signature`, and
+  subscription-configured custom headers) — only additions.
+
+### Spec parity gap analysis (for the paper trail)
+
+Spec v0.1.25.19 through v0.1.25.26 landed between the v0.1.25.6 freeze and
+this release. None of them require changes in the events-server
+dispatcher; the [`AUDIT.md`](AUDIT.md) "Not applicable to events server"
+table documents the reasoning per version so a future reviewer doesn't
+re-litigate.
+
 ## [0.1.25.6] — 2026-04-16
 
 ### Added

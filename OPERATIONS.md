@@ -439,6 +439,12 @@ against the **producer**, not this service:
   wrong type (e.g., `spent_override_provided` as a string instead of
   boolean). Jackson tolerance on this service lets it pass; strict
   consumers downstream will reject.
+- `trace_id_shape` → producer wrote a `trace_id` that doesn't match
+  `^[0-9a-f]{32}$` (spec v0.1.25.27). Delivery still happens — the
+  dispatcher mints a fresh trace-id so the outbound `X-Cycles-Trace-Id`
+  header stays well-formed — but downstream auditors won't be able to
+  correlate the event back to its originating request. File the ticket
+  against the producer (almost always `cycles-server-admin`).
 
 ### Symptom: stale spike after a clean startup
 

@@ -1,5 +1,7 @@
 package io.runcycles.events.model;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.runcycles.events.transport.TransportResult;
 import org.junit.jupiter.api.Test;
 
@@ -86,6 +88,7 @@ class ModelTest {
                 .data(Map.of("key", "value"))
                 .correlationId("cor-1")
                 .requestId("req-1")
+                .traceId("0123456789abcdef0123456789abcdef")
                 .metadata(Map.of("meta", "data"))
                 .build();
 
@@ -100,6 +103,7 @@ class ModelTest {
         assertThat(event.getData()).containsEntry("key", "value");
         assertThat(event.getCorrelationId()).isEqualTo("cor-1");
         assertThat(event.getRequestId()).isEqualTo("req-1");
+        assertThat(event.getTraceId()).isEqualTo("0123456789abcdef0123456789abcdef");
         assertThat(event.getMetadata()).containsEntry("meta", "data");
     }
 
@@ -271,6 +275,100 @@ class ModelTest {
         assertThat(EventType.fromValue("system.high_latency")).isEqualTo(EventType.SYSTEM_HIGH_LATENCY);
         assertThatThrownBy(() -> EventType.fromValue("nonexistent"))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void delivery_traceFields_roundTrip() throws Exception {
+        // Spec v0.1.25.28 — trace_id, trace_flags, traceparent_inbound_valid
+        // optional on WebhookDelivery. Omitted from JSON when null.
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        Delivery delivery = Delivery.builder()
+                .deliveryId("del-1")
+                .status(DeliveryStatus.PENDING)
+                .traceId("0123456789abcdef0123456789abcdef")
+                .traceFlags("00")
+                .traceparentInboundValid(Boolean.TRUE)
+                .build();
+
+        String json = mapper.writeValueAsString(delivery);
+
+        assertThat(json).contains("\"trace_id\":\"0123456789abcdef0123456789abcdef\"");
+        assertThat(json).contains("\"trace_flags\":\"00\"");
+        assertThat(json).contains("\"traceparent_inbound_valid\":true");
+
+        Delivery roundTrip = mapper.readValue(json, Delivery.class);
+        assertThat(roundTrip.getTraceId()).isEqualTo("0123456789abcdef0123456789abcdef");
+        assertThat(roundTrip.getTraceFlags()).isEqualTo("00");
+        assertThat(roundTrip.getTraceparentInboundValid()).isTrue();
+    }
+
+    @Test
+    void delivery_traceFields_absent_omittedFromJson() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        Delivery delivery = Delivery.builder()
+                .deliveryId("del-1")
+                .status(DeliveryStatus.PENDING)
+                .build();
+
+        String json = mapper.writeValueAsString(delivery);
+
+        assertThat(json).doesNotContain("trace_id");
+        assertThat(json).doesNotContain("trace_flags");
+        assertThat(json).doesNotContain("traceparent_inbound_valid");
+    }
+
+    @Test
+    void event_traceId_serialisesAsSnakeCase() throws Exception {
+        // spec v0.1.25.27: Event.trace_id (optional, ^[0-9a-f]{32}$).
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        Event event = Event.builder()
+                .eventId("evt-1")
+                .eventType("tenant.created")
+                .category(EventCategory.TENANT)
+                .timestamp(Instant.parse("2026-04-18T00:00:00Z"))
+                .tenantId("t-1")
+                .source("admin")
+                .traceId("0123456789abcdef0123456789abcdef")
+                .build();
+
+        String json = mapper.writeValueAsString(event);
+
+        assertThat(json).contains("\"trace_id\":\"0123456789abcdef0123456789abcdef\"");
+
+        Event roundTrip = mapper.readValue(json, Event.class);
+        assertThat(roundTrip.getTraceId()).isEqualTo("0123456789abcdef0123456789abcdef");
+    }
+
+    @Test
+    void event_traceId_absent_isOmittedFromJson() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        Event event = Event.builder()
+                .eventId("evt-1")
+                .eventType("tenant.created")
+                .category(EventCategory.TENANT)
+                .timestamp(Instant.parse("2026-04-18T00:00:00Z"))
+                .tenantId("t-1")
+                .source("admin")
+                .build();
+
+        String json = mapper.writeValueAsString(event);
+
+        assertThat(json).doesNotContain("trace_id");
+    }
+
+    @Test
+    void event_unknownField_tolerated() throws Exception {
+        // @JsonIgnoreProperties(ignoreUnknown=true) — forward-compat with spec additions.
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        String jsonWithFutureField =
+                "{\"event_id\":\"evt-1\",\"event_type\":\"tenant.created\"," +
+                "\"category\":\"tenant\",\"timestamp\":\"2026-04-18T00:00:00Z\"," +
+                "\"tenant_id\":\"t-1\",\"source\":\"admin\"," +
+                "\"future_unknown_field\":\"should-not-fail\"}";
+
+        Event event = mapper.readValue(jsonWithFutureField, Event.class);
+
+        assertThat(event.getEventId()).isEqualTo("evt-1");
     }
 
     @Test
