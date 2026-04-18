@@ -278,6 +278,46 @@ class ModelTest {
     }
 
     @Test
+    void delivery_traceFields_roundTrip() throws Exception {
+        // Spec v0.1.25.28 — trace_id, trace_flags, traceparent_inbound_valid
+        // optional on WebhookDelivery. Omitted from JSON when null.
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        Delivery delivery = Delivery.builder()
+                .deliveryId("del-1")
+                .status(DeliveryStatus.PENDING)
+                .traceId("0123456789abcdef0123456789abcdef")
+                .traceFlags("00")
+                .traceparentInboundValid(Boolean.TRUE)
+                .build();
+
+        String json = mapper.writeValueAsString(delivery);
+
+        assertThat(json).contains("\"trace_id\":\"0123456789abcdef0123456789abcdef\"");
+        assertThat(json).contains("\"trace_flags\":\"00\"");
+        assertThat(json).contains("\"traceparent_inbound_valid\":true");
+
+        Delivery roundTrip = mapper.readValue(json, Delivery.class);
+        assertThat(roundTrip.getTraceId()).isEqualTo("0123456789abcdef0123456789abcdef");
+        assertThat(roundTrip.getTraceFlags()).isEqualTo("00");
+        assertThat(roundTrip.getTraceparentInboundValid()).isTrue();
+    }
+
+    @Test
+    void delivery_traceFields_absent_omittedFromJson() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        Delivery delivery = Delivery.builder()
+                .deliveryId("del-1")
+                .status(DeliveryStatus.PENDING)
+                .build();
+
+        String json = mapper.writeValueAsString(delivery);
+
+        assertThat(json).doesNotContain("trace_id");
+        assertThat(json).doesNotContain("trace_flags");
+        assertThat(json).doesNotContain("traceparent_inbound_valid");
+    }
+
+    @Test
     void event_traceId_serialisesAsSnakeCase() throws Exception {
         // spec v0.1.25.27: Event.trace_id (optional, ^[0-9a-f]{32}$).
         ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());

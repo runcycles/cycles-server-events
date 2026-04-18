@@ -272,6 +272,81 @@ class WebhookDeliveryIntegrationTest {
         }
     }
 
+    @Test
+    @Order(4)
+    @DisplayName("Delivery with traceparent_inbound_valid=true preserves upstream trace-flags")
+    void inboundTraceFlagsPreserved() throws Exception {
+        // Spec v0.1.25.28: when admin writes trace_flags + traceparent_inbound_valid=true
+        // on the delivery record, events-server MUST use that flags byte on the outbound
+        // traceparent instead of defaulting to "01". This test proves the full Redis →
+        // dispatcher → HTTP path honours the sampling hint.
+        deliveryLatch = new CountDownLatch(1);
+
+        try (Jedis jedis = jedisPool.getResource()) {
+            String subId = "whsub_flags_001";
+            jedis.set("webhook:" + subId, objectMapper.writeValueAsString(Map.ofEntries(
+                    Map.entry("subscription_id", subId),
+                    Map.entry("tenant_id", TENANT_ID),
+                    Map.entry("url", "http://localhost:" + webhookPort + "/webhook"),
+                    Map.entry("event_types", List.of("tenant.created")),
+                    Map.entry("status", "ACTIVE"),
+                    Map.entry("disable_after_failures", 10),
+                    Map.entry("consecutive_failures", 0))));
+            jedis.sadd("webhooks:" + TENANT_ID, subId);
+
+            String traceId = "0123456789abcdef0123456789abcdef";
+            String eventId = "evt_flags_" + UUID.randomUUID().toString().substring(0, 8);
+            jedis.set("event:" + eventId, objectMapper.writeValueAsString(Map.ofEntries(
+                    Map.entry("event_id", eventId),
+                    Map.entry("event_type", "tenant.created"),
+                    Map.entry("category", "tenant"),
+                    Map.entry("timestamp", Instant.now().toString()),
+                    Map.entry("tenant_id", TENANT_ID),
+                    Map.entry("source", "test"),
+                    Map.entry("trace_id", traceId))));
+
+            // This mirrors EXACTLY what cycles-server-admin v0.1.25.31's
+            // WebhookDispatchService.createDelivery(...) writes: trace_id +
+            // trace_flags + traceparent_inbound_valid are all stamped at
+            // delivery creation from the TraceContextFilter request attributes.
+            String deliveryId = "del_flags_" + UUID.randomUUID().toString().substring(0, 8);
+            jedis.set("delivery:" + deliveryId, objectMapper.writeValueAsString(Map.ofEntries(
+                    Map.entry("delivery_id", deliveryId),
+                    Map.entry("subscription_id", subId),
+                    Map.entry("event_id", eventId),
+                    Map.entry("event_type", "tenant.created"),
+                    Map.entry("status", "PENDING"),
+                    Map.entry("attempted_at", Instant.now().toString()),
+                    Map.entry("attempts", 0),
+                    Map.entry("trace_id", traceId),
+                    // Upstream request carried a valid traceparent with sampled=0.
+                    // Dispatcher MUST preserve that on the outbound header.
+                    Map.entry("trace_flags", "00"),
+                    Map.entry("traceparent_inbound_valid", Boolean.TRUE))));
+            jedis.lpush("dispatch:pending", deliveryId);
+
+            boolean delivered = deliveryLatch.await(15, TimeUnit.SECONDS);
+            assertThat(delivered).isTrue();
+
+            Map<String, String> webhook = receivedWebhooks.get(0);
+            assertThat(webhook.get("trace_id")).isEqualTo(traceId);
+            assertThat(webhook.get("traceparent"))
+                    .matches("^00-" + traceId + "-[0-9a-f]{16}-00$");
+
+            // After the delivery lands, verify the persisted delivery record
+            // still carries admin's authoritative trace_id (dispatcher MUST
+            // NOT overwrite admin-authored values — forward-compat guarantee).
+            String persistedJson = jedis.get("delivery:" + deliveryId);
+            assertThat(persistedJson)
+                    .as("admin-authored trace_id must survive the dispatcher write-back")
+                    .contains("\"trace_id\":\"" + traceId + "\"")
+                    .contains("\"trace_flags\":\"00\"")
+                    .contains("\"traceparent_inbound_valid\":true");
+
+            jedis.srem("webhooks:" + TENANT_ID, subId);
+        }
+    }
+
     private static String computeHmac(String payload, String secret) {
         try {
             Mac mac = Mac.getInstance("HmacSHA256");

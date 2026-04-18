@@ -133,9 +133,9 @@ def verify(body: bytes, secret: str, signature: str) -> bool:
 | `X-Cycles-Signature` | `sha256=<hex>` | HMAC-SHA256 of body (if signing secret configured) |
 | `X-Cycles-Event-Id` | `evt_abc123...` | For deduplication (at-least-once delivery) |
 | `X-Cycles-Event-Type` | `budget.exhausted` | Event type for routing |
-| `User-Agent` | `cycles-server-events/0.1.25.7` | Service identifier |
+| `User-Agent` | `cycles-server-events/0.1.25.8` | Service identifier |
 | `X-Cycles-Trace-Id` | `<32-hex-lowercase>` | W3C trace-id (spec v0.1.25.27) — always present |
-| `traceparent` | `00-<trace-id>-<16-hex-span>-01` | W3C Trace Context v00 — always present |
+| `traceparent` | `00-<trace-id>-<16-hex-span>-<flags>` | W3C Trace Context v00 — always present. `<flags>` preserves upstream sampling when `WebhookDelivery.traceparent_inbound_valid=true` (spec v0.1.25.28), else `01` |
 | `X-Request-Id` | `<request-id>` | Originating HTTP request id — present when `event.request_id` is populated |
 | Custom headers | Per subscription | From `WebhookSubscription.headers` map |
 
@@ -288,7 +288,7 @@ The webhook POST body is the full event JSON. Null fields are omitted.
 ## Build & Test
 
 ```bash
-# Build and run unit tests (165 unit tests, 95%+ line coverage enforced by JaCoCo)
+# Build and run unit tests (195 unit tests, 95%+ line coverage enforced by JaCoCo)
 mvn verify
 
 # Run all tests including integration (requires Docker for Testcontainers Redis)
