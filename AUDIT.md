@@ -147,6 +147,7 @@
 | `DeliveryHandler` proactively stamps `Event.trace_id` → `Delivery.trace_id` when admin has not pre-populated | PASS |
 | Admin-authored `Delivery.trace_id` is never overwritten by the dispatcher | PASS |
 | Wire-verified against `cycles-server-admin` v0.1.25.31 — field names, JSON types, enum values, `@JsonIgnoreProperties` strictness all compatible | PASS |
+| Wire-verified against `cycles-server` v0.1.25.14 runtime — `EventEmitterRepository.createDelivery` writes identical field set; all 6 emitted `EventType`s (BUDGET_EXHAUSTED, BUDGET_OVER_LIMIT_ENTERED, BUDGET_DEBT_INCURRED, RESERVATION_DENIED, RESERVATION_EXPIRED, RESERVATION_COMMIT_OVERAGE) present in events-server's vocabulary | PASS |
 
 ## Changelog
 
@@ -187,6 +188,7 @@
 | 2026-04-18 | 0.1.25.8 | Proactive `trace_id` stamping in `DeliveryHandler`: copies `Event.trace_id` onto `Delivery.trace_id` when admin has not pre-set; never overwrites admin-authored values |
 | 2026-04-18 | 0.1.25.8 | Bump version to 0.1.25.8 |
 | 2026-04-18 | 0.1.25.8 | Wire-verified against `cycles-server-admin` v0.1.25.31 (shipped 2026-04-18). Admin's `WebhookDispatchService.createDelivery` writes `trace_id` + `trace_flags` + `traceparent_inbound_valid` from `TraceContextFilter` request attributes (fallback `event.trace_id`). Events-server's `Delivery` model reads them unchanged. Admin's `WebhookDelivery` is `@JsonIgnoreProperties(ignoreUnknown=false)` (strict); events-server's field set matches exactly — safe. Integration test `inboundTraceFlagsPreserved` extended to mirror admin's exact write format and to assert admin-authored `trace_id` survives the dispatcher's write-back. |
+| 2026-04-18 | 0.1.25.8 | Wire-verified against `cycles-server` v0.1.25.14 runtime. `EventEmitterRepository.createDelivery` writes delivery records to the same Redis keyspace (`delivery:<id>` / `dispatch:pending` list) using the same `WebhookDelivery` shape; trace fields propagate from runtime request via transient `Event.traceFlags`/`traceparentInboundValid` @JsonIgnore fields into `WebhookDelivery`. Runtime's `WebhookDelivery` has no strict `@JsonIgnoreProperties(ignoreUnknown=false)` — events-server's write-back is safe (strictest consumer is still admin, which already passes). All 6 `EventType`s emitted by cycles-server (BUDGET_EXHAUSTED, BUDGET_OVER_LIMIT_ENTERED, BUDGET_DEBT_INCURRED, RESERVATION_DENIED, RESERVATION_EXPIRED, RESERVATION_COMMIT_OVERAGE) are recognised by events-server's 41-type vocabulary. No code changes required. |
 
 ### Not applicable to events server (v0.1.25.19 → v0.1.25.27 negative findings)
 
