@@ -1,8 +1,8 @@
 # Cycles Protocol v0.1.25 — Events Server Implementation Audit
 
-**Date:** 2026-04-18 (v0.1.25.7 — admin-spec v0.1.25.27 alignment: three-tier correlation/tracing. Add `Event.trace_id` (optional, `^[0-9a-f]{32}$`); new `TraceContext` helper resolves-or-mints trace-id and builds W3C `traceparent` v00 with fresh span-id per delivery; WebhookTransport emits `X-Cycles-Trace-Id` + `traceparent` on every outbound POST and forwards `X-Request-Id` when event carries `request_id`; EventPayloadValidator gains non-fatal `trace_id_shape` rule. Documents negative findings for spec v0.1.25.19–.26 (admin-plane-only changes that do not affect the dispatcher).), 2026-04-16 (v0.1.25.6 — admin-spec v0.1.25.18 alignment: add `BUDGET_RESET_SPENT`; add `cycles_webhook_*` Micrometer counters + latency timer mirroring `cycles-server` v0.1.25.10; add non-fatal `EventPayloadValidator` mirroring `cycles-server-admin` v0.1.25.12; parity refactor adopting dotted metric names, `tags(...)` helper, tenant-tag toggle, `UNKNOWN` sentinel; add `CHANGELOG.md` + `OPERATIONS.md` for doc parity), 2026-04-08 (v0.1.25.5 — force HTTP/1.1 outbound transport to fix h2c body drop, #16), 2026-04-07 (v0.1.25.4 — partial subscription update to avoid overwriting admin config), 2026-04-03 (v0.1.25.3 — Prometheus registry dependency; typed `DeliveryStatus`/`WebhookStatus` enums), 2026-04-01 (v0.1.25.1 initial implementation — dispatch loop, delivery handler, retry scheduler, AES-256-GCM secret encryption, TTL-based retention, E2E integration test).
+**Date:** 2026-04-18 (v0.1.25.8 — admin-spec v0.1.25.28 alignment: extend correlation/tracing onto `WebhookDelivery`. Add three optional fields to `Delivery` model (`trace_id`, `trace_flags`, `traceparent_inbound_valid`); `TraceContext.buildTraceparent` now accepts a `trace_flags` byte so outbound `traceparent` preserves inbound sampling decisions when `traceparent_inbound_valid=true`; `Transport.deliver` gains a `Delivery` parameter so the transport can read the sampling hints. Proactive `trace_id` stamping: `DeliveryHandler` copies `Event.trace_id` onto the persisted `Delivery` record when admin hasn't set one, filling the gap while `cycles-server-admin` catches up to spec v0.1.25.28 (no overwrite if admin has already stamped).), 2026-04-18 (v0.1.25.7 — admin-spec v0.1.25.27 alignment: three-tier correlation/tracing. Add `Event.trace_id` (optional, `^[0-9a-f]{32}$`); new `TraceContext` helper resolves-or-mints trace-id and builds W3C `traceparent` v00 with fresh span-id per delivery; WebhookTransport emits `X-Cycles-Trace-Id` + `traceparent` on every outbound POST and forwards `X-Request-Id` when event carries `request_id`; EventPayloadValidator gains non-fatal `trace_id_shape` rule. Documents negative findings for spec v0.1.25.19–.26 (admin-plane-only changes that do not affect the dispatcher).), 2026-04-16 (v0.1.25.6 — admin-spec v0.1.25.18 alignment: add `BUDGET_RESET_SPENT`; add `cycles_webhook_*` Micrometer counters + latency timer mirroring `cycles-server` v0.1.25.10; add non-fatal `EventPayloadValidator` mirroring `cycles-server-admin` v0.1.25.12; parity refactor adopting dotted metric names, `tags(...)` helper, tenant-tag toggle, `UNKNOWN` sentinel; add `CHANGELOG.md` + `OPERATIONS.md` for doc parity), 2026-04-08 (v0.1.25.5 — force HTTP/1.1 outbound transport to fix h2c body drop, #16), 2026-04-07 (v0.1.25.4 — partial subscription update to avoid overwriting admin config), 2026-04-03 (v0.1.25.3 — Prometheus registry dependency; typed `DeliveryStatus`/`WebhookStatus` enums), 2026-04-01 (v0.1.25.1 initial implementation — dispatch loop, delivery handler, retry scheduler, AES-256-GCM secret encryption, TTL-based retention, E2E integration test).
 
-**Spec:** `cycles-governance-admin-v0.1.25.yaml` (OpenAPI 3.1.0, v0.1.25.27) — authoritative source at `cycles-protocol` repo; served from `cycles-server-admin`.
+**Spec:** `cycles-governance-admin-v0.1.25.yaml` (OpenAPI 3.1.0, v0.1.25.28) — authoritative source at `cycles-protocol` repo; served from `cycles-server-admin`.
 
 **Service:** Spring Boot 3.5.11 / Java 21 / Jedis 5.2.0 / Micrometer Prometheus registry. Redis-driven webhook dispatcher (no inbound API surface of its own).
 
@@ -18,7 +18,7 @@
 | Field | Value |
 |-------|-------|
 | Service | cycles-server-events |
-| Version | 0.1.25.7 |
+| Version | 0.1.25.8 |
 | Java | 21 |
 | Spring Boot | 3.5.11 |
 | Spec Authority | [complete-budget-governance-v0.1.25.yaml](https://github.com/runcycles/cycles-server-admin/blob/main/complete-budget-governance-v0.1.25.yaml) |
@@ -27,8 +27,8 @@
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 187 |
-| Unit tests | 184 |
+| Total tests | 198 |
+| Unit tests | 195 |
 | Integration tests | 3 (WebhookDeliveryIntegrationTest) |
 | JaCoCo minimum | 95% line coverage (enforced) |
 
@@ -53,15 +53,15 @@
 | Repository | DeliveryRepository.java | DeliveryRepositoryTest (6) |
 | Repository | SubscriptionRepository.java | SubscriptionRepositoryTest (11) |
 | Repository | DeliveryQueueRepository.java | DeliveryQueueRepositoryTest (8) |
-| Service | DeliveryHandler.java | DeliveryHandlerTest (33) |
+| Service | DeliveryHandler.java | DeliveryHandlerTest (36) |
 | Service | DispatchLoop.java | DispatchLoopTest (4) |
 | Service | RetryScheduler.java | RetrySchedulerTest (3) |
 | Service | RetentionCleanupService.java | RetentionCleanupServiceTest (3) |
 | Transport | Transport.java (interface) | (via WebhookTransportTest) |
 | Transport | TransportResult.java | ModelTest |
 | Transport | PayloadSigner.java | PayloadSignerTest (5) |
-| Transport | WebhookTransport.java | WebhookTransportTest (16) |
-| Transport | TraceContext.java | TraceContextTest (8) |
+| Transport | WebhookTransport.java | WebhookTransportTest (19) |
+| Transport | TraceContext.java | TraceContextTest (11) |
 | Validation | EventPayloadValidator.java | EventPayloadValidatorTest (24) |
 | Integration | - | WebhookDeliveryIntegrationTest (3) |
 
@@ -142,6 +142,10 @@
 | Outbound webhook headers X-Cycles-Trace-Id + traceparent always present (spec v0.1.25.27 + cycles-protocol-v0.yaml) | PASS |
 | Outbound X-Request-Id forwarded when Event.request_id present | PASS |
 | `@JsonIgnoreProperties(ignoreUnknown=true)` on Event — tolerates additive spec evolution | PASS |
+| `WebhookDelivery.trace_id` / `trace_flags` / `traceparent_inbound_valid` optional on wire (spec v0.1.25.28) | PASS |
+| Outbound `traceparent` preserves inbound sampling when `traceparent_inbound_valid=true`, else defaults to `01` | PASS |
+| `DeliveryHandler` proactively stamps `Event.trace_id` → `Delivery.trace_id` when admin has not pre-populated | PASS |
+| Admin-authored `Delivery.trace_id` is never overwritten by the dispatcher | PASS |
 
 ## Changelog
 
@@ -176,6 +180,11 @@
 | 2026-04-18 | 0.1.25.7 | EventPayloadValidator: new non-fatal `trace_id_shape` rule — warns + increments metric when `trace_id` present but doesn't match `^[0-9a-f]{32}$` |
 | 2026-04-18 | 0.1.25.7 | `@JsonIgnoreProperties(ignoreUnknown=true)` on `Event` to stay forward-compatible with additive spec evolution |
 | 2026-04-18 | 0.1.25.7 | Bump version to 0.1.25.7 |
+| 2026-04-18 | 0.1.25.8 | Add `Delivery.trace_id` / `trace_flags` / `traceparent_inbound_valid` optional fields — spec v0.1.25.28 |
+| 2026-04-18 | 0.1.25.8 | `TraceContext.buildTraceparent(traceId, traceFlags)` — honors inbound sampling byte, falls back to `01` on null/blank/malformed |
+| 2026-04-18 | 0.1.25.8 | `Transport.deliver` gains `Delivery` parameter; WebhookTransport reads `delivery.traceFlags` only when `traceparent_inbound_valid=true`, else defaults `01` |
+| 2026-04-18 | 0.1.25.8 | Proactive `trace_id` stamping in `DeliveryHandler`: copies `Event.trace_id` onto `Delivery.trace_id` when admin has not pre-set; never overwrites admin-authored values |
+| 2026-04-18 | 0.1.25.8 | Bump version to 0.1.25.8 |
 
 ### Not applicable to events server (v0.1.25.19 → v0.1.25.27 negative findings)
 
@@ -195,9 +204,10 @@ Captured explicitly so a future reviewer doesn't re-litigate the gap analysis:
 ## Last Audited
 
 - **Date:** 2026-04-18
-- **Version:** 0.1.25.7
-- **Build:** PASS (unit tests + 95%+ coverage enforced)
-- **Integration test:** PASS (Testcontainers Redis)
+- **Version:** 0.1.25.8
+- **Build:** PASS (195 unit tests, 95%+ coverage enforced)
+- **Integration test:** PASS (3 Testcontainers Redis tests)
+- **Total:** 198 tests
 
 ## Cross-Repo Spec Drift Notes (informational)
 

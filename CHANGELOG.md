@@ -20,6 +20,71 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.8] — 2026-04-18
+
+### Added
+
+- **Cross-surface correlation on the `WebhookDelivery` schema.** Aligns
+  with admin-spec `cycles-governance-admin-v0.1.25.yaml` info.version
+  `0.1.25.28`, which closes the gap left by v0.1.25.27 by extending
+  `trace_id` correlation onto `WebhookDelivery`. Three new OPTIONAL
+  fields on the `Delivery` model:
+  - `trace_id` (`^[0-9a-f]{32}$`) — captured at dispatch time from
+    the originating Event so operators can JOIN a delivery record with
+    the event that produced it, the audit entry for the originating
+    HTTP request, and sibling deliveries in the same fan-out.
+  - `trace_flags` (`^[0-9a-f]{2}$`) — the W3C Trace Context
+    trace-flags byte to use when constructing the outbound
+    `traceparent` header, preserving the inbound sampling decision.
+  - `traceparent_inbound_valid` (boolean) — whether the originating
+    request presented a valid W3C `traceparent`. When `true`, the
+    dispatcher honours `trace_flags`; when `false`/null, it defaults
+    to `01` (sampled) per cycles-protocol-v0 §CORRELATION AND TRACING.
+- **`TraceContext.buildTraceparent(traceId, traceFlags)`** — second
+  argument threads the sampling byte through to the outbound header.
+  Invalid / null / blank / non-2-hex values fall back to `01`, so the
+  existing always-required header contract remains unconditionally
+  satisfied.
+- **Proactive `trace_id` stamping on the `Delivery` record.**
+  `DeliveryHandler` copies `Event.trace_id` onto `Delivery.trace_id`
+  before persisting, when the delivery didn't already carry one. This
+  fills the gap while `cycles-server-admin` hasn't yet caught up to
+  spec v0.1.25.28 — admin's `GET /v1/admin/webhooks/deliveries`
+  readback now has a populated `trace_id` without a cross-service
+  round trip. Admin-authored values are never overwritten (forward
+  compatibility with the eventual admin v0.1.25.31+).
+
+### Changed
+
+- `Transport.deliver` signature gains a `Delivery` parameter so the
+  transport can read the sampling hints. Callers with no delivery
+  context (ad-hoc webhook-test POSTs, unit tests exercising just the
+  transport) pass `null`; the transport treats that as
+  `traceparent_inbound_valid=false` and uses `01`.
+- `WebhookTransport` version fallback bumped from `0.1.25.7` to
+  `0.1.25.8` (used when `BuildProperties` is unavailable, e.g., tests).
+
+### Unchanged
+
+- All existing outbound headers (`X-Cycles-Trace-Id`, `traceparent`,
+  `X-Request-Id`, `X-Cycles-Signature`, etc.) remain in place with
+  byte-identical wire format when `delivery` is null or missing the
+  new fields — which is true of every existing delivery record today
+  because admin hasn't yet implemented its half of spec v0.1.25.28.
+- HMAC-SHA256 canonical string, Redis schema, metric names, tag
+  schemas, retry policy.
+
+### Spec-impl gap note
+
+Admin server (`cycles-server-admin`) has not yet implemented its v0.1.25.28
+half — the spec landed, the impl hasn't. This release ships the
+dispatcher-side contract in advance so that when admin starts
+stamping `trace_flags` / `traceparent_inbound_valid` on delivery
+creation, events-server honours them immediately without another
+release. Until then, behaviour is byte-identical to v0.1.25.7 except
+for the proactive `Delivery.trace_id` stamping, which is a
+pure-additive field on the persisted delivery record.
+
 ## [0.1.25.7] — 2026-04-18
 
 ### Added
