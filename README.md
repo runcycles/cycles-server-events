@@ -237,13 +237,13 @@ public interface Transport {
 
 ## Monitoring
 
-Spring Actuator endpoints are exposed on the service port (7980), powered by Micrometer with a Prometheus registry:
+Spring Actuator endpoints run on a **separate management port (9980)** so they are not reachable from the public API port (7980). Keep 9980 on an internal-only ClusterIP / network; scrape from there.
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /actuator/health` | Liveness check (UP/DOWN) |
-| `GET /actuator/info` | Build info (version, artifact) |
-| `GET /actuator/prometheus` | Prometheus-format metrics for scraping |
+| `GET :9980/actuator/health` | Liveness check (UP/DOWN) |
+| `GET :9980/actuator/info` | Build info (version, artifact) |
+| `GET :9980/actuator/prometheus` | Prometheus-format metrics for scraping |
 
 Prometheus scrape config example:
 
@@ -252,8 +252,10 @@ scrape_configs:
   - job_name: cycles-server-events
     metrics_path: /actuator/prometheus
     static_configs:
-      - targets: ['localhost:7980']
+      - targets: ['localhost:9980']
 ```
+
+Override the management port via the `MANAGEMENT_PORT` env var if 9980 collides.
 
 In addition to Spring Boot's auto-emitted `http_server_requests_seconds` (which covers the actuator endpoints, not the outbound webhook traffic), this service exposes eight domain-level meters under the `cycles_webhook_*` namespace — seven counters plus one latency timer. Operators can alert on fleet-wide failure rates, stale-delivery backlogs, subscription auto-disables, and payload-validator warnings without grepping logs.
 

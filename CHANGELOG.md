@@ -20,6 +20,32 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.9] — 2026-04-18
+
+### Changed
+
+- **Actuators moved to a separate management port (9980).** Previously, the
+  `health`, `info`, and `prometheus` actuator endpoints were served on the
+  public API port `7980` alongside the dispatch control surface. They now bind
+  to a dedicated `management.server.port` (default `9980`, override via
+  `MANAGEMENT_PORT` env var) so they're never reachable from the public API
+  port. The exposure list (`health,info,prometheus`) is unchanged — only the
+  port. Clears CodeQL `java/spring-boot-exposed-actuators-config` and aligns
+  the service with the standard defense-in-depth deployment pattern: expose
+  7980 via public ingress / external ClusterIP, keep 9980 on an
+  internal-only ClusterIP scraped by Prometheus.
+
+### Migration
+
+- **Prometheus scrape configs must update their target port** from `7980` →
+  `9980` (or whatever `MANAGEMENT_PORT` is set to). See the Monitoring section
+  of `README.md` for the updated scrape example.
+- **In-cluster healthchecks** (kubelet probes, Docker `HEALTHCHECK`) must hit
+  `:9980/actuator/health` instead of `:7980/actuator/health`. The published
+  Docker image's `HEALTHCHECK` has already been updated.
+- **No wire-format change.** Event payloads, signature scheme, and Redis key
+  contract are unchanged.
+
 ## [0.1.25.8] — 2026-04-18
 
 ### Added
