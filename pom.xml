@@ -18,7 +18,7 @@
     <description>Event delivery service for the Cycles ecosystem</description>
 
     <properties>
-        <revision>0.1.25.8</revision>
+        <revision>0.1.25.9</revision>
         <java.version>21</java.version>
         <jedis.version>5.2.0</jedis.version>
         <testcontainers.version>1.20.4</testcontainers.version>

@@ -80,6 +80,7 @@
 | Random IV per encryption (12 bytes) | PASS |
 | Backward-compatible plaintext fallback | PASS |
 | No TODO/FIXME/HACK in source | PASS |
+| Actuators isolated to separate management port (0.1.25.9) | PASS |
 
 ## Configuration Audit
 
@@ -101,6 +102,7 @@
 | events.retention.cleanup-interval-ms | 3600000 | RETENTION_CLEANUP_INTERVAL_MS | OK |
 | spring.task.scheduling.pool.size | 3 | - | OK |
 | management.endpoints.web.exposure.include | health,info,prometheus | - | OK |
+| management.server.port | 9980 | MANAGEMENT_PORT | OK (0.1.25.9: actuators off public port) |
 
 ## Dependencies
 

@@ -5,8 +5,9 @@ Covers metrics, alerting recipes, SLOs, dashboards, and an incident playbook.
 
 Assumes you are already deploying via the published Docker image
 (`ghcr.io/runcycles/cycles-server-events:<version>`) with Prometheus scraping
-`/actuator/prometheus` on port **7980**. If you haven't set that up yet, see
-the Monitoring section of [`README.md`](README.md) first.
+`/actuator/prometheus` on the **management port (9980)** — actuators moved off
+the public API port 7980 in 0.1.25.9 for defense-in-depth. If you haven't set
+that up yet, see the Monitoring section of [`README.md`](README.md) first.
 
 Also worth reading: [`cycles-server/OPERATIONS.md`](https://github.com/runcycles/cycles-server/blob/main/OPERATIONS.md)
 and [`cycles-server-admin/OPERATIONS.md`](https://github.com/runcycles/cycles-server-admin/blob/main/OPERATIONS.md).
@@ -479,6 +480,7 @@ don't fit.
 | `cycles.metrics.tenant-tag.enabled` | `true` | Set `false` if you have thousands of tenants and Prometheus cardinality is stressed. Flip both this service and `cycles-server` together for dashboard consistency. |
 | `spring.task.scheduling.pool.size` | `3` | Size of the scheduled-task executor (dispatch loop + retry scheduler + cleanup). Don't lower below 3 — each needs its own thread to avoid starvation. |
 | `management.endpoints.web.exposure.include` | `health,info,prometheus` | Add more actuator endpoints if needed, but `prometheus` is the one ops cares about. |
+| `MANAGEMENT_PORT` | `9980` | Separate port actuators bind to — keep this on an internal-only network. The public API port 7980 serves no actuator endpoints. |
 
 ## Getting help
 
