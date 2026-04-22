@@ -20,6 +20,27 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.10] — 2026-04-19
+
+### Changed
+
+- **Spring Boot 3.5.11 → 3.5.13 + Tomcat 10.1.54 pin.** Supply-chain CVE
+  cleanup. Closes four HIGH/CRITICAL CVEs on `tomcat-embed-core`:
+  CVE-2026-29145 (CRITICAL) and CVE-2026-29129 (HIGH) via Spring Boot
+  3.5.13's managed Tomcat 10.1.53, plus CVE-2026-34483 (HIGH) and
+  CVE-2026-34487 (HIGH) via explicit `<tomcat.version>10.1.54</tomcat.version>`
+  pin until Spring Boot ships 10.1.54+ as its managed version. No code
+  changes; all 195 tests pass.
+
+### Note
+
+- v0.1.25.9 (actuators moved to a separate management port, see entry
+  below) and v0.1.25.10 both landed on main during the release
+  consolidation window and ship together as v0.1.25.10. The .9 entry
+  is preserved below for historical accuracy of the change set; image
+  tag `ghcr.io/runcycles/cycles-server-events:0.1.25.10` includes both
+  changes.
+
 ## [0.1.25.9] — 2026-04-18
 
 ### Changed
