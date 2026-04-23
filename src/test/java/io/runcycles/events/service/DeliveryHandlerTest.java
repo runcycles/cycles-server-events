@@ -757,7 +757,9 @@ class DeliveryHandlerTest {
         assertThat(emitted.getEventType()).isEqualTo("webhook.disabled");
         assertThat(emitted.getCategory()).isEqualTo(EventCategory.WEBHOOK);
         assertThat(emitted.getTenantId()).isEqualTo("t-1");
-        assertThat(emitted.getScope()).isEqualTo("webhook:sub-1");
+        // scope null matches admin's WebhookAdminController.emitWebhookLifecycleEvent
+        // convention on all webhook.* lifecycle emits.
+        assertThat(emitted.getScope()).isNull();
         assertThat(emitted.getSource()).isEqualTo("cycles-events");
         assertThat(emitted.getCorrelationId()).isEqualTo("webhook_auto_disable:sub-1:del-1");
         assertThat(emitted.getActor()).isNotNull();

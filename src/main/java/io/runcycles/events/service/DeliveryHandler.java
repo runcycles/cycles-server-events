@@ -201,10 +201,19 @@ public class DeliveryHandler {
     private void incrementConsecutiveFailures(Subscription sub, Delivery delivery) {
         int failures = (sub.getConsecutiveFailures() != null ? sub.getConsecutiveFailures() : 0) + 1;
         int disableAfter = sub.getDisableAfterFailures() != null ? sub.getDisableAfterFailures() : 10;
+        // Read from the snapshot loaded in handle(); admin could have flipped
+        // status to PAUSED between that load and now, in which case the emitted
+        // previous_status is one flip behind. The final persisted status is
+        // authoritative (updateDeliveryState below writes DISABLED), so this
+        // only affects the audit-trail Event's previous_status — acceptable.
         WebhookStatus previousStatus = sub.getStatus();
         WebhookStatus newStatus = null;
         if (failures >= disableAfter) {
             newStatus = WebhookStatus.DISABLED;
+            // Safe-once: handle() gates on status == ACTIVE at line 106-108,
+            // so once updateDeliveryState persists DISABLED below, subsequent
+            // deliveries short-circuit before reaching this path — the metric
+            // fires exactly once per auto-disable transition.
             metrics.recordSubscriptionAutoDisabled(sub.getTenantId(), REASON_CONSECUTIVE_FAILURES);
             LOG.warn("Subscription {} auto-disabled after {} consecutive failures",
                     sub.getSubscriptionId(), failures);
@@ -237,11 +246,14 @@ public class DeliveryHandler {
             data.put("changed_fields", List.of());
             data.put("disable_reason", "consecutive_failures_exceeded_threshold");
 
+            // scope=null to match admin's WebhookAdminController.emitWebhookLifecycleEvent
+            // convention on all webhook.* lifecycle emits — keeps operator
+            // scope-filter queries returning a consistent set regardless of
+            // which plane wrote the Event.
             Event event = Event.builder()
                     .eventType(EventType.WEBHOOK_DISABLED.getValue())
                     .category(EventCategory.WEBHOOK)
                     .tenantId(sub.getTenantId())
-                    .scope("webhook:" + sub.getSubscriptionId())
                     .actor(Actor.builder().type(ActorType.SYSTEM).build())
                     .source("cycles-events")
                     .data(data)
