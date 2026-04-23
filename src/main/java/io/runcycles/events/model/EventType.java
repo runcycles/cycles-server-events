@@ -49,7 +49,11 @@ public enum EventType {
     SYSTEM_STORE_CONNECTION_RESTORED("system.store_connection_restored", EventCategory.SYSTEM),
     SYSTEM_HIGH_LATENCY("system.high_latency", EventCategory.SYSTEM),
     SYSTEM_WEBHOOK_DELIVERY_FAILED("system.webhook_delivery_failed", EventCategory.SYSTEM),
-    SYSTEM_WEBHOOK_TEST("system.webhook_test", EventCategory.SYSTEM);
+    SYSTEM_WEBHOOK_TEST("system.webhook_test", EventCategory.SYSTEM),
+    // Webhook lifecycle (spec v0.1.25.33 — dispatcher emits webhook.disabled
+    // on auto-disable; other webhook.* EventTypes are emitted by the admin
+    // plane on operator lifecycle actions and are not produced here)
+    WEBHOOK_DISABLED("webhook.disabled", EventCategory.WEBHOOK);
 
     private final String value;
     private final EventCategory category;

@@ -20,6 +20,60 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.11] — 2026-04-23
+
+### Added
+
+- **Dispatcher emits `webhook.disabled` Event on auto-disable.** Implements the
+  dispatcher half of the spec v0.1.25.33 webhook lifecycle contract (operator
+  lifecycle emits were wired into `cycles-server-admin` v0.1.25.39). When a
+  subscription's consecutive-failure counter crosses
+  `disable_after_failures`, `DeliveryHandler` now writes an audit-trail Event
+  to the shared Redis store alongside the existing status flip to `DISABLED`
+  and the `cycles_subscription_auto_disabled_total` metric increment.
+  - `event_type` = `webhook.disabled`, `category` = `webhook`.
+  - `correlation_id` = `webhook_auto_disable:<subscription_id>:<delivery_id>`
+    — the triggering delivery's id is the "failure batch" identifier the
+    spec calls for, letting operators pivot from the auto-disable Event to
+    the final failed delivery and from there to the upstream event via
+    existing `GET /v1/admin/events?correlation_id=…` and
+    `GET /v1/admin/webhooks/deliveries?…` JOINs.
+  - Payload conforms to `EventDataWebhookLifecycle`: includes
+    `subscription_id`, `tenant_id`, `previous_status`, `new_status`
+    (`DISABLED`), empty `changed_fields`, and
+    `disable_reason="consecutive_failures_exceeded_threshold"`.
+  - `actor.type` = `system`; `source` = `cycles-events`.
+  - `trace_id` is copied from the triggering Delivery when present (same
+    precedence rule as spec v0.1.25.28 trace stamping on the Delivery
+    record itself).
+  - Emit is best-effort: any Redis write failure is logged at WARN but does
+    **not** revert the status flip or the metric. The subscription state
+    transition is the source of truth; the audit trail is additive.
+
+### Changed
+
+- **`EventType` enum gains `WEBHOOK_DISABLED("webhook.disabled", WEBHOOK)`**
+  and **`EventCategory` enum gains `WEBHOOK("webhook")`**. Both additive, no
+  wire break for consumers that ignore unknown enum values (standard
+  Jackson/OpenAPI codegen behaviour).
+- **`EventRepository` gains `save(Event)`.** Mirrors the admin-side Lua
+  script pattern verbatim so dispatcher-emitted Events land under the same
+  Redis key shape admin reads from: `event:<id>` with TTL plus ZADD on the
+  per-tenant and global indexes plus optional SADD on
+  `events:correlation:<cid>`. TTL is governed by the same
+  `events.retention.event-ttl-days` config (default 90). No change to
+  existing `findById`.
+
+### Compatibility
+
+- Additive-only change. No config migration. Existing deployments continue
+  to run unchanged; the new Event simply starts appearing under
+  `GET /v1/admin/events?event_type=webhook.disabled` when auto-disable
+  fires. `cycles-server-admin` v0.1.25.39 is the minimum admin version for
+  the operator-side lifecycle emits; no admin version bump is required to
+  consume the dispatcher-side emit since admin reads the shared Redis store
+  directly.
+
 ## [0.1.25.10] — 2026-04-19
 
 ### Changed

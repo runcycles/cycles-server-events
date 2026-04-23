@@ -221,7 +221,8 @@ class ModelTest {
         EventCategory[] values = EventCategory.values();
         assertThat(values).containsExactly(
                 EventCategory.BUDGET, EventCategory.TENANT, EventCategory.API_KEY,
-                EventCategory.POLICY, EventCategory.RESERVATION, EventCategory.SYSTEM);
+                EventCategory.POLICY, EventCategory.RESERVATION, EventCategory.SYSTEM,
+                EventCategory.WEBHOOK);
     }
 
     @Test
@@ -232,12 +233,14 @@ class ModelTest {
         assertThat(EventCategory.POLICY.getValue()).isEqualTo("policy");
         assertThat(EventCategory.RESERVATION.getValue()).isEqualTo("reservation");
         assertThat(EventCategory.SYSTEM.getValue()).isEqualTo("system");
+        assertThat(EventCategory.WEBHOOK.getValue()).isEqualTo("webhook");
     }
 
     @Test
     void eventCategory_fromValue() {
         assertThat(EventCategory.fromValue("budget")).isEqualTo(EventCategory.BUDGET);
         assertThat(EventCategory.fromValue("api_key")).isEqualTo(EventCategory.API_KEY);
+        assertThat(EventCategory.fromValue("webhook")).isEqualTo(EventCategory.WEBHOOK);
     }
 
     @Test
@@ -258,13 +261,14 @@ class ModelTest {
     @Test
     void eventType_allValues() {
         EventType[] values = EventType.values();
-        assertThat(values.length).isEqualTo(41);
+        assertThat(values.length).isEqualTo(42);
         // Spot-check a few
         assertThat(EventType.valueOf("BUDGET_CREATED")).isNotNull();
         assertThat(EventType.valueOf("BUDGET_RESET_SPENT")).isNotNull();
         assertThat(EventType.valueOf("TENANT_CREATED")).isNotNull();
         assertThat(EventType.valueOf("API_KEY_CREATED")).isNotNull();
         assertThat(EventType.valueOf("SYSTEM_HIGH_LATENCY")).isNotNull();
+        assertThat(EventType.valueOf("WEBHOOK_DISABLED")).isNotNull();
     }
 
     @Test
@@ -273,8 +277,18 @@ class ModelTest {
         assertThat(EventType.fromValue("budget.reset_spent")).isEqualTo(EventType.BUDGET_RESET_SPENT);
         assertThat(EventType.fromValue("tenant.created")).isEqualTo(EventType.TENANT_CREATED);
         assertThat(EventType.fromValue("system.high_latency")).isEqualTo(EventType.SYSTEM_HIGH_LATENCY);
+        assertThat(EventType.fromValue("webhook.disabled")).isEqualTo(EventType.WEBHOOK_DISABLED);
         assertThatThrownBy(() -> EventType.fromValue("nonexistent"))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void eventType_webhookDisabled_metadata() {
+        // Dispatcher-only emission — not tenant-accessible per spec
+        // (audit-plane category, admin operator reads).
+        assertThat(EventType.WEBHOOK_DISABLED.getValue()).isEqualTo("webhook.disabled");
+        assertThat(EventType.WEBHOOK_DISABLED.getCategory()).isEqualTo(EventCategory.WEBHOOK);
+        assertThat(EventType.WEBHOOK_DISABLED.isTenantAccessible()).isFalse();
     }
 
     @Test
