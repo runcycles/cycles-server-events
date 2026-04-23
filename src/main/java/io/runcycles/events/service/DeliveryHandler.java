@@ -1,9 +1,13 @@
 package io.runcycles.events.service;
 
 import io.runcycles.events.metrics.CyclesMetrics;
+import io.runcycles.events.model.Actor;
+import io.runcycles.events.model.ActorType;
 import io.runcycles.events.model.Delivery;
 import io.runcycles.events.model.DeliveryStatus;
 import io.runcycles.events.model.Event;
+import io.runcycles.events.model.EventCategory;
+import io.runcycles.events.model.EventType;
 import io.runcycles.events.model.RetryPolicy;
 import io.runcycles.events.model.Subscription;
 import io.runcycles.events.model.WebhookStatus;
@@ -20,6 +24,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 @Service
 public class DeliveryHandler {
@@ -158,7 +165,7 @@ public class DeliveryHandler {
 
         if (delivery.getAttempts() > maxRetries) {
             markFailed(delivery, result.getErrorMessage());
-            incrementConsecutiveFailures(sub);
+            incrementConsecutiveFailures(sub, delivery);
             return;
         }
 
@@ -191,9 +198,10 @@ public class DeliveryHandler {
         LOG.warn("Delivery {} permanently failed: {}", delivery.getDeliveryId(), errorMessage);
     }
 
-    private void incrementConsecutiveFailures(Subscription sub) {
+    private void incrementConsecutiveFailures(Subscription sub, Delivery delivery) {
         int failures = (sub.getConsecutiveFailures() != null ? sub.getConsecutiveFailures() : 0) + 1;
         int disableAfter = sub.getDisableAfterFailures() != null ? sub.getDisableAfterFailures() : 10;
+        WebhookStatus previousStatus = sub.getStatus();
         WebhookStatus newStatus = null;
         if (failures >= disableAfter) {
             newStatus = WebhookStatus.DISABLED;
@@ -205,6 +213,47 @@ public class DeliveryHandler {
         Instant now = Instant.now();
         subscriptionRepository.updateDeliveryState(
                 sub.getSubscriptionId(), failures, now, null, now, newStatus);
+
+        if (newStatus == WebhookStatus.DISABLED) {
+            emitWebhookDisabled(sub, delivery, previousStatus);
+        }
+    }
+
+    /**
+     * Emit webhook.disabled Event per spec v0.1.25.33 WebhookSubscription.
+     * FAILURE HANDLING. Swallows any emit failure — the subscription status
+     * flip is the source of truth and must not be blocked by the audit
+     * trail write. Logged at WARN for observability.
+     */
+    private void emitWebhookDisabled(Subscription sub, Delivery delivery, WebhookStatus previousStatus) {
+        try {
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("subscription_id", sub.getSubscriptionId());
+            data.put("tenant_id", sub.getTenantId());
+            if (previousStatus != null) {
+                data.put("previous_status", previousStatus.name());
+            }
+            data.put("new_status", WebhookStatus.DISABLED.name());
+            data.put("changed_fields", List.of());
+            data.put("disable_reason", "consecutive_failures_exceeded_threshold");
+
+            Event event = Event.builder()
+                    .eventType(EventType.WEBHOOK_DISABLED.getValue())
+                    .category(EventCategory.WEBHOOK)
+                    .tenantId(sub.getTenantId())
+                    .scope("webhook:" + sub.getSubscriptionId())
+                    .actor(Actor.builder().type(ActorType.SYSTEM).build())
+                    .source("cycles-events")
+                    .data(data)
+                    .correlationId("webhook_auto_disable:" + sub.getSubscriptionId()
+                            + ":" + delivery.getDeliveryId())
+                    .traceId(delivery.getTraceId())
+                    .build();
+            eventRepository.save(event);
+        } catch (Exception e) {
+            LOG.warn("Failed to emit webhook.disabled Event for subscription {} (status flip succeeded)",
+                    sub.getSubscriptionId(), e);
+        }
     }
 
     private static String failureReason(int statusCode) {

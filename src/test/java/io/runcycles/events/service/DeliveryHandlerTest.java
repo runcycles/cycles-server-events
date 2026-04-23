@@ -735,6 +735,108 @@ class DeliveryHandlerTest {
         assertThat(delivery.getTraceId()).isEqualTo("admin-stamped-aaaaaaaaaaaaaaaaaaa0");
     }
 
+    // --- webhook.disabled emit on auto-disable (spec v0.1.25.33) ---
+
+    @Test
+    void autoDisable_emitsWebhookDisabledEvent_withConformingPayload() {
+        Delivery delivery = pendingDelivery();
+        delivery.setAttempts(5); // becomes 6 > maxRetries(5), exhausts retries
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        sub.setConsecutiveFailures(9); // becomes 10 == disableAfterFailures
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
+
+        handler.handle("del-1");
+
+        ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
+        verify(eventRepository).save(captor.capture());
+        Event emitted = captor.getValue();
+        assertThat(emitted.getEventType()).isEqualTo("webhook.disabled");
+        assertThat(emitted.getCategory()).isEqualTo(EventCategory.WEBHOOK);
+        assertThat(emitted.getTenantId()).isEqualTo("t-1");
+        assertThat(emitted.getScope()).isEqualTo("webhook:sub-1");
+        assertThat(emitted.getSource()).isEqualTo("cycles-events");
+        assertThat(emitted.getCorrelationId()).isEqualTo("webhook_auto_disable:sub-1:del-1");
+        assertThat(emitted.getActor()).isNotNull();
+        assertThat(emitted.getActor().getType()).isEqualTo(ActorType.SYSTEM);
+        assertThat(emitted.getData()).containsEntry("subscription_id", "sub-1");
+        assertThat(emitted.getData()).containsEntry("tenant_id", "t-1");
+        assertThat(emitted.getData()).containsEntry("previous_status", "ACTIVE");
+        assertThat(emitted.getData()).containsEntry("new_status", "DISABLED");
+        assertThat(emitted.getData()).containsEntry("changed_fields", List.of());
+        assertThat(emitted.getData()).containsEntry("disable_reason",
+                "consecutive_failures_exceeded_threshold");
+    }
+
+    @Test
+    void autoDisable_copiesDeliveryTraceIdOntoEmittedEvent() {
+        Delivery delivery = pendingDelivery();
+        delivery.setAttempts(5);
+        delivery.setTraceId("0123456789abcdef0123456789abcdef");
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        sub.setConsecutiveFailures(9);
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
+
+        handler.handle("del-1");
+
+        ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
+        verify(eventRepository).save(captor.capture());
+        assertThat(captor.getValue().getTraceId())
+                .isEqualTo("0123456789abcdef0123456789abcdef");
+    }
+
+    @Test
+    void belowThreshold_doesNotEmitWebhookDisabled() {
+        Delivery delivery = pendingDelivery();
+        delivery.setAttempts(5);
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        sub.setConsecutiveFailures(3); // becomes 4, still below 10
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
+
+        handler.handle("del-1");
+
+        verify(eventRepository, never()).save(any());
+    }
+
+    @Test
+    void autoDisable_emitFailure_doesNotRevertStatusFlipOrMetric() {
+        // Emit is best-effort: a Redis write failure must NOT block the
+        // status flip to DISABLED or the auto-disable metric increment.
+        // The subscription state transition is the source of truth; the
+        // audit trail is additive.
+        Delivery delivery = pendingDelivery();
+        delivery.setAttempts(5);
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        sub.setConsecutiveFailures(9);
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
+        doThrow(new RuntimeException("Redis down")).when(eventRepository).save(any());
+
+        handler.handle("del-1");
+
+        // Status flip still reached the repository
+        verify(subscriptionRepository).updateDeliveryState(
+                eq("sub-1"), eq(10), any(Instant.class), isNull(), any(Instant.class),
+                eq(WebhookStatus.DISABLED));
+        // Metric still incremented
+        assertThat(counter(CyclesMetrics.SUBSCRIPTION_AUTO_DISABLED,
+                "tenant", "t-1", "reason", "consecutive_failures")).isEqualTo(1.0);
+    }
+
     @Test
     void handle_eventWithoutTraceId_leavesDeliveryTraceIdNull() {
         // Non-HTTP-originated events (e.g., sweepers) may lack trace_id.
