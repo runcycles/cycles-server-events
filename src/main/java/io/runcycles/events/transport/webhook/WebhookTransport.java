@@ -45,7 +45,7 @@ public class WebhookTransport implements Transport {
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds))
                 .build();
-        String version = buildProperties != null ? buildProperties.getVersion() : "0.1.25.8";
+        String version = buildProperties != null ? buildProperties.getVersion() : "0.1.25.12";
         this.userAgent = "cycles-server-events/" + version;
     }
 
