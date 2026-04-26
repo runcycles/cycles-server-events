@@ -290,7 +290,7 @@ The webhook POST body is the full event JSON. Null fields are omitted.
 ## Build & Test
 
 ```bash
-# Build and run unit tests (195 unit tests, 95%+ line coverage enforced by JaCoCo)
+# Build and run unit tests (201 unit tests, 95%+ line coverage enforced by JaCoCo)
 mvn verify
 
 # Run all tests including integration (requires Docker for Testcontainers Redis)

@@ -44,6 +44,6 @@ If empty/unset, signing secrets are stored and read as plaintext (backward compa
 
 ## Test Coverage
 
-199 tests (195 unit + 4 integration), 95%+ line coverage enforced via JaCoCo.
+205 tests (201 unit + 4 integration), 95%+ line coverage enforced via JaCoCo.
 
 See [`AUDIT.md`](AUDIT.md) for the full source-file → test-class inventory.

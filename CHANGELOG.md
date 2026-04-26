@@ -20,6 +20,35 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.12] — 2026-04-26
+
+### Changed
+
+- **Spring Boot 3.5.13 → 3.5.14.** Patch upgrade picking up upstream security
+  hardening (constant-time comparison for remote DevTools secret,
+  `RandomValuePropertySource` switched to `SecureRandom`, hostname
+  verification applied consistently for Cassandra/RabbitMQ SSL) and bug
+  fixes (`ApplicationPidFileWriter`/`ApplicationTemp` symlink handling,
+  Cassandra `CqlSessionBuilder` configuration). No application-level code
+  changes required.
+- **Jedis 5.2.0 → 6.2.0** (major). All call sites use stable APIs
+  (`JedisPool`, `Jedis`, `SetParams`, `ScanParams`/`ScanResult`,
+  `JedisConnectionException`); Jedis 6.1.0 explicitly restored binary
+  compatibility for `SetParams` (#4225 upstream). All 205 tests including
+  the testcontainers Redis integration test pass against 6.2.0.
+- **Drop `<tomcat.version>10.1.54</tomcat.version>` override.** Spring Boot
+  3.5.14's BOM now manages Tomcat 10.1.54 directly, so the explicit pin
+  added in 0.1.25.10 (for CVE-2026-34483 / CVE-2026-34487) is redundant.
+  Same effective Tomcat version, smaller pom diff for future Spring Boot
+  bumps.
+- **CI: `aquasecurity/trivy-action` 0.35.0 → 0.36.0** (Trivy 0.70.0
+  internally) and **`dependabot/fetch-metadata` v2 → v3** (Node 24
+  runtime). Both used only by the PR container scan and Dependabot
+  auto-merge workflows respectively — no runtime impact.
+- `WebhookTransport` hardcoded version fallback `"0.1.25.8"` → `"0.1.25.12"`
+  to match the current `pom.xml` revision (only used when
+  `BuildProperties` are unavailable, e.g. in unit tests).
+
 ## [0.1.25.11] — 2026-04-23
 
 ### Added

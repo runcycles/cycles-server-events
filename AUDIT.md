@@ -1,11 +1,11 @@
 # Cycles Protocol v0.1.25 — Events Server Implementation Audit
 
-**Date:** 2026-04-23 (v0.1.25.11 — admin-spec v0.1.25.33 alignment, dispatcher half: emit `webhook.disabled` Event on auto-disable. When `DeliveryHandler.incrementConsecutiveFailures` crosses `disable_after_failures`, the dispatcher now writes an Event directly to the shared Redis store alongside the existing `DISABLED` status flip and `cycles_subscription_auto_disabled_total` metric. `EventRepository.save` mirrors the admin-side Lua script (`event:<id>` with TTL + ZADD on `events:<tenantId>` and `events:_all` + optional SADD on `events:correlation:<cid>`); `EventType.WEBHOOK_DISABLED` and `EventCategory.WEBHOOK` enum values added (additive, no wire break). `correlation_id = webhook_auto_disable:<subscription_id>:<delivery_id>`; payload conforms to `EventDataWebhookLifecycle` with `disable_reason="consecutive_failures_exceeded_threshold"`; `actor.type=system`, `source=cycles-events`; `trace_id` copied from the triggering Delivery when present. Emit is best-effort (Redis write failure is logged at WARN but does not revert the status flip). The operator-initiated webhook lifecycle emits — `webhook.created/updated/paused/resumed/deleted` — remain the responsibility of `cycles-server-admin` v0.1.25.39; this patch closes only the auto-disable gap the spec names as the dispatcher's exclusive emission point.), 2026-04-19 (v0.1.25.10 — supply-chain CVE fix; Spring Boot 3.5.11 → 3.5.13 + `<tomcat.version>10.1.54</tomcat.version>` pin closes 4 HIGH/CRITICAL CVEs on `tomcat-embed-core`: CVE-2026-29145 CRITICAL, CVE-2026-29129 HIGH (SB 3.5.13 transitive 10.1.53), CVE-2026-34483 HIGH, CVE-2026-34487 HIGH (10.1.54 pin). No code changes; all 195 tests pass.),
+**Date:** 2026-04-26 (v0.1.25.12 — dependency hygiene: Spring Boot 3.5.13 → 3.5.14 (patch with security fixes incl. constant-time comparison for remote DevTools secret, hostname verification, `RandomValuePropertySource` SecureRandom); Jedis 5.2.0 → 6.2.0 (major; binary compatibility for `SetParams` restored in 6.1.0; our usage `JedisPool`/`Jedis`/`SetParams`/`ScanParams`/`ScanResult`/`JedisConnectionException` is unaffected, all 199 tests pass); GHA `aquasecurity/trivy-action` 0.35.0 → 0.36.0 and `dependabot/fetch-metadata` v2 → v3; **drop `<tomcat.version>10.1.54</tomcat.version>` override** since Spring Boot 3.5.14's BOM now manages 10.1.54 — same effective Tomcat, simpler pom. No code changes; `WebhookTransport` hardcoded version fallback synced to 0.1.25.12.), 2026-04-23 (v0.1.25.11 — admin-spec v0.1.25.33 alignment, dispatcher half: emit `webhook.disabled` Event on auto-disable. When `DeliveryHandler.incrementConsecutiveFailures` crosses `disable_after_failures`, the dispatcher now writes an Event directly to the shared Redis store alongside the existing `DISABLED` status flip and `cycles_subscription_auto_disabled_total` metric. `EventRepository.save` mirrors the admin-side Lua script (`event:<id>` with TTL + ZADD on `events:<tenantId>` and `events:_all` + optional SADD on `events:correlation:<cid>`); `EventType.WEBHOOK_DISABLED` and `EventCategory.WEBHOOK` enum values added (additive, no wire break). `correlation_id = webhook_auto_disable:<subscription_id>:<delivery_id>`; payload conforms to `EventDataWebhookLifecycle` with `disable_reason="consecutive_failures_exceeded_threshold"`; `actor.type=system`, `source=cycles-events`; `trace_id` copied from the triggering Delivery when present. Emit is best-effort (Redis write failure is logged at WARN but does not revert the status flip). The operator-initiated webhook lifecycle emits — `webhook.created/updated/paused/resumed/deleted` — remain the responsibility of `cycles-server-admin` v0.1.25.39; this patch closes only the auto-disable gap the spec names as the dispatcher's exclusive emission point.), 2026-04-19 (v0.1.25.10 — supply-chain CVE fix; Spring Boot 3.5.11 → 3.5.13 + `<tomcat.version>10.1.54</tomcat.version>` pin closes 4 HIGH/CRITICAL CVEs on `tomcat-embed-core`: CVE-2026-29145 CRITICAL, CVE-2026-29129 HIGH (SB 3.5.13 transitive 10.1.53), CVE-2026-34483 HIGH, CVE-2026-34487 HIGH (10.1.54 pin). No code changes; all 195 tests pass.),
 2026-04-18 (v0.1.25.8 — admin-spec v0.1.25.28 alignment: extend correlation/tracing onto `WebhookDelivery`. Add three optional fields to `Delivery` model (`trace_id`, `trace_flags`, `traceparent_inbound_valid`); `TraceContext.buildTraceparent` now accepts a `trace_flags` byte so outbound `traceparent` preserves inbound sampling decisions when `traceparent_inbound_valid=true`; `Transport.deliver` gains a `Delivery` parameter so the transport can read the sampling hints. Proactive `trace_id` stamping: `DeliveryHandler` copies `Event.trace_id` onto the persisted `Delivery` record when admin hasn't set one, filling the gap while `cycles-server-admin` catches up to spec v0.1.25.28 (no overwrite if admin has already stamped).), 2026-04-18 (v0.1.25.7 — admin-spec v0.1.25.27 alignment: three-tier correlation/tracing. Add `Event.trace_id` (optional, `^[0-9a-f]{32}$`); new `TraceContext` helper resolves-or-mints trace-id and builds W3C `traceparent` v00 with fresh span-id per delivery; WebhookTransport emits `X-Cycles-Trace-Id` + `traceparent` on every outbound POST and forwards `X-Request-Id` when event carries `request_id`; EventPayloadValidator gains non-fatal `trace_id_shape` rule. Documents negative findings for spec v0.1.25.19–.26 (admin-plane-only changes that do not affect the dispatcher).), 2026-04-16 (v0.1.25.6 — admin-spec v0.1.25.18 alignment: add `BUDGET_RESET_SPENT`; add `cycles_webhook_*` Micrometer counters + latency timer mirroring `cycles-server` v0.1.25.10; add non-fatal `EventPayloadValidator` mirroring `cycles-server-admin` v0.1.25.12; parity refactor adopting dotted metric names, `tags(...)` helper, tenant-tag toggle, `UNKNOWN` sentinel; add `CHANGELOG.md` + `OPERATIONS.md` for doc parity), 2026-04-08 (v0.1.25.5 — force HTTP/1.1 outbound transport to fix h2c body drop, #16), 2026-04-07 (v0.1.25.4 — partial subscription update to avoid overwriting admin config), 2026-04-03 (v0.1.25.3 — Prometheus registry dependency; typed `DeliveryStatus`/`WebhookStatus` enums), 2026-04-01 (v0.1.25.1 initial implementation — dispatch loop, delivery handler, retry scheduler, AES-256-GCM secret encryption, TTL-based retention, E2E integration test).
 
 **Spec:** `cycles-governance-admin-v0.1.25.yaml` (OpenAPI 3.1.0, v0.1.25.34) — authoritative source at `cycles-protocol` repo; served from `cycles-server-admin`. v0.1.25.33 introduced the `webhook.*` lifecycle EventTypes and `EventDataWebhookLifecycle` schema; v0.1.25.34 added the `webhook` value to `EventCategory`. This service implements only the dispatcher-emission half (auto-disable → `webhook.disabled`); the operator-plane emits live in `cycles-server-admin` v0.1.25.39.
 
-**Service:** Spring Boot 3.5.13 / Java 21 / Jedis 5.2.0 / Micrometer Prometheus registry · Tomcat 10.1.54 pin. Redis-driven webhook dispatcher (no inbound API surface of its own).
+**Service:** Spring Boot 3.5.14 / Java 21 / Jedis 6.2.0 / Micrometer Prometheus registry. Redis-driven webhook dispatcher (no inbound API surface of its own).
 
 **Downstream docs:**
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes for consumers (Keep-a-Changelog format)
@@ -19,17 +19,17 @@
 | Field | Value |
 |-------|-------|
 | Service | cycles-server-events |
-| Version | 0.1.25.11 |
+| Version | 0.1.25.12 |
 | Java | 21 |
-| Spring Boot | 3.5.13 |
+| Spring Boot | 3.5.14 |
 | Spec Authority | [complete-budget-governance-v0.1.25.yaml](https://github.com/runcycles/cycles-server-admin/blob/main/complete-budget-governance-v0.1.25.yaml) |
 
 ## Test Coverage
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 199 |
-| Unit tests | 195 |
+| Total tests | 205 |
+| Unit tests | 201 |
 | Integration tests | 4 (WebhookDeliveryIntegrationTest) |
 | JaCoCo minimum | 95% line coverage (enforced) |
 
@@ -111,7 +111,7 @@
 |------------|---------|---------|
 | spring-boot-starter-web | 3.5.11 | REST + embedded Tomcat |
 | spring-boot-starter-actuator | 3.5.11 | Health + metrics |
-| jedis | 5.2.0 | Redis client |
+| jedis | 6.2.0 | Redis client |
 | jackson-datatype-jsr310 | (parent) | Java time serialization |
 | lombok | (parent) | Compile-time only |
 | spring-boot-starter-test | 3.5.11 | Test framework |
@@ -212,9 +212,9 @@ Captured explicitly so a future reviewer doesn't re-litigate the gap analysis:
 
 - **Date:** 2026-04-18
 - **Version:** 0.1.25.8
-- **Build:** PASS (195 unit tests, 95%+ coverage enforced)
+- **Build:** PASS (201 unit tests, 95%+ coverage enforced)
 - **Integration test:** PASS (4 Testcontainers Redis tests — incl. end-to-end `traceparent_inbound_valid=true` trace-flags preservation)
-- **Total:** 199 tests
+- **Total:** 205 tests
 
 ## Cross-Repo Spec Drift Notes (informational)
 
