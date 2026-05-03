@@ -14,11 +14,11 @@ permissions: read-all
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+    # Skip Dependabot PRs: they run with Dependabot's secrets store (separate
+    # from regular Actions secrets), so CLAUDE_CODE_OAUTH_TOKEN isn't reachable
+    # and the job fails immediately. Version bumps are mechanical anyway —
+    # ci/CodeQL/Trivy are the meaningful gates for them, not AI code review.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
 
     runs-on: ubuntu-latest
     permissions:
