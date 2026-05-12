@@ -11,6 +11,6 @@ permissions:
 
 jobs:
   ci:
-    uses: runcycles/.github/.github/workflows/ci-java.yml@main
+    uses: runcycles/.github/.github/workflows/ci-java.yml@v1
     with:
       pom-file: pom.xml
