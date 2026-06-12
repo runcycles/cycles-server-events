@@ -550,6 +550,44 @@ patch around (see the v0.1.25.10 consolidation note in `CHANGELOG.md`).
   PR will either add a CHANGELOG entry at the new version or roll the
   pom back, not silently ship under the new number.
 
+## CyclesEvidence emitter (WIP)
+
+The `EvidenceWorker` consumes source records cycles-server pushes to
+`evidence:pending`, signs a `cycles-evidence/v0.1` envelope for each, and hands
+it to the sink. Operational notes:
+
+- **Signing key must be configured in production.** Set BOTH
+  `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` and `EVIDENCE_SIGNING_SIGNER_DID` (a paired
+  Ed25519 key). If left unset the service generates an **ephemeral** key per
+  process and logs a WARN — so multiple un-configured replicas would each sign
+  with a **different `signer_did`**, and signatures would not survive a restart.
+  Provision the key once and set it identically on every replica.
+- **`EVIDENCE_SERVER_ID`** is stamped as the envelope `server_id`; set it to the
+  deployment's stable Cycles server URI.
+- **Reliable queue.** The worker claims records with `BLMOVE evidence:pending →
+  evidence:processing` and only `LREM`s them from `evidence:processing` after the
+  envelope is stored (or dead-lettered). On startup, orphaned in-flight records
+  (left by a crash between claim and store) are moved back to `evidence:pending`
+  and reprocessed (safe — envelopes are content-addressed/idempotent). A non-empty
+  `evidence:processing` on a healthy steady-state service is a smell (stuck
+  worker); a brief spike right after a restart is normal recovery. Multi-replica
+  note: a shared processing list means a restart can re-queue another replica's
+  in-flight record — harmless (idempotent), some churn.
+- **Dead-letter queue.** A source record that fails to build/sign is LPUSH'd to
+  `evidence:failed` (not dropped). Monitor `LLEN evidence:failed`; a non-zero,
+  growing value means records are failing to sign (bad key, malformed producer
+  output). Inspect with `LRANGE evidence:failed 0 10` and replay after fixing.
+- **Scheduler pool.** `SCHEDULING_POOL_SIZE` (default 5) must stay ≥ the number
+  of continuous BRPOP loops (`DispatchLoop` + `EvidenceWorker` = 2) plus headroom
+  for the periodic tasks, or webhook retries/cleanup can starve.
+- **Envelope store.** Built envelopes are persisted content-addressed at
+  `evidence:envelope:<evidence_id>` (`EVIDENCE_STORE_KEY_PREFIX`). `EVIDENCE_STORE_TTL_SECONDS`
+  defaults to 0 (no expiry — envelopes are an archival record); set a positive TTL
+  only for non-archival deployments. `EVIDENCE_STORE_BACKEND=redis` by default; an
+  s3/gcs backend can replace it without code changes. cycles-server serves these by
+  id. Fetch one with `GET evidence:envelope:<id>`; size the store for retention
+  (one envelope per reserve/commit/release/decide, kept for the retention horizon).
+
 ## Getting help
 
 - Bug reports / feature requests:

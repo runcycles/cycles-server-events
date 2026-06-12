@@ -18,7 +18,7 @@
     <description>Event delivery service for the Cycles ecosystem</description>
 
     <properties>
-        <revision>0.1.25.13</revision>
+        <revision>0.1.25.14</revision>
         <java.version>21</java.version>
         <jedis.version>7.5.0</jedis.version>
         <testcontainers.version>1.20.4</testcontainers.version>
@@ -58,6 +58,15 @@
         <dependency>
             <groupId>com.fasterxml.jackson.datatype</groupId>
             <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
+        <!-- RFC 8785 JSON Canonicalization Scheme (JCS) — the cycles-evidence-v0.1
+             content-hash + signing-input recipe. erdtman is the reference impl
+             (same author as the JS/Python JCS), maximizing cross-language
+             byte-equality with the Cycles reference fixtures. -->
+        <dependency>
+            <groupId>io.github.erdtman</groupId>
+            <artifactId>java-json-canonicalization</artifactId>
+            <version>1.1</version>
         </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>
