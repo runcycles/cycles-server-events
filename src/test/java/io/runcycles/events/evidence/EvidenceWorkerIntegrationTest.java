@@ -2,14 +2,9 @@ package io.runcycles.events.evidence;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.runcycles.events.evidence.CyclesEvidenceEnvelopeBuilder.BuiltEvidenceEnvelope;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Import;
-import org.springframework.context.annotation.Primary;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.GenericContainer;
@@ -23,24 +18,22 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.util.Arrays;
 import java.util.HexFormat;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Full Redis round-trip: a source record LPUSH'd to {@code evidence:pending} is
  * picked up by the scheduled {@link EvidenceWorker}, built and signed against a
- * configured Ed25519 key, and the resulting envelope verifies. Exercises the
- * real BRPOP loop + real Redis (Testcontainers), not mocks.
+ * configured Ed25519 key, and PERSISTED to the durable store — this test reads
+ * it back from Redis and verifies the signature. Exercises the real BRPOP loop,
+ * builder, signer, and store against real Redis (Testcontainers), not mocks.
  *
  * <p>Requires Docker. Excluded from unit runs by the {@code *IntegrationTest}
  * naming convention.
  */
 @Testcontainers
 @SpringBootTest
-@Import(EvidenceWorkerIntegrationTest.CapturingSinkConfig.class)
 class EvidenceWorkerIntegrationTest {
 
     @Container
@@ -64,11 +57,8 @@ class EvidenceWorkerIntegrationTest {
     @Autowired
     private JedisPool jedisPool;
 
-    @Autowired
-    private CapturingSink sink;
-
     @Test
-    void reserveSourceRecordBecomesAVerifiableSignedEnvelope() throws Exception {
+    void reserveSourceRecordIsBuiltSignedAndStored() throws Exception {
         ObjectNode rec = MAPPER.createObjectNode();
         rec.put("artifact_type", "reserve");
         rec.put("issued_at_ms", 1810000000100L);
@@ -81,40 +71,37 @@ class EvidenceWorkerIntegrationTest {
             jedis.lpush("evidence:pending", MAPPER.writeValueAsString(rec));
         }
 
-        BuiltEvidenceEnvelope built = sink.queue.poll(15, TimeUnit.SECONDS);
-        assertThat(built).as("worker produced an envelope within 15s").isNotNull();
+        String envJson = pollForStoredEnvelope(15_000);
+        assertThat(envJson).as("envelope persisted to the store within 15s").isNotNull();
 
-        ObjectNode env = built.envelope();
+        ObjectNode env = (ObjectNode) MAPPER.readTree(envJson);
         assertThat(env.get("artifact_type").asText()).isEqualTo("reserve");
         assertThat(env.get("server_id").asText()).isEqualTo(SERVER_ID);
         assertThat(env.get("signer_did").asText()).isEqualTo(KEY.pub());
         assertThat(env.path("payload").path("reserve").path("response").path("decision").asText())
                 .isEqualTo("ALLOW");
 
-        // the signed envelope verifies end-to-end
+        // the stored envelope is content-addressed and its signature verifies
         CyclesEvidenceCanonicalizer canon = new CyclesEvidenceCanonicalizer();
         EnvelopeSigner signer = new EnvelopeSigner();
-        assertThat(canon.computeEvidenceId(env)).isEqualTo(built.evidenceId());
-        byte[] signingBytes = canon.signingBytes(env, built.evidenceId());
+        String evidenceId = env.get("evidence_id").asText();
+        assertThat(canon.computeEvidenceId(env)).isEqualTo(evidenceId);
+        byte[] signingBytes = canon.signingBytes(env, evidenceId);
         assertThat(signer.verify(signingBytes, env.get("signature").asText(), KEY.pub())).isTrue();
     }
 
-    @TestConfiguration
-    static class CapturingSinkConfig {
-        @Bean
-        @Primary
-        CapturingSink capturingSink() {
-            return new CapturingSink();
+    private String pollForStoredEnvelope(long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try (Jedis jedis = jedisPool.getResource()) {
+                Set<String> keys = jedis.keys("evidence:envelope:*");
+                if (!keys.isEmpty()) {
+                    return jedis.get(keys.iterator().next());
+                }
+            }
+            Thread.sleep(100);
         }
-    }
-
-    static class CapturingSink implements EvidenceSink {
-        final BlockingQueue<BuiltEvidenceEnvelope> queue = new LinkedBlockingQueue<>();
-
-        @Override
-        public void accept(BuiltEvidenceEnvelope envelope) {
-            queue.add(envelope);
-        }
+        return null;
     }
 
     private record KeyHex(String priv, String pub) {

@@ -571,6 +571,13 @@ it to the sink. Operational notes:
 - **Scheduler pool.** `SCHEDULING_POOL_SIZE` (default 5) must stay ≥ the number
   of continuous BRPOP loops (`DispatchLoop` + `EvidenceWorker` = 2) plus headroom
   for the periodic tasks, or webhook retries/cleanup can starve.
+- **Envelope store.** Built envelopes are persisted content-addressed at
+  `evidence:envelope:<evidence_id>` (`EVIDENCE_STORE_KEY_PREFIX`). `EVIDENCE_STORE_TTL_SECONDS`
+  defaults to 0 (no expiry — envelopes are an archival record); set a positive TTL
+  only for non-archival deployments. `EVIDENCE_STORE_BACKEND=redis` by default; an
+  s3/gcs backend can replace it without code changes. cycles-server serves these by
+  id. Fetch one with `GET evidence:envelope:<id>`; size the store for retention
+  (one envelope per reserve/commit/release/decide, kept for the retention horizon).
 
 ## Getting help
 
