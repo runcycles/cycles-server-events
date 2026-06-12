@@ -3,8 +3,7 @@ package io.runcycles.events.evidence;
 import org.junit.jupiter.api.Test;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
-
-import java.util.List;
+import redis.clients.jedis.args.ListDirection;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -18,19 +17,35 @@ class EvidenceQueueConsumerTest {
 
     private EvidenceQueueConsumer consumer() {
         when(pool.getResource()).thenReturn(jedis);
-        return new EvidenceQueueConsumer(pool, "evidence:pending", "evidence:failed", 10000);
+        return new EvidenceQueueConsumer(pool, "evidence:pending", "evidence:processing", "evidence:failed", 10000);
     }
 
     @Test
-    void returnsRecordValueOnPop() {
-        when(jedis.brpop(5, "evidence:pending")).thenReturn(List.of("evidence:pending", "{\"artifact_type\":\"reserve\"}"));
-        assertThat(consumer().popPending(5)).isEqualTo("{\"artifact_type\":\"reserve\"}");
+    void claimBlockMovesPendingToProcessingAndReturnsRecord() {
+        when(jedis.blmove("evidence:pending", "evidence:processing",
+                ListDirection.RIGHT, ListDirection.LEFT, 5.0))
+                .thenReturn("{\"artifact_type\":\"reserve\"}");
+        assertThat(consumer().claim(5)).isEqualTo("{\"artifact_type\":\"reserve\"}");
     }
 
     @Test
-    void returnsNullOnTimeout() {
-        when(jedis.brpop(5, "evidence:pending")).thenReturn(null);
-        assertThat(consumer().popPending(5)).isNull();
+    void claimReturnsNullOnTimeout() {
+        when(jedis.blmove("evidence:pending", "evidence:processing",
+                ListDirection.RIGHT, ListDirection.LEFT, 5.0)).thenReturn(null);
+        assertThat(consumer().claim(5)).isNull();
+    }
+
+    @Test
+    void ackRemovesRecordFromProcessing() {
+        consumer().ack("rec");
+        verify(jedis).lrem("evidence:processing", 1L, "rec");
+    }
+
+    @Test
+    void recoverMovesAllInFlightBackToPending() {
+        when(jedis.lmove("evidence:processing", "evidence:pending",
+                ListDirection.LEFT, ListDirection.RIGHT)).thenReturn("r1", "r2", null);
+        assertThat(consumer().recover()).isEqualTo(2L);
     }
 
     @Test

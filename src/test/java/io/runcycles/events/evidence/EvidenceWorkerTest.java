@@ -42,11 +42,13 @@ class EvidenceWorkerTest {
     void buildsAndSinksAValidSignedEnvelopeFromASourceRecord() {
         CapturingSink sink = new CapturingSink();
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
-        when(consumer.popPending(1)).thenReturn(sourceRecord("reserve", "ALLOW"));
+        String record = sourceRecord("reserve", "ALLOW");
+        when(consumer.claim(1)).thenReturn(record);
 
         worker(consumer, sink).processNext();
 
         assertThat(sink.count).isEqualTo(1);
+        verify(consumer).ack(record); // stored → acked off the processing list
         ObjectNode env = sink.last.envelope();
         assertThat(env.get("artifact_type").asText()).isEqualTo("reserve");
         assertThat(env.get("server_id").asText()).isEqualTo(SERVER_ID);
@@ -66,7 +68,7 @@ class EvidenceWorkerTest {
     void doesNothingOnEmptyQueue() {
         CapturingSink sink = new CapturingSink();
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
-        when(consumer.popPending(1)).thenReturn(null);
+        when(consumer.claim(1)).thenReturn(null);
 
         worker(consumer, sink).processNext();
 
@@ -78,12 +80,13 @@ class EvidenceWorkerTest {
         CapturingSink sink = new CapturingSink();
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
         String bad = "{ not valid json";
-        when(consumer.popPending(1)).thenReturn(bad);
+        when(consumer.claim(1)).thenReturn(bad);
 
         worker(consumer, sink).processNext(); // must not throw
 
         assertThat(sink.count).isZero();
         verify(consumer).deadLetter(bad);
+        verify(consumer).ack(bad); // dead-lettered → cleared from processing
     }
 
     @Test
@@ -91,12 +94,13 @@ class EvidenceWorkerTest {
         CapturingSink sink = new CapturingSink();
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
         String noPayload = "{\"artifact_type\":\"reserve\",\"issued_at_ms\":1}";
-        when(consumer.popPending(1)).thenReturn(noPayload);
+        when(consumer.claim(1)).thenReturn(noPayload);
 
         worker(consumer, sink).processNext();
 
         assertThat(sink.count).isZero(); // must NOT sign an empty/garbage envelope
         verify(consumer).deadLetter(noPayload);
+        verify(consumer).ack(noPayload);
     }
 
     @Test
@@ -104,12 +108,13 @@ class EvidenceWorkerTest {
         CapturingSink sink = new CapturingSink();
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
         String record = sourceRecord("reserve", "ALLOW");
-        when(consumer.popPending(1)).thenReturn(record);
+        when(consumer.claim(1)).thenReturn(record);
 
         worker(consumer, sink, "").processNext(); // blank server_id
 
         assertThat(sink.count).isZero(); // empty server_id is not a valid envelope
         verify(consumer).deadLetter(record);
+        verify(consumer).ack(record);
     }
 
     private String sourceRecord(String artifactType, String decision) {

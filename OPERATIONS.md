@@ -564,6 +564,15 @@ it to the sink. Operational notes:
   Provision the key once and set it identically on every replica.
 - **`EVIDENCE_SERVER_ID`** is stamped as the envelope `server_id`; set it to the
   deployment's stable Cycles server URI.
+- **Reliable queue.** The worker claims records with `BLMOVE evidence:pending →
+  evidence:processing` and only `LREM`s them from `evidence:processing` after the
+  envelope is stored (or dead-lettered). On startup, orphaned in-flight records
+  (left by a crash between claim and store) are moved back to `evidence:pending`
+  and reprocessed (safe — envelopes are content-addressed/idempotent). A non-empty
+  `evidence:processing` on a healthy steady-state service is a smell (stuck
+  worker); a brief spike right after a restart is normal recovery. Multi-replica
+  note: a shared processing list means a restart can re-queue another replica's
+  in-flight record — harmless (idempotent), some churn.
 - **Dead-letter queue.** A source record that fails to build/sign is LPUSH'd to
   `evidence:failed` (not dropped). Monitor `LLEN evidence:failed`; a non-zero,
   growing value means records are failing to sign (bad key, malformed producer

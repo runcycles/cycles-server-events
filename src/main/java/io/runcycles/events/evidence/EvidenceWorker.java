@@ -54,12 +54,13 @@ public class EvidenceWorker {
 
     @Scheduled(fixedDelay = 1)
     public void processNext() {
-        String record = consumer.popPending(timeoutSeconds);
+        String record = consumer.claim(timeoutSeconds);
         if (record == null) {
             return;
         }
         try {
             sink.accept(build(record));
+            consumer.ack(record); // stored → remove from the in-flight processing list
         } catch (Exception e) {
             // A malformed/unbuildable record must not stall the loop. Dead-letter
             // it (do not silently drop — evidence is an audit trail) and continue.
@@ -67,8 +68,11 @@ public class EvidenceWorker {
                     e.getMessage());
             try {
                 consumer.deadLetter(record);
+                consumer.ack(record); // now in evidence:failed → clear from processing
             } catch (RuntimeException dl) {
-                LOG.error("failed to dead-letter evidence source record: {}", dl.getMessage());
+                // leave it in processing so recover() retries it on the next startup
+                LOG.error("failed to dead-letter evidence source record: {} (left in-flight for recovery)",
+                        dl.getMessage());
             }
         }
     }
