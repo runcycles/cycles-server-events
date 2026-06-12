@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class EvidenceWorkerTest {
@@ -69,14 +70,16 @@ class EvidenceWorkerTest {
     }
 
     @Test
-    void dropsMalformedRecordWithoutThrowingOrSinking() {
+    void deadLettersMalformedRecordWithoutThrowingOrSinking() {
         CapturingSink sink = new CapturingSink();
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
-        when(consumer.popPending(1)).thenReturn("{ not valid json");
+        String bad = "{ not valid json";
+        when(consumer.popPending(1)).thenReturn(bad);
 
         worker(consumer, sink).processNext(); // must not throw
 
         assertThat(sink.count).isZero();
+        verify(consumer).deadLetter(bad);
     }
 
     private String sourceRecord(String artifactType, String decision) {

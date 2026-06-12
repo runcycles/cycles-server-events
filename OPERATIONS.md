@@ -550,6 +550,28 @@ patch around (see the v0.1.25.10 consolidation note in `CHANGELOG.md`).
   PR will either add a CHANGELOG entry at the new version or roll the
   pom back, not silently ship under the new number.
 
+## CyclesEvidence emitter (WIP)
+
+The `EvidenceWorker` consumes source records cycles-server pushes to
+`evidence:pending`, signs a `cycles-evidence/v0.1` envelope for each, and hands
+it to the sink. Operational notes:
+
+- **Signing key must be configured in production.** Set BOTH
+  `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` and `EVIDENCE_SIGNING_SIGNER_DID` (a paired
+  Ed25519 key). If left unset the service generates an **ephemeral** key per
+  process and logs a WARN — so multiple un-configured replicas would each sign
+  with a **different `signer_did`**, and signatures would not survive a restart.
+  Provision the key once and set it identically on every replica.
+- **`EVIDENCE_SERVER_ID`** is stamped as the envelope `server_id`; set it to the
+  deployment's stable Cycles server URI.
+- **Dead-letter queue.** A source record that fails to build/sign is LPUSH'd to
+  `evidence:failed` (not dropped). Monitor `LLEN evidence:failed`; a non-zero,
+  growing value means records are failing to sign (bad key, malformed producer
+  output). Inspect with `LRANGE evidence:failed 0 10` and replay after fixing.
+- **Scheduler pool.** `SCHEDULING_POOL_SIZE` (default 5) must stay ≥ the number
+  of continuous BRPOP loops (`DispatchLoop` + `EvidenceWorker` = 2) plus headroom
+  for the periodic tasks, or webhook retries/cleanup can starve.
+
 ## Getting help
 
 - Bug reports / feature requests:

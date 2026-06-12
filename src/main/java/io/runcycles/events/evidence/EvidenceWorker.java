@@ -57,9 +57,15 @@ public class EvidenceWorker {
         try {
             sink.accept(build(record));
         } catch (Exception e) {
-            // A malformed/unbuildable record must not stall the loop. Drop it
-            // (it stays auditable on the producer side) and continue.
-            LOG.error("failed to build evidence envelope from source record: {}", e.getMessage());
+            // A malformed/unbuildable record must not stall the loop. Dead-letter
+            // it (do not silently drop — evidence is an audit trail) and continue.
+            LOG.error("failed to build evidence envelope from source record: {} — dead-lettering",
+                    e.getMessage());
+            try {
+                consumer.deadLetter(record);
+            } catch (RuntimeException dl) {
+                LOG.error("failed to dead-letter evidence source record: {}", dl.getMessage());
+            }
         }
     }
 

@@ -8,6 +8,7 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class EvidenceQueueConsumerTest {
@@ -17,7 +18,7 @@ class EvidenceQueueConsumerTest {
 
     private EvidenceQueueConsumer consumer() {
         when(pool.getResource()).thenReturn(jedis);
-        return new EvidenceQueueConsumer(pool, "evidence:pending");
+        return new EvidenceQueueConsumer(pool, "evidence:pending", "evidence:failed");
     }
 
     @Test
@@ -30,5 +31,12 @@ class EvidenceQueueConsumerTest {
     void returnsNullOnTimeout() {
         when(jedis.brpop(5, "evidence:pending")).thenReturn(null);
         assertThat(consumer().popPending(5)).isNull();
+    }
+
+    @Test
+    void deadLettersToFailedQueue() {
+        String record = "{\"artifact_type\":\"reserve\"}";
+        consumer().deadLetter(record);
+        verify(jedis).lpush("evidence:failed", record);
     }
 }
