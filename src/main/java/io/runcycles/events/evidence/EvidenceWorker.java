@@ -46,6 +46,10 @@ public class EvidenceWorker {
         this.mapper = mapper;
         this.timeoutSeconds = timeoutSeconds;
         this.serverId = serverId;
+        if (serverId == null || serverId.isBlank()) {
+            LOG.warn("cycles.evidence.server-id is not configured — evidence records will be "
+                    + "DEAD-LETTERED (an empty server_id is not a valid envelope). Set EVIDENCE_SERVER_ID.");
+        }
     }
 
     @Scheduled(fixedDelay = 1)
@@ -69,14 +73,32 @@ public class EvidenceWorker {
         }
     }
 
-    /** Map a source record to a built, signed envelope. */
+    /**
+     * Map a source record to a built, signed envelope. Validates the record and
+     * config BEFORE signing — a corrupt record (or unconfigured {@code server_id})
+     * must NOT be signed into a valid-looking but garbage envelope; it throws so
+     * {@link #processNext()} dead-letters it.
+     */
     BuiltEvidenceEnvelope build(String recordJson) throws Exception {
+        if (serverId == null || serverId.isBlank()) {
+            throw new IllegalStateException(
+                    "cycles.evidence.server-id is not configured — refusing to sign an empty server_id");
+        }
         JsonNode rec = mapper.readTree(recordJson);
-        EvidenceArtifactType type =
-                EvidenceArtifactType.valueOf(rec.get("artifact_type").asText().toUpperCase());
-        long issuedAtMs = rec.get("issued_at_ms").asLong();
-        String traceId = rec.hasNonNull("trace_id") ? rec.get("trace_id").asText() : null;
+        JsonNode typeNode = rec.get("artifact_type");
+        JsonNode issuedNode = rec.get("issued_at_ms");
         JsonNode payloadBody = rec.get("payload");
-        return builder.build(type, serverId, issuedAtMs, traceId, payloadBody);
+        if (typeNode == null || !typeNode.isTextual()) {
+            throw new IllegalArgumentException("source record missing string artifact_type");
+        }
+        if (issuedNode == null || !issuedNode.isNumber()) {
+            throw new IllegalArgumentException("source record missing numeric issued_at_ms");
+        }
+        if (payloadBody == null || !payloadBody.isObject()) {
+            throw new IllegalArgumentException("source record missing object payload");
+        }
+        EvidenceArtifactType type = EvidenceArtifactType.valueOf(typeNode.asText().toUpperCase());
+        String traceId = rec.hasNonNull("trace_id") ? rec.get("trace_id").asText() : null;
+        return builder.build(type, serverId, issuedNode.asLong(), traceId, payloadBody);
     }
 }

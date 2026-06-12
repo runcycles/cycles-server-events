@@ -18,7 +18,7 @@ class EvidenceQueueConsumerTest {
 
     private EvidenceQueueConsumer consumer() {
         when(pool.getResource()).thenReturn(jedis);
-        return new EvidenceQueueConsumer(pool, "evidence:pending", "evidence:failed");
+        return new EvidenceQueueConsumer(pool, "evidence:pending", "evidence:failed", 10000);
     }
 
     @Test
@@ -34,9 +34,10 @@ class EvidenceQueueConsumerTest {
     }
 
     @Test
-    void deadLettersToFailedQueue() {
+    void deadLettersToFailedQueueAndBoundsIt() {
         String record = "{\"artifact_type\":\"reserve\"}";
         consumer().deadLetter(record);
         verify(jedis).lpush("evidence:failed", record);
+        verify(jedis).ltrim("evidence:failed", 0, 9999); // bounded to failed-max-len
     }
 }

@@ -31,7 +31,11 @@ class EvidenceWorkerTest {
     }
 
     private EvidenceWorker worker(EvidenceQueueConsumer consumer, EvidenceSink sink) {
-        return new EvidenceWorker(consumer, builder, sink, mapper, 1, SERVER_ID);
+        return worker(consumer, sink, SERVER_ID);
+    }
+
+    private EvidenceWorker worker(EvidenceQueueConsumer consumer, EvidenceSink sink, String serverId) {
+        return new EvidenceWorker(consumer, builder, sink, mapper, 1, serverId);
     }
 
     @Test
@@ -80,6 +84,32 @@ class EvidenceWorkerTest {
 
         assertThat(sink.count).isZero();
         verify(consumer).deadLetter(bad);
+    }
+
+    @Test
+    void deadLettersRecordWithMissingPayloadRatherThanSigningGarbage() {
+        CapturingSink sink = new CapturingSink();
+        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
+        String noPayload = "{\"artifact_type\":\"reserve\",\"issued_at_ms\":1}";
+        when(consumer.popPending(1)).thenReturn(noPayload);
+
+        worker(consumer, sink).processNext();
+
+        assertThat(sink.count).isZero(); // must NOT sign an empty/garbage envelope
+        verify(consumer).deadLetter(noPayload);
+    }
+
+    @Test
+    void deadLettersWhenServerIdUnconfigured() {
+        CapturingSink sink = new CapturingSink();
+        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
+        String record = sourceRecord("reserve", "ALLOW");
+        when(consumer.popPending(1)).thenReturn(record);
+
+        worker(consumer, sink, "").processNext(); // blank server_id
+
+        assertThat(sink.count).isZero(); // empty server_id is not a valid envelope
+        verify(consumer).deadLetter(record);
     }
 
     private String sourceRecord(String artifactType, String decision) {
