@@ -9,6 +9,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.util.Locale;
+
 /**
  * Consumes CyclesEvidence source records off {@code evidence:pending}, builds
  * and signs a {@code cycles-evidence/v0.1} envelope for each, and hands it to
@@ -58,13 +60,14 @@ public class EvidenceWorker {
         if (record == null) {
             return;
         }
+        // Build + store first. A failure HERE means the envelope was never stored,
+        // so the record is dead-lettered (it is an audit trail — never silently
+        // dropped). Kept separate from the ack below: a post-store ack failure must
+        // NOT dead-letter an already-stored envelope.
         try {
             sink.accept(build(record));
-            consumer.ack(record); // stored → remove from the in-flight processing list
         } catch (Exception e) {
-            // A malformed/unbuildable record must not stall the loop. Dead-letter
-            // it (do not silently drop — evidence is an audit trail) and continue.
-            LOG.error("failed to build evidence envelope from source record: {} — dead-lettering",
+            LOG.error("failed to build/store evidence envelope from source record: {} — dead-lettering",
                     e.getMessage());
             try {
                 consumer.deadLetter(record);
@@ -74,6 +77,18 @@ public class EvidenceWorker {
                 LOG.error("failed to dead-letter evidence source record: {} (left in-flight for recovery)",
                         dl.getMessage());
             }
+            return;
+        }
+        // Stored successfully → remove from the in-flight processing list. If the ack
+        // fails, the envelope is ALREADY stored, so we must NOT dead-letter it; leave
+        // the record in processing and let recover() requeue it. Reprocessing is
+        // idempotent: the store is content-addressed (same evidence_id → same key),
+        // so a re-store overwrites identical bytes.
+        try {
+            consumer.ack(record);
+        } catch (RuntimeException ackEx) {
+            LOG.warn("evidence stored but ack failed: {} — left in-flight; recovery will reprocess "
+                    + "(idempotent, content-addressed)", ackEx.getMessage());
         }
     }
 
@@ -101,8 +116,28 @@ public class EvidenceWorker {
         if (payloadBody == null || !payloadBody.isObject()) {
             throw new IllegalArgumentException("source record missing object payload");
         }
-        EvidenceArtifactType type = EvidenceArtifactType.valueOf(typeNode.asText().toUpperCase());
+        // Locale.ROOT: artifact_type is an ASCII wire token; the default locale could
+        // mis-case it (e.g. Turkish dotless-i) and break the enum lookup.
+        EvidenceArtifactType type = EvidenceArtifactType.valueOf(typeNode.asText().toUpperCase(Locale.ROOT));
         String traceId = rec.hasNonNull("trace_id") ? rec.get("trace_id").asText() : null;
-        return builder.build(type, serverId, issuedNode.asLong(), traceId, payloadBody);
+        BuiltEvidenceEnvelope built = builder.build(type, serverId, issuedNode.asLong(), traceId, payloadBody);
+
+        // Cross-check the producer-stamped evidence_id (when present): cycles-server
+        // computes it synchronously and returns it to the caller, so the envelope we
+        // sign+store MUST hash to the same id or the caller would resolve a 404 /
+        // mismatched envelope. A mismatch means server_id/signer_did config drift
+        // between the producer and this worker — fail closed (dead-letter) rather than
+        // store an unbindable envelope. Records without evidence_id (producer identity
+        // unconfigured) skip the check.
+        if (rec.hasNonNull("evidence_id")) {
+            String claimed = rec.get("evidence_id").asText();
+            if (!claimed.equals(built.evidenceId())) {
+                throw new IllegalStateException(
+                        "evidence_id cross-check failed: producer stamped " + claimed
+                        + " but worker computed " + built.evidenceId()
+                        + " — server-id/signer-did config drift between producer and worker?");
+            }
+        }
+        return built;
     }
 }
