@@ -1,9 +1,13 @@
 # CyclesEvidence — identity enablement (runbook)
 
-> How to turn CyclesEvidence **on** in an environment. Until the shared signing
-> identity is configured, the evidence pipeline runs but is inert: `cycles-server`
-> returns no `cycles_evidence` ref and the `cycles-server-events` worker signs with
-> a throwaway key. Nothing else breaks.
+> How to turn CyclesEvidence **on** in an environment. Until the identity is
+> configured, no usable signed evidence is produced: `cycles-server` fail-opens
+> (records still queue, but responses carry no `cycles_evidence` ref), and the
+> `cycles-server-events` worker either **dead-letters** the records (when
+> `EVIDENCE_SERVER_ID` is blank — an empty `server_id` is not a valid envelope)
+> or signs them with a **throwaway** key (when only the signing key is unset).
+> See [Startup behavior](#startup-behavior-so-you-can-read-the-logs) for the exact
+> per-variable modes. Nothing else breaks.
 
 ## What "on" means
 
@@ -12,7 +16,7 @@ CyclesEvidence spans **two** services that must agree on one public identity:
 | Service | Role | Needs |
 |---|---|---|
 | **cycles-server** | producer — emits source records, computes `evidence_id` **synchronously**, returns `cycles_evidence` on responses | `EVIDENCE_SERVER_ID`, `EVIDENCE_SIGNING_SIGNER_DID` (both **public**) |
-| **cycles-server-events** | signer — JCS-canonicalizes, Ed25519-**signs**, stores + serves the envelope | `EVIDENCE_SERVER_ID`, `EVIDENCE_SIGNING_SIGNER_DID`, **`EVIDENCE_SIGNING_PRIVATE_KEY_HEX`** (private) |
+| **cycles-server-events** | signer — JCS-canonicalizes, Ed25519-**signs**, and **stores** the envelope in the shared store (`cycles-server` serves it via `GET /v1/evidence/{id}` — this worker does not serve) | `EVIDENCE_SERVER_ID`, `EVIDENCE_SIGNING_SIGNER_DID`, **`EVIDENCE_SIGNING_PRIVATE_KEY_HEX`** (private) |
 
 The private key lives **only** on the events worker. `cycles-server` never signs — it
 only reproduces the `evidence_id` content hash, which needs the public identity alone.
@@ -46,7 +50,10 @@ only reproduces the `evidence_id` content hash, which needs the public identity 
 computes `evidence_id` and returns `cycles_evidence`. If either is blank → records are
 still queued, but **no** `evidence_id` / `cycles_evidence` (fail-open, silent).
 
-**cycles-server-events** (`LocalEvidenceSigningKey`):
+**cycles-server-events** — `server_id` (`EvidenceWorker`) is checked **independently** of the signing key:
+- `EVIDENCE_SERVER_ID` **blank** → the worker logs a startup `WARN` (*"evidence records will be DEAD-LETTERED"*) and `build()` **refuses** to sign an empty `server_id`, so every record is **dead-lettered** to `evidence:failed` — NOT signed with an ephemeral key, NOT stored. This is the dominant failure mode of a half-configured deploy; fix `EVIDENCE_SERVER_ID` first. (Independent of the signing-key state below.)
+
+**cycles-server-events** signing key (`LocalEvidenceSigningKey`, evaluated once `server_id` is set):
 - both private-key + signer-did set → loads them, validates the pair, logs
   `evidence signing key loaded from configuration (signer_did=…)`.
 - **neither** set → generates an **EPHEMERAL** key and logs a `WARN`:
