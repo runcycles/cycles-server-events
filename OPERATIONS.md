@@ -482,6 +482,13 @@ don't fit.
 | `spring.task.scheduling.pool.size` | `3` | Size of the scheduled-task executor (dispatch loop + retry scheduler + cleanup). Don't lower below 3 — each needs its own thread to avoid starvation. |
 | `management.endpoints.web.exposure.include` | `health,info,prometheus` | Add more actuator endpoints if needed, but `prometheus` is the one ops cares about. |
 | `MANAGEMENT_PORT` | `9980` | Separate port actuators bind to — keep this on an internal-only network. The public API port 7980 serves no actuator endpoints. |
+| `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. **Must be byte-identical to `cycles-server`'s** value (incl. the `/v1` base) or the worker's id cross-check fails and records dead-letter. See the enablement runbook below. |
+| `EVIDENCE_SIGNING_SIGNER_DID` | (empty) | Public Ed25519 key (64 hex) stamped as `signer_did`. Must be the public half of `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` **and** identical to `cycles-server`'s value. |
+| `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | (empty) | **Secret** — Ed25519 seed (64 hex) this worker signs with. Lives **only** here, never on `cycles-server`. If unset, an ephemeral key is generated (dev only; envelopes won't verify across restarts). Setting only one of the signing pair fails startup. |
+
+Turning CyclesEvidence **on** (the shared identity across `cycles-server` + this
+worker, key generation, coherence rules, and end-to-end verification) is documented
+in [docs/evidence-identity-enablement.md](docs/evidence-identity-enablement.md).
 
 ## Pre-release drift checklist
 
