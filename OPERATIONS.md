@@ -479,7 +479,7 @@ don't fit.
 | `dispatch.retry.poll-interval-ms` | `5000` | How often `RetryScheduler` drains `dispatch:retry`. Lower for tighter retry latency at the cost of slightly more Redis load. |
 | `RETENTION_CLEANUP_INTERVAL_MS` | `3600000` (1h) | How often `RetentionCleanupService` trims expired ZSET entries. Rarely needs tuning. |
 | `cycles.metrics.tenant-tag.enabled` | `true` | Set `false` if you have thousands of tenants and Prometheus cardinality is stressed. Flip both this service and `cycles-server` together for dashboard consistency. |
-| `spring.task.scheduling.pool.size` | `3` | Size of the scheduled-task executor (dispatch loop + retry scheduler + cleanup). Don't lower below 3 — each needs its own thread to avoid starvation. |
+| `spring.task.scheduling.pool.size` (`SCHEDULING_POOL_SIZE`) | `5` | Size of the scheduled-task executor. Two continuous blocking loops now run — `DispatchLoop` (webhook BRPOP) **and** `EvidenceWorker` (evidence-queue BLMOVE) — plus the retry scheduler and retention cleanup. **Don't lower below 5** or webhook retries/cleanup starve behind the two blocking loops (see "Scheduler pool" under the runbook below). |
 | `management.endpoints.web.exposure.include` | `health,info,prometheus` | Add more actuator endpoints if needed, but `prometheus` is the one ops cares about. |
 | `MANAGEMENT_PORT` | `9980` | Separate port actuators bind to — keep this on an internal-only network. The public API port 7980 serves no actuator endpoints. |
 | `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. **Must be byte-identical to `cycles-server`'s** value (incl. the `/v1` base) or the worker's id cross-check fails and records dead-letter. See the enablement runbook below. |
