@@ -4,9 +4,12 @@
 
 # Runcycles Event Server
 
-Event delivery service for the Cycles ecosystem. Consumes events from Redis and delivers them to webhook endpoints with HMAC-SHA256 signing, exponential backoff retry, auto-disable on consecutive failures, and AES-256-GCM secret encryption at rest.
+The asynchronous tier of the Cycles ecosystem. It runs two independent Redis-fed workers:
 
-**Spec:** [complete-budget-governance-v0.1.25.yaml](https://github.com/runcycles/cycles-server-admin/blob/main/complete-budget-governance-v0.1.25.yaml)
+1. **Webhook delivery** — consumes events and delivers them to subscriber endpoints with HMAC-SHA256 signing, exponential backoff retry, auto-disable on consecutive failures, and AES-256-GCM secret encryption at rest.
+2. **CyclesEvidence signing** — consumes evidence source records emitted by `cycles-server`, builds a `cycles-evidence/v0.1` envelope, **Ed25519-signs** it, and stores it content-addressed for `cycles-server` to serve at `GET /v1/evidence/{id}`. This is where the evidence **private signing key** lives. See [CyclesEvidence signing](#cyclesevidence-signing) and the [identity enablement runbook](docs/evidence-identity-enablement.md).
+
+**Specs:** [complete-budget-governance-v0.1.25.yaml](https://github.com/runcycles/cycles-server-admin/blob/main/complete-budget-governance-v0.1.25.yaml) (webhooks/events) · [cycles-evidence-v0.1.yaml](https://github.com/runcycles/cycles-protocol/blob/main/drafts/cycles-evidence-v0.1.yaml) (evidence envelope)
 
 ## Architecture
 
@@ -44,6 +47,25 @@ Event sources (per spec `source` field): `cycles-admin`, `cycles-server`, `expir
 | Failure isolation | Servers stay responsive during delivery backlog | Delivery retries don't block API |
 | Concurrency | Multiple instances | Multiple instances safe (BRPOP is atomic) |
 
+## CyclesEvidence signing
+
+Alongside webhook delivery, this service is the **signing tier** for CyclesEvidence — tamper-evident, content-addressed audit envelopes for every budget decision (see the [concept docs](https://docs.runcycles.io/) and [cycles-evidence-v0.1.yaml](https://github.com/runcycles/cycles-protocol/blob/main/drafts/cycles-evidence-v0.1.yaml)).
+
+```
+cycles-server (producer)                       cycles-server-events (signer)
+  emits {decide|reserve|commit|release|error}     EvidenceWorker (reliable queue: BLMOVE)
+  source record + computes evidence_id ──LPUSH──►   ├── CyclesEvidenceEnvelopeBuilder: build cycles-evidence/v0.1
+  (returns cycles_evidence on the response)         ├── recompute evidence_id; CROSS-CHECK vs producer's
+                                                    │     stamped id → dead-letter on drift
+                                          evidence:pending ├── EnvelopeSigner: Ed25519 sign (PRIVATE KEY lives here)
+                                                    └── EvidenceStore: SET evidence:envelope:<id>  ◄── cycles-server
+                                                                                                        serves GET /v1/evidence/{id}
+```
+
+Why the signer is in this tier: the expensive work (JCS canonicalization + Ed25519 signing) is asynchronous and must not block a reservation, and the **private signing key** is isolated to this service — `cycles-server` only ever holds the public identity (it reproduces the `evidence_id` content hash synchronously, never signs). The worker recomputes the id and **dead-letters on mismatch**, so producer/worker config drift fails closed.
+
+**Configure it:** the shared public identity (`EVIDENCE_SERVER_ID`, `EVIDENCE_SIGNING_SIGNER_DID`) plus this service's **private key** (`EVIDENCE_SIGNING_PRIVATE_KEY_HEX`) — full provisioning, coherence rules, and verification steps are in [`docs/evidence-identity-enablement.md`](docs/evidence-identity-enablement.md). Until configured, the evidence worker runs but produces no verifiable output (ephemeral key in dev, dead-letter if `server_id` is unset).
+
 ## Quick Start
 
 ### Full stack (with admin + runtime server)
@@ -78,6 +100,9 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `EVENT_TTL_DAYS` | 90 | Redis TTL for `event:{id}` keys (days). Spec: "90 days hot." |
 | `DELIVERY_TTL_DAYS` | 14 | Redis TTL for `delivery:{id}` keys (days). |
 | `RETENTION_CLEANUP_INTERVAL_MS` | 3600000 | How often to trim expired ZSET index entries (ms). Default: 1 hour. |
+| `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. **Must be byte-identical to `cycles-server`'s** value (incl. the `/v1` base) or the worker's id cross-check dead-letters. Blank → records dead-letter. See the [enablement runbook](docs/evidence-identity-enablement.md). |
+| `EVIDENCE_SIGNING_SIGNER_DID` | (empty) | Public Ed25519 key (64 hex), the public half of `EVIDENCE_SIGNING_PRIVATE_KEY_HEX`, **identical to `cycles-server`'s** value. |
+| `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | (empty) | **Secret** — Ed25519 seed (64 hex) this service signs with; lives **only** here. Unset → ephemeral dev key (won't verify across restarts); setting only one of the signing pair fails startup. |
 
 ### Generating the encryption key
 
