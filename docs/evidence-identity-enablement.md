@@ -44,6 +44,27 @@ only reproduces the `evidence_id` content hash, which needs the public identity 
    e.g. `https://cycles.example.com/v1`. `cycles_evidence_url` = `{server_id}/evidence/{id}`,
    and `GET /v1/evidence/{id}` is served from that base; do **not** double-add `/v1`.
 
+## Generating the identity
+
+You own the key — there is no hosted Cycles and no central signer. Generate an
+Ed25519 keypair and the three env vars with the bundled helper
+([`tools/EvidenceKeygen.java`](../tools/EvidenceKeygen.java)):
+
+```sh
+java tools/EvidenceKeygen.java https://cycles.example.com/v1
+```
+
+It prints `EVIDENCE_SERVER_ID`, `EVIDENCE_SIGNING_SIGNER_DID`, and the secret
+`EVIDENCE_SIGNING_PRIVATE_KEY_HEX` in the exact 64-hex formats validated above.
+Before printing, it reconstructs the keys from the emitted hex (the same DER
+reconstruction `EnvelopeSigner` uses) and runs the sign/verify pair probe
+coherence rule 3 enforces — so the values it hands you can't fail the worker's
+startup check. Capture the secret straight into your secret
+manager; never commit or paste it. (Prefer OpenSSL? See
+[`tools/README.md`](../tools/README.md).) This is the **v0.1 raw-hex
+`signer_did`** path; the `did:cycles`/JWKS form is the v0.2 layer tracked in
+[cycles-protocol#103](https://github.com/runcycles/cycles-protocol/issues/103).
+
 ## Startup behavior (so you can read the logs)
 
 **cycles-server** (`EvidenceEmitter`): if `server-id` **and** `signer-did` are both set →
