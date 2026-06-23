@@ -3,9 +3,9 @@
 > How to turn CyclesEvidence **on** in an environment. Until the identity is
 > configured, no usable signed evidence is produced: `cycles-server` fail-opens
 > (records still queue, but responses carry no `cycles_evidence` ref), and the
-> `cycles-server-events` worker either **dead-letters** the records (when
-> `EVIDENCE_SERVER_ID` is blank — an empty `server_id` is not a valid envelope)
-> or signs them with a **throwaway** key (when only the signing key is unset).
+> `cycles-server-events` signer stays disabled when `EVIDENCE_SERVER_ID` is
+> blank. If `server_id` is set but the signing key is unset, it signs with a
+> **throwaway** key.
 > See [Startup behavior](#startup-behavior-so-you-can-read-the-logs) for the exact
 > per-variable modes. Nothing else breaks.
 
@@ -72,7 +72,7 @@ computes `evidence_id` and returns `cycles_evidence`. If either is blank → rec
 still queued, but **no** `evidence_id` / `cycles_evidence` (fail-open, silent).
 
 **cycles-server-events** — `server_id` (`EvidenceWorker`) is checked **independently** of the signing key:
-- `EVIDENCE_SERVER_ID` **blank** → the worker logs a startup `WARN` (*"evidence records will be DEAD-LETTERED"*) and `build()` **refuses** to sign an empty `server_id`, so every record is **dead-lettered** to `evidence:failed` — NOT signed with an ephemeral key, NOT stored. This is the dominant failure mode of a half-configured deploy; fix `EVIDENCE_SERVER_ID` first. (Independent of the signing-key state below.)
+- `EVIDENCE_SERVER_ID` **blank** → the evidence signer is disabled. It does **not** claim records from `evidence:pending`, does **not** sign with an ephemeral key, and does **not** dead-letter records. Set `EVIDENCE_SERVER_ID` to enable signing.
 
 **cycles-server-events** signing key (`LocalEvidenceSigningKey`, evaluated once `server_id` is set):
 - both private-key + signer-did set → loads them, validates the pair, logs

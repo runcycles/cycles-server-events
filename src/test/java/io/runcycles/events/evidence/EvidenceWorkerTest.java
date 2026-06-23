@@ -14,6 +14,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class EvidenceWorkerTest {
@@ -110,17 +111,14 @@ class EvidenceWorkerTest {
     }
 
     @Test
-    void deadLettersWhenServerIdUnconfigured() {
+    void doesNotClaimWhenServerIdUnconfigured() {
         CapturingSink sink = new CapturingSink();
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
-        String record = sourceRecord("reserve", "ALLOW");
-        when(consumer.claim(1)).thenReturn(record);
 
         worker(consumer, sink, "").processNext(); // blank server_id
 
-        assertThat(sink.count).isZero(); // empty server_id is not a valid envelope
-        verify(consumer).deadLetter(record);
-        verify(consumer).ack(record);
+        assertThat(sink.count).isZero(); // unconfigured evidence mode leaves Redis untouched
+        verifyNoInteractions(consumer);
     }
 
     @Test

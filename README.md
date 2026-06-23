@@ -64,7 +64,7 @@ cycles-server (producer)                       cycles-server-events (signer)
 
 Why the signer is in this tier: the expensive work (JCS canonicalization + Ed25519 signing) is asynchronous and must not block a reservation, and the **private signing key** is isolated to this service — `cycles-server` only ever holds the public identity (it reproduces the `evidence_id` content hash synchronously, never signs). The worker recomputes the id and **dead-letters on mismatch**, so producer/worker config drift fails closed.
 
-**Configure it:** the shared public identity (`EVIDENCE_SERVER_ID`, `EVIDENCE_SIGNING_SIGNER_DID`) plus this service's **private key** (`EVIDENCE_SIGNING_PRIVATE_KEY_HEX`) — full provisioning, coherence rules, and verification steps are in [`docs/evidence-identity-enablement.md`](docs/evidence-identity-enablement.md). Until configured, the evidence worker runs but produces no verifiable output (ephemeral key in dev, dead-letter if `server_id` is unset).
+**Configure it:** the shared public identity (`EVIDENCE_SERVER_ID`, `EVIDENCE_SIGNING_SIGNER_DID`) plus this service's **private key** (`EVIDENCE_SIGNING_PRIVATE_KEY_HEX`) — full provisioning, coherence rules, and verification steps are in [`docs/evidence-identity-enablement.md`](docs/evidence-identity-enablement.md). If `EVIDENCE_SERVER_ID` is blank, the evidence signer is disabled and does not claim or dead-letter source records.
 
 ## Quick Start
 
@@ -100,7 +100,7 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `EVENT_TTL_DAYS` | 90 | Redis TTL for `event:{id}` keys (days). Spec: "90 days hot." |
 | `DELIVERY_TTL_DAYS` | 14 | Redis TTL for `delivery:{id}` keys (days). |
 | `RETENTION_CLEANUP_INTERVAL_MS` | 3600000 | How often to trim expired ZSET index entries (ms). Default: 1 hour. |
-| `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. **Must be byte-identical to `cycles-server`'s** value (incl. the `/v1` base) or the worker's id cross-check dead-letters. Blank → records dead-letter. See the [enablement runbook](docs/evidence-identity-enablement.md). |
+| `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. Blank disables the evidence signer. When set, it **must be byte-identical to `cycles-server`'s** value (incl. the `/v1` base) or the worker's id cross-check dead-letters. See the [enablement runbook](docs/evidence-identity-enablement.md). |
 | `EVIDENCE_SIGNING_SIGNER_DID` | (empty) | Public Ed25519 key (64 hex), the public half of `EVIDENCE_SIGNING_PRIVATE_KEY_HEX`, **identical to `cycles-server`'s** value. |
 | `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | (empty) | **Secret** — Ed25519 seed (64 hex) this service signs with; lives **only** here. Unset → ephemeral dev key (won't verify across restarts); setting only one of the signing pair fails startup. |
 

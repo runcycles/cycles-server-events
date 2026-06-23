@@ -18,6 +18,7 @@ import org.springframework.stereotype.Component;
  * type's wire name), so the builder cannot emit a mismatched envelope.
  */
 @Component
+@ConditionalOnEvidenceConfigured
 public class CyclesEvidenceEnvelopeBuilder {
 
     static final String SCHEMA_VERSION = "cycles-evidence/v0.1";

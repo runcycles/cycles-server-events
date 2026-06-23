@@ -32,6 +32,7 @@ import java.util.HexFormat;
  * <p>The raw private key never leaves this component.
  */
 @Component
+@ConditionalOnEvidenceConfigured
 public class LocalEvidenceSigningKey implements EvidenceSigningKey {
 
     private static final Logger log = LoggerFactory.getLogger(LocalEvidenceSigningKey.class);
