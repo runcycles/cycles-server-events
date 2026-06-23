@@ -565,8 +565,11 @@ it to the sink. Operational notes:
 
 - **`EVIDENCE_SERVER_ID` enables the signer.** Blank means the evidence signer
   is disabled; it will not claim from `evidence:pending`, and source records are
-  not dead-lettered by this service. Set it to the deployment's stable Cycles
-  server URI to turn signing on.
+  not dead-lettered by this service. Current cycles-server producers also stop
+  queueing new evidence source records when the public evidence identity is
+  incomplete. Records that were already in `evidence:pending` before disabling
+  remain there until evidence is re-enabled or an operator drains them manually.
+  Set it to the deployment's stable Cycles server URI to turn signing on.
 - **Signing key must be configured in production when evidence is enabled.** Set BOTH
   `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` and `EVIDENCE_SIGNING_SIGNER_DID` (a paired
   Ed25519 key). If left unset the service generates an **ephemeral** key per

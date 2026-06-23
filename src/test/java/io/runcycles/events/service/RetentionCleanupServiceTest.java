@@ -7,6 +7,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.exceptions.JedisDataException;
 import redis.clients.jedis.params.ScanParams;
 import redis.clients.jedis.resps.ScanResult;
 
@@ -26,6 +27,7 @@ class RetentionCleanupServiceTest {
     @BeforeEach
     void setUp() {
         lenient().when(jedisPool.getResource()).thenReturn(jedis);
+        lenient().when(jedis.type(anyString())).thenReturn("zset");
         service = new RetentionCleanupService(jedisPool, 90, 14);
     }
 
@@ -54,6 +56,38 @@ class RetentionCleanupServiceTest {
         service.cleanup();
 
         verify(jedis).zremrangeByScore(eq("events:tenant-1"), eq("-inf"), anyString());
+    }
+
+    @Test
+    void cleanup_skipsNonZsetKeysMatchedByBroadPatterns() {
+        when(jedis.zremrangeByScore(eq("events:_all"), eq("-inf"), anyString())).thenReturn(0L);
+        when(jedis.scan(eq("0"), any(ScanParams.class)))
+                .thenReturn(new ScanResult<>("0", List.of("events:tenant-1", "events:correlation:cid-1")))
+                .thenReturn(new ScanResult<>("0", List.of("deliveries:sub-1")));
+        when(jedis.type("events:correlation:cid-1")).thenReturn("set");
+        when(jedis.zremrangeByScore(eq("events:tenant-1"), eq("-inf"), anyString())).thenReturn(3L);
+        when(jedis.zremrangeByScore(eq("deliveries:sub-1"), eq("-inf"), anyString())).thenReturn(2L);
+
+        service.cleanup();
+
+        verify(jedis).zremrangeByScore(eq("events:tenant-1"), eq("-inf"), anyString());
+        verify(jedis, never()).zremrangeByScore(eq("events:correlation:cid-1"), eq("-inf"), anyString());
+        verify(jedis).zremrangeByScore(eq("deliveries:sub-1"), eq("-inf"), anyString());
+    }
+
+    @Test
+    void cleanup_wrongTypeRaceDoesNotAbortRemainingKeys() {
+        when(jedis.zremrangeByScore(eq("events:_all"), eq("-inf"), anyString())).thenReturn(0L);
+        when(jedis.scan(eq("0"), any(ScanParams.class)))
+                .thenReturn(new ScanResult<>("0", List.of("events:tenant-1")))
+                .thenReturn(new ScanResult<>("0", List.of("deliveries:sub-1")));
+        when(jedis.zremrangeByScore(eq("events:tenant-1"), eq("-inf"), anyString()))
+                .thenThrow(new JedisDataException("WRONGTYPE Operation against a key holding the wrong kind of value"));
+        when(jedis.zremrangeByScore(eq("deliveries:sub-1"), eq("-inf"), anyString())).thenReturn(2L);
+
+        service.cleanup();
+
+        verify(jedis).zremrangeByScore(eq("deliveries:sub-1"), eq("-inf"), anyString());
     }
 
     @Test

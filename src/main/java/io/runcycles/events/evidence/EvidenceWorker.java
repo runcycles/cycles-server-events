@@ -35,7 +35,6 @@ public class EvidenceWorker {
     private final ObjectMapper mapper;
     private final int timeoutSeconds;
     private final String serverId;
-    private final boolean enabled;
 
     public EvidenceWorker(
             EvidenceQueueConsumer consumer,
@@ -50,18 +49,10 @@ public class EvidenceWorker {
         this.mapper = mapper;
         this.timeoutSeconds = timeoutSeconds;
         this.serverId = serverId;
-        this.enabled = serverId != null && !serverId.isBlank();
-        if (!enabled) {
-            LOG.warn("cycles.evidence.server-id is not configured — evidence records will be "
-                    + "left pending and the evidence worker is disabled. Set EVIDENCE_SERVER_ID to enable.");
-        }
     }
 
     @Scheduled(fixedDelay = 1)
     public void processNext() {
-        if (!enabled) {
-            return;
-        }
         String record = consumer.claim(timeoutSeconds);
         if (record == null) {
             return;
@@ -101,8 +92,8 @@ public class EvidenceWorker {
     /**
      * Map a source record to a built, signed envelope. Validates the record and
      * config BEFORE signing — a corrupt record must NOT be signed into a
-     * valid-looking but garbage envelope. {@link #processNext()} does not call
-     * this when evidence is disabled; the direct guard below remains fail-closed.
+     * valid-looking but garbage envelope. Spring creates this worker only when
+     * evidence is enabled; the direct guard below remains fail-closed.
      */
     BuiltEvidenceEnvelope build(String recordJson) throws Exception {
         if (serverId == null || serverId.isBlank()) {

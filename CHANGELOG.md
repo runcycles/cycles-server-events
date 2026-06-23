@@ -29,17 +29,22 @@ breaking.
   and local signing key from being created, so deployments that have not enabled
   evidence no longer claim source records or dead-letter them solely because
   `server_id` is absent.
-- Direct `EvidenceWorker` construction remains defensive: with a blank
-  `server_id`, `processNext()` returns without touching Redis.
+- **Retention cleanup no longer fails on non-ZSET Redis keys.** The cleanup scan
+  for `events:*` can match correlation sets such as `events:correlation:*`;
+  these are now skipped instead of receiving `ZREMRANGEBYSCORE` and producing
+  `WRONGTYPE Operation against a key holding the wrong kind of value`.
 
 ### Documentation
 
 - Updated README, operations notes, and the evidence identity runbook to state
   that blank `EVIDENCE_SERVER_ID` disables signing instead of dead-lettering.
+- Documented that already-queued `evidence:pending` records remain pending when
+  signing is disabled, and that the events worker intentionally gates on
+  `server_id` while signer configuration is validated separately.
 
 ### Validation
 
-- `mvn -B verify` passes (277 tests; JaCoCo coverage gate met).
+- `mvn -B verify` passes (279 tests; JaCoCo coverage gate met).
 
 ## [0.1.25.12] — 2026-04-26
 

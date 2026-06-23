@@ -23,6 +23,7 @@ class EvidenceConfigurationConditionTest {
     @Test
     void evidenceSignerBeansAreAbsentWhenServerIdIsBlank() {
         contextRunner.run(context -> {
+            assertThat(context).hasNotFailed();
             assertThat(context).doesNotHaveBean(LocalEvidenceSigningKey.class);
             assertThat(context).doesNotHaveBean(CyclesEvidenceEnvelopeBuilder.class);
             assertThat(context).doesNotHaveBean(EvidenceWorker.class);
@@ -34,6 +35,7 @@ class EvidenceConfigurationConditionTest {
         contextRunner
                 .withPropertyValues("cycles.evidence.server-id=https://cycles.example.com/v1")
                 .run(context -> {
+                    assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(LocalEvidenceSigningKey.class);
                     assertThat(context).hasSingleBean(CyclesEvidenceEnvelopeBuilder.class);
                     assertThat(context).hasSingleBean(EvidenceWorker.class);

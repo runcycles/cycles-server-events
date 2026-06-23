@@ -6,7 +6,9 @@
 
 A blank `EVIDENCE_SERVER_ID` now prevents the evidence signer worker, envelope builder, and local signing key beans from being created. Webhook-only deployments no longer generate ephemeral signing identities or consume and dead-letter source records solely because `server_id` is absent.
 
-`EvidenceWorker.processNext` also returns before claiming when constructed directly with a blank `serverId`, preserving the same no-touch Redis behavior outside Spring. `EvidenceConfigurationConditionTest` covers both Spring startup modes, and `EvidenceWorkerTest` covers the direct disabled path. Docs and config comments now state that blank `EVIDENCE_SERVER_ID` disables signing. Version bump: `pom.xml` `<revision>` -> `0.1.25.15`; validation: `mvn -B verify` passed with 277 tests and the JaCoCo gate met.
+`EvidenceWorker` no longer carries a second runtime `enabled` flag; the Spring condition is the deployment switch. A direct worker constructed with blank `serverId` remains fail-closed at build time and dead-letters rather than signing an invalid envelope. `EvidenceConfigurationConditionTest` covers both Spring startup modes and now asserts the unconfigured context has not failed. Docs and config comments state that blank `EVIDENCE_SERVER_ID` disables signing, that the events worker intentionally gates on `server_id` while signer config is validated separately, and that records already in `evidence:pending` stay pending if signing is later disabled.
+
+The same slice fixes the startup log's unrelated retention cleanup error: `RetentionCleanupService` scans broad patterns (`events:*`, `deliveries:*`) but now checks Redis key type before trimming. Non-ZSET matches such as `events:correlation:*` are skipped, and a `WRONGTYPE` race on a key no longer aborts the rest of the cleanup pass. Version bump: `pom.xml` `<revision>` -> `0.1.25.15`; validation: `mvn -B verify` passed with 279 tests and the JaCoCo gate met.
 
 ### 2026-06-15 — signer key resolution authority loop reference verifier
 

@@ -2,10 +2,10 @@
 
 > How to turn CyclesEvidence **on** in an environment. Until the identity is
 > configured, no usable signed evidence is produced: `cycles-server` fail-opens
-> (records still queue, but responses carry no `cycles_evidence` ref), and the
+> without queueing source records or returning a `cycles_evidence` ref, and the
 > `cycles-server-events` signer stays disabled when `EVIDENCE_SERVER_ID` is
 > blank. If `server_id` is set but the signing key is unset, it signs with a
-> **throwaway** key.
+> **throwaway** development key.
 > See [Startup behavior](#startup-behavior-so-you-can-read-the-logs) for the exact
 > per-variable modes. Nothing else breaks.
 
@@ -69,10 +69,11 @@ manager; never commit or paste it. (Prefer OpenSSL? See
 
 **cycles-server** (`EvidenceEmitter`): if `server-id` **and** `signer-did` are both set →
 computes `evidence_id` and returns `cycles_evidence`. If either is blank → records are
-still queued, but **no** `evidence_id` / `cycles_evidence` (fail-open, silent).
+not queued and there is **no** `evidence_id` / `cycles_evidence` (fail-open, silent).
 
 **cycles-server-events** — `server_id` (`EvidenceWorker`) is checked **independently** of the signing key:
 - `EVIDENCE_SERVER_ID` **blank** → the evidence signer is disabled. It does **not** claim records from `evidence:pending`, does **not** sign with an ephemeral key, and does **not** dead-letter records. Set `EVIDENCE_SERVER_ID` to enable signing.
+- Records already present in `evidence:pending` before disabling remain there until evidence is re-enabled or an operator drains them manually; the worker does not treat disablement as permission to delete audit source records.
 
 **cycles-server-events** signing key (`LocalEvidenceSigningKey`, evaluated once `server_id` is set):
 - both private-key + signer-did set → loads them, validates the pair, logs

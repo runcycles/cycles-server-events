@@ -7,6 +7,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.exceptions.JedisDataException;
 import redis.clients.jedis.params.ScanParams;
 import redis.clients.jedis.resps.ScanResult;
 
@@ -44,7 +45,7 @@ public class RetentionCleanupService {
 
             try (Jedis jedis = jedisPool.getResource()) {
                 // Trim global event index
-                long removedAll = jedis.zremrangeByScore("events:_all", "-inf", String.valueOf(eventCutoff));
+                long removedAll = trimZset(jedis, "events:_all", eventCutoff);
                 if (removedAll > 0) {
                     LOG.info("Cleaned {} expired entries from events:_all", removedAll);
                 }
@@ -69,12 +70,32 @@ public class RetentionCleanupService {
             ScanResult<String> result = jedis.scan(cursor, params);
             for (String key : result.getResult()) {
                 if (key.equals(skipKey)) continue;
-                long removed = jedis.zremrangeByScore(key, "-inf", String.valueOf(cutoffMs));
-                if (removed > 0) {
-                    LOG.debug("Cleaned {} expired entries from {}", removed, key);
-                }
+                trimZset(jedis, key, cutoffMs);
             }
             cursor = result.getCursor();
         } while (!"0".equals(cursor));
+    }
+
+    private long trimZset(Jedis jedis, String key, long cutoffMs) {
+        String type = jedis.type(key);
+        if (!"zset".equals(type)) {
+            if (!"none".equals(type)) {
+                LOG.debug("Skipping retention cleanup for {} because Redis type is {}, not zset", key, type);
+            }
+            return 0;
+        }
+        try {
+            long removed = jedis.zremrangeByScore(key, "-inf", String.valueOf(cutoffMs));
+            if (removed > 0) {
+                LOG.debug("Cleaned {} expired entries from {}", removed, key);
+            }
+            return removed;
+        } catch (JedisDataException e) {
+            if (e.getMessage() != null && e.getMessage().contains("WRONGTYPE")) {
+                LOG.debug("Skipping retention cleanup for {} because Redis reported WRONGTYPE", key);
+                return 0;
+            }
+            throw e;
+        }
     }
 }
