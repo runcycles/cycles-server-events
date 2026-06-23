@@ -20,6 +20,27 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.15] — 2026-06-23
+
+### Fixed
+
+- **Unconfigured CyclesEvidence is now a disabled mode.** A blank
+  `EVIDENCE_SERVER_ID` prevents the evidence signer worker, envelope builder,
+  and local signing key from being created, so deployments that have not enabled
+  evidence no longer claim source records or dead-letter them solely because
+  `server_id` is absent.
+- Direct `EvidenceWorker` construction remains defensive: with a blank
+  `server_id`, `processNext()` returns without touching Redis.
+
+### Documentation
+
+- Updated README, operations notes, and the evidence identity runbook to state
+  that blank `EVIDENCE_SERVER_ID` disables signing instead of dead-lettering.
+
+### Validation
+
+- `mvn -B verify` passes (277 tests; JaCoCo coverage gate met).
+
 ## [0.1.25.12] — 2026-04-26
 
 ### Changed
