@@ -110,7 +110,7 @@ class EvidenceWorkerTest {
     }
 
     @Test
-    void deadLettersWhenServerIdUnconfigured() {
+    void deadLettersWhenDirectWorkerHasBlankServerId() {
         CapturingSink sink = new CapturingSink();
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
         String record = sourceRecord("reserve", "ALLOW");
@@ -118,7 +118,7 @@ class EvidenceWorkerTest {
 
         worker(consumer, sink, "").processNext(); // blank server_id
 
-        assertThat(sink.count).isZero(); // empty server_id is not a valid envelope
+        assertThat(sink.count).isZero(); // must NOT sign an envelope with blank server_id
         verify(consumer).deadLetter(record);
         verify(consumer).ack(record);
     }

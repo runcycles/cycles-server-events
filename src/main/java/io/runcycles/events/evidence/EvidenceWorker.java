@@ -24,6 +24,7 @@ import java.util.Locale;
  * scheduling.
  */
 @Component
+@ConditionalOnEvidenceConfigured
 public class EvidenceWorker {
 
     private static final Logger LOG = LoggerFactory.getLogger(EvidenceWorker.class);
@@ -48,10 +49,6 @@ public class EvidenceWorker {
         this.mapper = mapper;
         this.timeoutSeconds = timeoutSeconds;
         this.serverId = serverId;
-        if (serverId == null || serverId.isBlank()) {
-            LOG.warn("cycles.evidence.server-id is not configured — evidence records will be "
-                    + "DEAD-LETTERED (an empty server_id is not a valid envelope). Set EVIDENCE_SERVER_ID.");
-        }
     }
 
     @Scheduled(fixedDelay = 1)
@@ -94,9 +91,9 @@ public class EvidenceWorker {
 
     /**
      * Map a source record to a built, signed envelope. Validates the record and
-     * config BEFORE signing — a corrupt record (or unconfigured {@code server_id})
-     * must NOT be signed into a valid-looking but garbage envelope; it throws so
-     * {@link #processNext()} dead-letters it.
+     * config BEFORE signing — a corrupt record must NOT be signed into a
+     * valid-looking but garbage envelope. Spring creates this worker only when
+     * evidence is enabled; the direct guard below remains fail-closed.
      */
     BuiltEvidenceEnvelope build(String recordJson) throws Exception {
         if (serverId == null || serverId.isBlank()) {

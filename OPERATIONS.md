@@ -479,10 +479,10 @@ don't fit.
 | `dispatch.retry.poll-interval-ms` | `5000` | How often `RetryScheduler` drains `dispatch:retry`. Lower for tighter retry latency at the cost of slightly more Redis load. |
 | `RETENTION_CLEANUP_INTERVAL_MS` | `3600000` (1h) | How often `RetentionCleanupService` trims expired ZSET entries. Rarely needs tuning. |
 | `cycles.metrics.tenant-tag.enabled` | `true` | Set `false` if you have thousands of tenants and Prometheus cardinality is stressed. Flip both this service and `cycles-server` together for dashboard consistency. |
-| `spring.task.scheduling.pool.size` (`SCHEDULING_POOL_SIZE`) | `5` | Size of the scheduled-task executor. Two continuous blocking loops now run — `DispatchLoop` (webhook BRPOP) **and** `EvidenceWorker` (evidence-queue BLMOVE) — plus the retry scheduler and retention cleanup. **Don't lower below 5** or webhook retries/cleanup starve behind the two blocking loops (see "Scheduler pool" under the runbook below). |
+| `spring.task.scheduling.pool.size` (`SCHEDULING_POOL_SIZE`) | `5` | Size of the scheduled-task executor. `DispatchLoop` always runs a continuous webhook BRPOP; `EvidenceWorker` adds a second BLMOVE loop only when `EVIDENCE_SERVER_ID` is set. **Don't lower below 5** when evidence is enabled or webhook retries/cleanup can starve behind the blocking loops (see "Scheduler pool" under the runbook below). |
 | `management.endpoints.web.exposure.include` | `health,info,prometheus` | Add more actuator endpoints if needed, but `prometheus` is the one ops cares about. |
 | `MANAGEMENT_PORT` | `9980` | Separate port actuators bind to — keep this on an internal-only network. The public API port 7980 serves no actuator endpoints. |
-| `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. **Must be byte-identical to `cycles-server`'s** value (incl. the `/v1` base) or the worker's id cross-check fails and records dead-letter. See the enablement runbook below. |
+| `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. Blank disables the evidence signer. When set, it **must be byte-identical to `cycles-server`'s** value (incl. the `/v1` base) or the worker's id cross-check fails and records dead-letter. See the enablement runbook below. |
 | `EVIDENCE_SIGNING_SIGNER_DID` | (empty) | Public Ed25519 key (64 hex) stamped as `signer_did`. Must be the public half of `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` **and** identical to `cycles-server`'s value. |
 | `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | (empty) | **Secret** — Ed25519 seed (64 hex) this worker signs with. Lives **only** here, never on `cycles-server`. If unset, an ephemeral key is generated (dev only; envelopes won't verify across restarts). Setting only one of the signing pair fails startup. |
 
@@ -563,14 +563,19 @@ The `EvidenceWorker` consumes source records cycles-server pushes to
 `evidence:pending`, signs a `cycles-evidence/v0.1` envelope for each, and hands
 it to the sink. Operational notes:
 
-- **Signing key must be configured in production.** Set BOTH
+- **`EVIDENCE_SERVER_ID` enables the signer.** Blank means the evidence signer
+  is disabled; it will not claim from `evidence:pending`, and source records are
+  not dead-lettered by this service. Current cycles-server producers also stop
+  queueing new evidence source records when the public evidence identity is
+  incomplete. Records that were already in `evidence:pending` before disabling
+  remain there until evidence is re-enabled or an operator drains them manually.
+  Set it to the deployment's stable Cycles server URI to turn signing on.
+- **Signing key must be configured in production when evidence is enabled.** Set BOTH
   `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` and `EVIDENCE_SIGNING_SIGNER_DID` (a paired
   Ed25519 key). If left unset the service generates an **ephemeral** key per
   process and logs a WARN — so multiple un-configured replicas would each sign
   with a **different `signer_did`**, and signatures would not survive a restart.
   Provision the key once and set it identically on every replica.
-- **`EVIDENCE_SERVER_ID`** is stamped as the envelope `server_id`; set it to the
-  deployment's stable Cycles server URI.
 - **Reliable queue.** The worker claims records with `BLMOVE evidence:pending →
   evidence:processing` and only `LREM`s them from `evidence:processing` after the
   envelope is stored (or dead-lettered). On startup, orphaned in-flight records
@@ -584,9 +589,10 @@ it to the sink. Operational notes:
   `evidence:failed` (not dropped). Monitor `LLEN evidence:failed`; a non-zero,
   growing value means records are failing to sign (bad key, malformed producer
   output). Inspect with `LRANGE evidence:failed 0 10` and replay after fixing.
-- **Scheduler pool.** `SCHEDULING_POOL_SIZE` (default 5) must stay ≥ the number
-  of continuous BRPOP loops (`DispatchLoop` + `EvidenceWorker` = 2) plus headroom
-  for the periodic tasks, or webhook retries/cleanup can starve.
+- **Scheduler pool.** `SCHEDULING_POOL_SIZE` (default 5) must stay >= the number
+  of continuous blocking loops (`DispatchLoop`, plus `EvidenceWorker` when
+  evidence is enabled) plus headroom for periodic tasks, or webhook retries and
+  cleanup can starve.
 - **Envelope store.** Built envelopes are persisted content-addressed at
   `evidence:envelope:<evidence_id>` (`EVIDENCE_STORE_KEY_PREFIX`). `EVIDENCE_STORE_TTL_SECONDS`
   defaults to 0 (no expiry — envelopes are an archival record); set a positive TTL
