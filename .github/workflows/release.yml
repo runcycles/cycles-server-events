@@ -58,6 +58,11 @@ jobs:
           format: 'sarif'
           output: 'trivy-results.sarif'
           exit-code: '1'
+          # In `format: sarif` mode the action builds an all-severities report
+          # unless this is set, and `exit-code` can trip on fixable findings the
+          # `severity` filter above should exclude. Keep the SARIF upload and
+          # the blocking gate aligned on HIGH/CRITICAL.
+          limit-severities-for-sarif: true
 
       - name: Upload Trivy SARIF to Security tab
         if: always()

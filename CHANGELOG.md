@@ -36,6 +36,10 @@ breaking.
 - Evidence dead-letter and ack-failure logs avoid dumping source payloads while
   preserving safe triage fields (`artifact_type`, `evidence_id`, `trace_id`,
   `issued_at_ms`).
+- Container Trivy SARIF gates now set `limit-severities-for-sarif: true`, so
+  PR and release scans block on the declared `HIGH,CRITICAL` severities instead
+  of failing on lower-severity fixable findings included in all-severities SARIF
+  output.
 
 ### Compatibility
 

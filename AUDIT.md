@@ -21,7 +21,11 @@ they report safe source metadata (`artifact_type`, `evidence_id`, `trace_id`,
 `issued_at_ms`, parseable flag) and keep payload bodies out of logs.
 
 No outbound webhook wire change, Redis contract change, evidence envelope
-change, or spec change. Version bump: `pom.xml` `<revision>` -> `0.1.25.16`.
+change, or spec change. The same PR also aligns the PR/release Trivy SARIF
+gates with `cycles-server-admin` by setting `limit-severities-for-sarif: true`
+so the blocking scan honors the declared `HIGH,CRITICAL` filter instead of
+failing on lower-severity fixable findings that are still present in a full
+SARIF upload. Version bump: `pom.xml` `<revision>` -> `0.1.25.16`.
 
 ### 2026-06-23 — v0.1.25.15: unconfigured CyclesEvidence is a supported disabled mode
 
