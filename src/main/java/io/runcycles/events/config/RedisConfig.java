@@ -28,7 +28,8 @@ public class RedisConfig {
 
     @Bean
     public JedisPool jedisPool() {
-        LOG.info("Cycles Events - Initializing Redis: {}:{}", host, port);
+        LOG.info("Cycles Events Redis pool initializing: host={} port={} password_configured={}",
+                host, port, password != null && !password.isBlank());
         JedisPoolConfig config = new JedisPoolConfig();
         config.setMaxTotal(50);
         config.setMaxIdle(10);

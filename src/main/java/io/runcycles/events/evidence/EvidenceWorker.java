@@ -57,22 +57,28 @@ public class EvidenceWorker {
         if (record == null) {
             return;
         }
+        BuiltEvidenceEnvelope envelope = null;
         // Build + store first. A failure HERE means the envelope was never stored,
         // so the record is dead-lettered (it is an audit trail — never silently
         // dropped). Kept separate from the ack below: a post-store ack failure must
         // NOT dead-letter an already-stored envelope.
         try {
-            sink.accept(build(record));
+            envelope = build(record);
+            sink.accept(envelope);
         } catch (Exception e) {
-            LOG.error("failed to build/store evidence envelope from source record: {} — dead-lettering",
-                    e.getMessage());
+            EvidenceSourceLogContext ctx = sourceContext(record);
+            LOG.error("Failed to build or store evidence envelope; dead-lettering source record: artifact_type={} evidence_id={} trace_id={} issued_at_ms={} source_parseable={} error={}",
+                    ctx.artifactType(), ctx.evidenceId(), ctx.traceId(), ctx.issuedAtMs(), ctx.parseable(),
+                    e.getMessage(), e);
             try {
                 consumer.deadLetter(record);
                 consumer.ack(record); // now in evidence:failed → clear from processing
             } catch (RuntimeException dl) {
                 // leave it in processing so recover() retries it on the next startup
-                LOG.error("failed to dead-letter evidence source record: {} (left in-flight for recovery)",
-                        dl.getMessage());
+                EvidenceSourceLogContext dlCtx = sourceContext(record);
+                LOG.error("Failed to dead-letter evidence source record; left in-flight for recovery: artifact_type={} evidence_id={} trace_id={} issued_at_ms={} source_parseable={} error={}",
+                        dlCtx.artifactType(), dlCtx.evidenceId(), dlCtx.traceId(), dlCtx.issuedAtMs(), dlCtx.parseable(),
+                        dl.getMessage(), dl);
             }
             return;
         }
@@ -84,8 +90,10 @@ public class EvidenceWorker {
         try {
             consumer.ack(record);
         } catch (RuntimeException ackEx) {
-            LOG.warn("evidence stored but ack failed: {} — left in-flight; recovery will reprocess "
-                    + "(idempotent, content-addressed)", ackEx.getMessage());
+            EvidenceSourceLogContext ctx = sourceContext(record);
+            LOG.warn("Evidence envelope stored but ack failed; left in-flight for idempotent recovery: artifact_type={} evidence_id={} stored_evidence_id={} trace_id={} issued_at_ms={} source_parseable={} error={}",
+                    ctx.artifactType(), ctx.evidenceId(), envelope != null ? envelope.evidenceId() : null,
+                    ctx.traceId(), ctx.issuedAtMs(), ctx.parseable(), ackEx.getMessage(), ackEx);
         }
     }
 
@@ -137,4 +145,30 @@ public class EvidenceWorker {
         }
         return built;
     }
+
+    private EvidenceSourceLogContext sourceContext(String recordJson) {
+        try {
+            JsonNode rec = mapper.readTree(recordJson);
+            return new EvidenceSourceLogContext(
+                    textOrNull(rec, "artifact_type"),
+                    textOrNull(rec, "evidence_id"),
+                    textOrNull(rec, "trace_id"),
+                    rec.hasNonNull("issued_at_ms") ? rec.get("issued_at_ms").asLong() : null,
+                    true);
+        } catch (Exception e) {
+            return new EvidenceSourceLogContext(null, null, null, null, false);
+        }
+    }
+
+    private static String textOrNull(JsonNode node, String field) {
+        JsonNode value = node.get(field);
+        return value != null && value.isTextual() ? value.asText() : null;
+    }
+
+    private record EvidenceSourceLogContext(
+            String artifactType,
+            String evidenceId,
+            String traceId,
+            Long issuedAtMs,
+            boolean parseable) {}
 }

@@ -47,7 +47,8 @@ public class RetentionCleanupService {
                 // Trim global event index
                 long removedAll = trimZset(jedis, "events:_all", eventCutoff);
                 if (removedAll > 0) {
-                    LOG.info("Cleaned {} expired entries from events:_all", removedAll);
+                    LOG.info("Retention cleanup removed expired event index entries: key=events:_all removed={} cutoff_ms={} event_ttl_ms={}",
+                            removedAll, eventCutoff, eventTtlMs);
                 }
 
                 // Trim per-tenant event indexes (scan for events:* keys)
@@ -57,9 +58,10 @@ public class RetentionCleanupService {
                 trimZsetsByPattern(jedis, "deliveries:*", deliveryCutoff, null);
             }
         } catch (redis.clients.jedis.exceptions.JedisConnectionException e) {
-            LOG.warn("Redis connection error in retention cleanup: {}", e.getMessage());
+            LOG.warn("Retention cleanup Redis connection failure: event_ttl_ms={} delivery_ttl_ms={} error={}",
+                    eventTtlMs, deliveryTtlMs, e.getMessage());
         } catch (Exception e) {
-            LOG.error("Error in retention cleanup", e);
+            LOG.error("Retention cleanup failed: event_ttl_ms={} delivery_ttl_ms={}", eventTtlMs, deliveryTtlMs, e);
         }
     }
 

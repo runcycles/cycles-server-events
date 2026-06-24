@@ -20,6 +20,28 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.16] — 2026-06-24
+
+### Changed
+
+- **Ops logging context review.** Webhook delivery, retry scheduler, dispatch
+  loop, retention cleanup, Redis repository, event payload validation, and
+  evidence worker logs now include stable operational identifiers such as
+  `delivery_id`, `event_id`, `event_type`, `subscription_id`, `tenant_id`,
+  `correlation_id`, `request_id`, `trace_id`, retry counts, queue names, and
+  evidence source metadata where available.
+- Webhook transport failures no longer log the raw subscriber URL; they log the
+  subscription, tenant, event, delivery, target host, latency, trace id, and
+  exception class instead.
+- Evidence dead-letter and ack-failure logs avoid dumping source payloads while
+  preserving safe triage fields (`artifact_type`, `evidence_id`, `trace_id`,
+  `issued_at_ms`).
+
+### Compatibility
+
+- No outbound webhook wire change.
+- No Redis key, queue, or payload-shape change.
+
 ## [0.1.25.15] — 2026-06-23
 
 ### Fixed

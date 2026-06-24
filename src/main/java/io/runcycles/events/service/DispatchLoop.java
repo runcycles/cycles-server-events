@@ -32,9 +32,10 @@ public class DispatchLoop {
                 deliveryHandler.handle(deliveryId);
             }
         } catch (JedisConnectionException e) {
-            LOG.warn("Redis connection error in dispatch loop: {}", e.getMessage());
+            LOG.warn("Dispatch loop Redis connection failure: queue=dispatch:pending timeout_seconds={} error={}",
+                    timeoutSeconds, e.getMessage());
         } catch (Exception e) {
-            LOG.error("Error in dispatch loop", e);
+            LOG.error("Dispatch loop failed: queue=dispatch:pending timeout_seconds={}", timeoutSeconds, e);
         }
     }
 }

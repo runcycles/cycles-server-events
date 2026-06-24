@@ -70,20 +70,23 @@ public class DeliveryHandler {
     public void handle(String deliveryId) {
         Delivery delivery = deliveryRepository.findById(deliveryId);
         if (delivery == null) {
-            LOG.warn("Delivery not found: {}", deliveryId);
+            LOG.warn("Webhook delivery not found: delivery_id={}", deliveryId);
             return;
         }
 
         DeliveryStatus status = delivery.getStatus();
         if (status != DeliveryStatus.PENDING && status != DeliveryStatus.RETRYING) {
-            LOG.debug("Delivery {} already in state {}, skipping", deliveryId, status);
+            LOG.debug("Webhook delivery skipped because status is terminal or in-flight: delivery_id={} status={} event_id={} subscription_id={} trace_id={}",
+                    deliveryId, status, delivery.getEventId(), delivery.getSubscriptionId(), delivery.getTraceId());
             return;
         }
 
         // Skip stale deliveries (e.g., after prolonged outage)
         Instant attemptedAt = delivery.getAttemptedAt();
         if (attemptedAt == null) {
-            LOG.warn("Delivery {} has null attemptedAt, treating as fresh", deliveryId);
+            LOG.warn("Webhook delivery has null attempted_at; treating as fresh: delivery_id={} event_id={} event_type={} subscription_id={} trace_id={}",
+                    deliveryId, delivery.getEventId(), delivery.getEventType(), delivery.getSubscriptionId(),
+                    delivery.getTraceId());
             attemptedAt = Instant.now();
         }
         long ageMs = System.currentTimeMillis() - attemptedAt.toEpochMilli();
@@ -96,6 +99,9 @@ public class DeliveryHandler {
         Event event = eventRepository.findById(delivery.getEventId());
         if (event == null) {
             metrics.recordDeliveryFailure(null, delivery.getEventType(), REASON_EVENT_NOT_FOUND, 0);
+            LOG.warn("Webhook delivery cannot load event: delivery_id={} event_id={} event_type={} subscription_id={} trace_id={}",
+                    delivery.getDeliveryId(), delivery.getEventId(), delivery.getEventType(),
+                    delivery.getSubscriptionId(), delivery.getTraceId());
             markFailed(delivery, "Event not found: " + delivery.getEventId());
             return;
         }
@@ -106,11 +112,17 @@ public class DeliveryHandler {
         Subscription sub = subscriptionRepository.findById(delivery.getSubscriptionId());
         if (sub == null) {
             metrics.recordDeliveryFailure(null, delivery.getEventType(), REASON_SUBSCRIPTION_NOT_FOUND, 0);
+            LOG.warn("Webhook delivery cannot load subscription: delivery_id={} event_id={} event_type={} subscription_id={} tenant_id={} trace_id={}",
+                    delivery.getDeliveryId(), delivery.getEventId(), delivery.getEventType(),
+                    delivery.getSubscriptionId(), event.getTenantId(), effectiveTraceId(delivery, event));
             markFailed(delivery, "Subscription not found");
             return;
         }
         if (sub.getStatus() != WebhookStatus.ACTIVE) {
             metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(), REASON_SUBSCRIPTION_INACTIVE, 0);
+            LOG.warn("Webhook delivery skipped because subscription is inactive: delivery_id={} event_id={} event_type={} subscription_id={} tenant_id={} status={} trace_id={}",
+                    delivery.getDeliveryId(), delivery.getEventId(), delivery.getEventType(),
+                    sub.getSubscriptionId(), sub.getTenantId(), sub.getStatus(), effectiveTraceId(delivery, event));
             markFailed(delivery, "Subscription not active: " + sub.getStatus());
             return;
         }
@@ -153,7 +165,10 @@ public class DeliveryHandler {
         metrics.recordDeliverySuccess(sub.getTenantId(), delivery.getEventType(),
                 result.getStatusCode(), result.getLatencyMs());
 
-        LOG.info("Delivery {} succeeded (HTTP {})", delivery.getDeliveryId(), result.getStatusCode());
+        LOG.info("Webhook delivery succeeded: delivery_id={} event_id={} event_type={} subscription_id={} tenant_id={} status={} latency_ms={} attempts={} trace_id={}",
+                delivery.getDeliveryId(), delivery.getEventId(), delivery.getEventType(), sub.getSubscriptionId(),
+                sub.getTenantId(), result.getStatusCode(), result.getLatencyMs(), delivery.getAttempts(),
+                delivery.getTraceId());
     }
 
     private void handleFailure(Delivery delivery, Subscription sub, TransportResult result) {
@@ -186,8 +201,10 @@ public class DeliveryHandler {
 
         metrics.recordDeliveryRetried(sub.getTenantId(), delivery.getEventType());
 
-        LOG.info("Delivery {} failed (attempt {}/{}), retry at {}",
-                delivery.getDeliveryId(), delivery.getAttempts(), maxRetries, delivery.getNextRetryAt());
+        LOG.info("Webhook delivery scheduled for retry: delivery_id={} event_id={} event_type={} subscription_id={} tenant_id={} status={} attempts={} max_retries={} next_retry_at={} latency_ms={} trace_id={} reason={}",
+                delivery.getDeliveryId(), delivery.getEventId(), delivery.getEventType(), sub.getSubscriptionId(),
+                sub.getTenantId(), result.getStatusCode(), delivery.getAttempts(), maxRetries,
+                delivery.getNextRetryAt(), result.getLatencyMs(), delivery.getTraceId(), reason);
     }
 
     private void markFailed(Delivery delivery, String errorMessage) {
@@ -195,7 +212,10 @@ public class DeliveryHandler {
         delivery.setErrorMessage(errorMessage);
         delivery.setCompletedAt(Instant.now());
         deliveryRepository.update(delivery);
-        LOG.warn("Delivery {} permanently failed: {}", delivery.getDeliveryId(), errorMessage);
+        LOG.warn("Webhook delivery permanently failed: delivery_id={} event_id={} event_type={} subscription_id={} attempts={} response_status={} trace_id={} error={}",
+                delivery.getDeliveryId(), delivery.getEventId(), delivery.getEventType(),
+                delivery.getSubscriptionId(), delivery.getAttempts(), delivery.getResponseStatus(),
+                delivery.getTraceId(), errorMessage);
     }
 
     private void incrementConsecutiveFailures(Subscription sub, Delivery delivery) {
@@ -215,8 +235,9 @@ public class DeliveryHandler {
             // deliveries short-circuit before reaching this path — the metric
             // fires exactly once per auto-disable transition.
             metrics.recordSubscriptionAutoDisabled(sub.getTenantId(), REASON_CONSECUTIVE_FAILURES);
-            LOG.warn("Subscription {} auto-disabled after {} consecutive failures",
-                    sub.getSubscriptionId(), failures);
+            LOG.warn("Webhook subscription auto-disabled: subscription_id={} tenant_id={} failures={} disable_after={} delivery_id={} event_id={} trace_id={}",
+                    sub.getSubscriptionId(), sub.getTenantId(), failures, disableAfter,
+                    delivery.getDeliveryId(), delivery.getEventId(), delivery.getTraceId());
         }
 
         Instant now = Instant.now();
@@ -263,9 +284,18 @@ public class DeliveryHandler {
                     .build();
             eventRepository.save(event);
         } catch (Exception e) {
-            LOG.warn("Failed to emit webhook.disabled Event for subscription {} (status flip succeeded)",
-                    sub.getSubscriptionId(), e);
+            LOG.warn("Failed to emit webhook.disabled Event after subscription status flip: subscription_id={} tenant_id={} delivery_id={} event_id={} correlation_id={} trace_id={}",
+                    sub.getSubscriptionId(), sub.getTenantId(), delivery.getDeliveryId(), delivery.getEventId(),
+                    "webhook_auto_disable:" + sub.getSubscriptionId() + ":" + delivery.getDeliveryId(),
+                    delivery.getTraceId(), e);
         }
+    }
+
+    private static String effectiveTraceId(Delivery delivery, Event event) {
+        if (delivery.getTraceId() != null) {
+            return delivery.getTraceId();
+        }
+        return event != null ? event.getTraceId() : null;
     }
 
     private static String failureReason(int statusCode) {

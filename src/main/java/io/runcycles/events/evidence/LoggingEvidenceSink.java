@@ -18,7 +18,7 @@ public class LoggingEvidenceSink implements EvidenceSink {
 
     @Override
     public void accept(BuiltEvidenceEnvelope envelope) {
-        LOG.info("built CyclesEvidence envelope evidence_id={} ({} bytes) — no store wired yet",
+        LOG.info("Built CyclesEvidence envelope without persistent store: evidence_id={} envelope_bytes={} sink=logging",
                 envelope.evidenceId(), envelope.json().length());
     }
 }

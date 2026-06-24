@@ -34,11 +34,12 @@ public class EvidenceRecovery {
         try {
             long recovered = consumer.recover();
             if (recovered > 0) {
-                LOG.warn("recovered {} orphaned evidence record(s) from {} back to pending",
-                        recovered, "evidence:processing");
+                LOG.warn("Recovered orphaned evidence records back to pending: recovered={} processing_queue=evidence:processing pending_queue=evidence:pending",
+                        recovered);
             }
         } catch (RuntimeException e) {
-            LOG.error("evidence recovery on startup failed: {}", e.getMessage());
+            LOG.error("Evidence recovery on startup failed: processing_queue=evidence:processing pending_queue=evidence:pending error={}",
+                    e.getMessage(), e);
         }
     }
 }

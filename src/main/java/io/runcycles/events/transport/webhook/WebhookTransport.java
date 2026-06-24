@@ -57,9 +57,11 @@ public class WebhookTransport implements Transport {
     @Override
     public TransportResult deliver(Event event, Subscription subscription, String signingSecret, Delivery delivery) {
         long start = System.currentTimeMillis();
+        URI targetUri = null;
         try {
             String payload = objectMapper.writeValueAsString(event);
             String traceId = traceContext.resolveOrMintTraceId(event);
+            targetUri = URI.create(subscription.getUrl());
             // Preserve inbound sampling decision when the originating HTTP
             // request carried a valid traceparent; otherwise the spec
             // requires defaulting to "01" (sampled). See cycles-protocol-v0
@@ -68,7 +70,7 @@ public class WebhookTransport implements Transport {
                     && Boolean.TRUE.equals(delivery.getTraceparentInboundValid()))
                     ? delivery.getTraceFlags() : null;
             HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
-                    .uri(URI.create(subscription.getUrl()))
+                    .uri(targetUri)
                     .header("Content-Type", "application/json")
                     .header("User-Agent", userAgent)
                     .header("X-Cycles-Event-Id", event.getEventId())
@@ -103,7 +105,17 @@ public class WebhookTransport implements Transport {
                 Thread.currentThread().interrupt();
             }
             int elapsed = (int) (System.currentTimeMillis() - start);
-            LOG.warn("Webhook delivery failed to {}: {}", subscription.getUrl(), e.getMessage());
+            LOG.warn("Webhook delivery transport failed: delivery_id={} event_id={} event_type={} subscription_id={} tenant_id={} target_host={} latency_ms={} trace_id={} exception_class={} error={}",
+                    delivery != null ? delivery.getDeliveryId() : null,
+                    event != null ? event.getEventId() : null,
+                    event != null ? event.getEventType() : null,
+                    subscription != null ? subscription.getSubscriptionId() : null,
+                    subscription != null ? subscription.getTenantId() : null,
+                    targetUri != null ? targetUri.getHost() : null,
+                    elapsed,
+                    event != null ? event.getTraceId() : null,
+                    e.getClass().getName(),
+                    e.getMessage());
             return TransportResult.builder()
                     .success(false)
                     .statusCode(0)

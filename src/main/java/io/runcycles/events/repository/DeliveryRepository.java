@@ -28,7 +28,7 @@ public class DeliveryRepository {
             if (data == null) return null;
             return objectMapper.readValue(data, Delivery.class);
         } catch (Exception e) {
-            LOG.error("Failed to read delivery: {}", deliveryId, e);
+            LOG.error("Failed to read webhook delivery: delivery_id={}", deliveryId, e);
             return null;
         }
     }
@@ -44,7 +44,15 @@ public class DeliveryRepository {
                 jedis.set(key, json);
             }
         } catch (Exception e) {
-            LOG.error("Failed to update delivery: {}", delivery.getDeliveryId(), e);
+            LOG.error("Failed to update webhook delivery: delivery_id={} event_id={} event_type={} subscription_id={} status={} attempts={} trace_id={}",
+                    delivery != null ? delivery.getDeliveryId() : null,
+                    delivery != null ? delivery.getEventId() : null,
+                    delivery != null ? delivery.getEventType() : null,
+                    delivery != null ? delivery.getSubscriptionId() : null,
+                    delivery != null ? delivery.getStatus() : null,
+                    delivery != null ? delivery.getAttempts() : null,
+                    delivery != null ? delivery.getTraceId() : null,
+                    e);
         }
     }
 }
