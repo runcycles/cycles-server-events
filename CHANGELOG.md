@@ -20,6 +20,23 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.17] — 2026-06-24
+
+### Fixed
+
+- Webhook transport failure logs now use the effective trace id minted or
+  resolved for outbound headers, so failures remain correlated when the source
+  event did not carry `trace_id`.
+- Flattened CR/LF characters in dynamic log fields for transport failures,
+  retry/permanent-failure lifecycle logs, scheduler Redis warnings, retention
+  cleanup warnings, and evidence worker failure logs.
+- Synced the `WebhookTransport` fallback user-agent version to `0.1.25.17`.
+
+### Compatibility
+
+- No webhook wire, Redis queue/key, evidence envelope, event payload, or spec
+  change.
+
 ## [0.1.25.16] — 2026-06-24
 
 ### Changed

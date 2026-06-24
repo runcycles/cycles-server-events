@@ -1,5 +1,7 @@
 package io.runcycles.events.evidence;
 
+import static io.runcycles.events.logging.LogSanitizer.safe;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -39,7 +41,7 @@ public class EvidenceRecovery {
             }
         } catch (RuntimeException e) {
             LOG.error("Evidence recovery on startup failed: processing_queue=evidence:processing pending_queue=evidence:pending error={}",
-                    e.getMessage(), e);
+                    safe(e.getMessage()), e);
         }
     }
 }

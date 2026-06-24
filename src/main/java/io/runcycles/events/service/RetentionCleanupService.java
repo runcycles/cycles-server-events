@@ -1,5 +1,7 @@
 package io.runcycles.events.service;
 
+import static io.runcycles.events.logging.LogSanitizer.safe;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -59,7 +61,7 @@ public class RetentionCleanupService {
             }
         } catch (redis.clients.jedis.exceptions.JedisConnectionException e) {
             LOG.warn("Retention cleanup Redis connection failure: event_ttl_ms={} delivery_ttl_ms={} error={}",
-                    eventTtlMs, deliveryTtlMs, e.getMessage());
+                    eventTtlMs, deliveryTtlMs, safe(e.getMessage()));
         } catch (Exception e) {
             LOG.error("Retention cleanup failed: event_ttl_ms={} delivery_ttl_ms={}", eventTtlMs, deliveryTtlMs, e);
         }

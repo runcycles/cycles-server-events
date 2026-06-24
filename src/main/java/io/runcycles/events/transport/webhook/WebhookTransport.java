@@ -1,5 +1,7 @@
 package io.runcycles.events.transport.webhook;
 
+import static io.runcycles.events.logging.LogSanitizer.safe;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.runcycles.events.model.Delivery;
 import io.runcycles.events.model.Event;
@@ -45,7 +47,7 @@ public class WebhookTransport implements Transport {
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds))
                 .build();
-        String version = buildProperties != null ? buildProperties.getVersion() : "0.1.25.12";
+        String version = buildProperties != null ? buildProperties.getVersion() : "0.1.25.17";
         this.userAgent = "cycles-server-events/" + version;
     }
 
@@ -58,9 +60,10 @@ public class WebhookTransport implements Transport {
     public TransportResult deliver(Event event, Subscription subscription, String signingSecret, Delivery delivery) {
         long start = System.currentTimeMillis();
         URI targetUri = null;
+        String traceId = null;
         try {
+            traceId = traceContext.resolveOrMintTraceId(event);
             String payload = objectMapper.writeValueAsString(event);
-            String traceId = traceContext.resolveOrMintTraceId(event);
             targetUri = URI.create(subscription.getUrl());
             // Preserve inbound sampling decision when the originating HTTP
             // request carried a valid traceparent; otherwise the spec
@@ -106,16 +109,16 @@ public class WebhookTransport implements Transport {
             }
             int elapsed = (int) (System.currentTimeMillis() - start);
             LOG.warn("Webhook delivery transport failed: delivery_id={} event_id={} event_type={} subscription_id={} tenant_id={} target_host={} latency_ms={} trace_id={} exception_class={} error={}",
-                    delivery != null ? delivery.getDeliveryId() : null,
-                    event != null ? event.getEventId() : null,
-                    event != null ? event.getEventType() : null,
-                    subscription != null ? subscription.getSubscriptionId() : null,
-                    subscription != null ? subscription.getTenantId() : null,
-                    targetUri != null ? targetUri.getHost() : null,
+                    safe(delivery != null ? delivery.getDeliveryId() : null),
+                    safe(event != null ? event.getEventId() : null),
+                    safe(event != null ? event.getEventType() : null),
+                    safe(subscription != null ? subscription.getSubscriptionId() : null),
+                    safe(subscription != null ? subscription.getTenantId() : null),
+                    safe(targetUri != null ? targetUri.getHost() : null),
                     elapsed,
-                    event != null ? event.getTraceId() : null,
+                    safe(traceId),
                     e.getClass().getName(),
-                    e.getMessage());
+                    safe(e.getMessage()));
             return TransportResult.builder()
                     .success(false)
                     .statusCode(0)

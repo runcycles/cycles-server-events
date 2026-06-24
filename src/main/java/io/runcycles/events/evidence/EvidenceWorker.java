@@ -1,5 +1,7 @@
 package io.runcycles.events.evidence;
 
+import static io.runcycles.events.logging.LogSanitizer.safe;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.runcycles.events.evidence.CyclesEvidenceEnvelopeBuilder.BuiltEvidenceEnvelope;
@@ -68,8 +70,8 @@ public class EvidenceWorker {
         } catch (Exception e) {
             EvidenceSourceLogContext ctx = sourceContext(record);
             LOG.error("Failed to build or store evidence envelope; dead-lettering source record: artifact_type={} evidence_id={} trace_id={} issued_at_ms={} source_parseable={} error={}",
-                    ctx.artifactType(), ctx.evidenceId(), ctx.traceId(), ctx.issuedAtMs(), ctx.parseable(),
-                    e.getMessage(), e);
+                    safe(ctx.artifactType()), safe(ctx.evidenceId()), safe(ctx.traceId()), ctx.issuedAtMs(), ctx.parseable(),
+                    safe(e.getMessage()), e);
             try {
                 consumer.deadLetter(record);
                 consumer.ack(record); // now in evidence:failed → clear from processing
@@ -77,8 +79,8 @@ public class EvidenceWorker {
                 // leave it in processing so recover() retries it on the next startup
                 EvidenceSourceLogContext dlCtx = sourceContext(record);
                 LOG.error("Failed to dead-letter evidence source record; left in-flight for recovery: artifact_type={} evidence_id={} trace_id={} issued_at_ms={} source_parseable={} error={}",
-                        dlCtx.artifactType(), dlCtx.evidenceId(), dlCtx.traceId(), dlCtx.issuedAtMs(), dlCtx.parseable(),
-                        dl.getMessage(), dl);
+                        safe(dlCtx.artifactType()), safe(dlCtx.evidenceId()), safe(dlCtx.traceId()), dlCtx.issuedAtMs(), dlCtx.parseable(),
+                        safe(dl.getMessage()), dl);
             }
             return;
         }
@@ -92,8 +94,8 @@ public class EvidenceWorker {
         } catch (RuntimeException ackEx) {
             EvidenceSourceLogContext ctx = sourceContext(record);
             LOG.warn("Evidence envelope stored but ack failed; left in-flight for idempotent recovery: artifact_type={} evidence_id={} stored_evidence_id={} trace_id={} issued_at_ms={} source_parseable={} error={}",
-                    ctx.artifactType(), ctx.evidenceId(), envelope != null ? envelope.evidenceId() : null,
-                    ctx.traceId(), ctx.issuedAtMs(), ctx.parseable(), ackEx.getMessage(), ackEx);
+                    safe(ctx.artifactType()), safe(ctx.evidenceId()), safe(envelope != null ? envelope.evidenceId() : null),
+                    safe(ctx.traceId()), ctx.issuedAtMs(), ctx.parseable(), safe(ackEx.getMessage()), ackEx);
         }
     }
 

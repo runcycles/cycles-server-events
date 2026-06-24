@@ -2,6 +2,22 @@
 
 ## Implementation History
 
+### 2026-06-24 — v0.1.25.17: webhook trace logging and log sanitization follow-up
+
+Follow-up to the ops-log-context PR review. `WebhookTransport` now logs the
+effective trace id it resolves or mints for outbound webhook headers, not only
+the original `event.trace_id`. This keeps transport-failure logs joinable even
+when the incoming event lacked a trace id and the transport had to mint one for
+`X-Cycles-Trace-Id` / `traceparent`.
+
+Dynamic operator-log fields that can carry exception text, subscriber metadata,
+or evidence-source metadata are flattened before logging (`CR`/`LF` -> space).
+The same sanitizer covers transport failures, retry scheduling, permanent
+failure logs, scheduler Redis warnings, retention cleanup warnings, and
+evidence dead-letter/ack-failure logs. No outbound webhook payload/header
+contract change, Redis contract change, evidence envelope change, or spec
+change.
+
 ### 2026-06-24 — v0.1.25.16: ops-focused logging context review
 
 Reviewed production `INFO`, `WARN`, and `ERROR` logging from an operator

@@ -1,5 +1,7 @@
 package io.runcycles.events.service;
 
+import static io.runcycles.events.logging.LogSanitizer.safe;
+
 import io.runcycles.events.metrics.CyclesMetrics;
 import io.runcycles.events.model.Actor;
 import io.runcycles.events.model.ActorType;
@@ -202,9 +204,9 @@ public class DeliveryHandler {
         metrics.recordDeliveryRetried(sub.getTenantId(), delivery.getEventType());
 
         LOG.info("Webhook delivery scheduled for retry: delivery_id={} event_id={} event_type={} subscription_id={} tenant_id={} status={} attempts={} max_retries={} next_retry_at={} latency_ms={} trace_id={} reason={}",
-                delivery.getDeliveryId(), delivery.getEventId(), delivery.getEventType(), sub.getSubscriptionId(),
-                sub.getTenantId(), result.getStatusCode(), delivery.getAttempts(), maxRetries,
-                delivery.getNextRetryAt(), result.getLatencyMs(), delivery.getTraceId(), reason);
+                safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(delivery.getEventType()), safe(sub.getSubscriptionId()),
+                safe(sub.getTenantId()), result.getStatusCode(), delivery.getAttempts(), maxRetries,
+                delivery.getNextRetryAt(), result.getLatencyMs(), safe(delivery.getTraceId()), safe(reason));
     }
 
     private void markFailed(Delivery delivery, String errorMessage) {
@@ -213,9 +215,9 @@ public class DeliveryHandler {
         delivery.setCompletedAt(Instant.now());
         deliveryRepository.update(delivery);
         LOG.warn("Webhook delivery permanently failed: delivery_id={} event_id={} event_type={} subscription_id={} attempts={} response_status={} trace_id={} error={}",
-                delivery.getDeliveryId(), delivery.getEventId(), delivery.getEventType(),
-                delivery.getSubscriptionId(), delivery.getAttempts(), delivery.getResponseStatus(),
-                delivery.getTraceId(), errorMessage);
+                safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(delivery.getEventType()),
+                safe(delivery.getSubscriptionId()), delivery.getAttempts(), delivery.getResponseStatus(),
+                safe(delivery.getTraceId()), safe(errorMessage));
     }
 
     private void incrementConsecutiveFailures(Subscription sub, Delivery delivery) {
