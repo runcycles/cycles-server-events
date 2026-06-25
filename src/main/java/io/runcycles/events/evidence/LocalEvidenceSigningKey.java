@@ -57,14 +57,14 @@ public class LocalEvidenceSigningKey implements EvidenceSigningKey {
                 throw new IllegalStateException(
                         "configured evidence signing key and signer-did do not form a valid Ed25519 pair");
             }
-            log.info("evidence signing key loaded from configuration (signer_did={})", this.signerDid);
+            log.info("Evidence signing key loaded from configuration: signer_did={} key_mode=configured",
+                    this.signerDid);
         } else if (!hasPriv && !hasDid) {
             KeyHex generated = generateEphemeral();
             this.privateKeyHex = generated.privateHex();
             this.signerDid = generated.publicHex();
-            log.warn("no cycles.evidence.signing key configured — generated an EPHEMERAL Ed25519 key "
-                    + "(signer_did={}); emitted evidence will NOT verify across restarts. Configure "
-                    + "cycles.evidence.signing.private-key-hex + signer-did for production.", this.signerDid);
+            log.warn("Evidence signing key is ephemeral: signer_did={} key_mode=ephemeral production_safe=false reason=cycles.evidence.signing.private-key-hex_and_signer-did_not_configured",
+                    this.signerDid);
         } else {
             throw new IllegalStateException("evidence signing is half-configured: set BOTH "
                     + "cycles.evidence.signing.private-key-hex and cycles.evidence.signing.signer-did, or neither");

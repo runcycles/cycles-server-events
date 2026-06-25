@@ -65,7 +65,7 @@ public class CryptoService {
             return value; // Plaintext (backward compatible)
         }
         if (key == null) {
-            LOG.warn("Encrypted secret found but no encryption key configured");
+            LOG.warn("Webhook secret decrypt skipped because encryption key is not configured: encrypted_value_present=true");
             return null;
         }
         try {

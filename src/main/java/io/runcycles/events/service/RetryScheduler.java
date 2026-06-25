@@ -1,5 +1,7 @@
 package io.runcycles.events.service;
 
+import static io.runcycles.events.logging.LogSanitizer.safe;
+
 import io.runcycles.events.repository.DeliveryQueueRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,12 +31,14 @@ public class RetryScheduler {
         try {
             List<String> requeued = queueRepository.popRetryReady(System.currentTimeMillis(), batchSize);
             if (!requeued.isEmpty()) {
-                LOG.info("Requeued {} deliveries for retry", requeued.size());
+                LOG.info("Webhook retry scheduler requeued deliveries: count={} batch_size={} retry_queue=dispatch:retry pending_queue=dispatch:pending",
+                        requeued.size(), batchSize);
             }
         } catch (JedisConnectionException e) {
-            LOG.warn("Redis connection error in retry scheduler: {}", e.getMessage());
+            LOG.warn("Webhook retry scheduler Redis connection failure: batch_size={} retry_queue=dispatch:retry error={}",
+                    batchSize, safe(e.getMessage()));
         } catch (Exception e) {
-            LOG.error("Error in retry scheduler", e);
+            LOG.error("Webhook retry scheduler failed: batch_size={} retry_queue=dispatch:retry", batchSize, e);
         }
     }
 }

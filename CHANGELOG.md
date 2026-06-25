@@ -20,6 +20,52 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.17] — 2026-06-24
+
+### Fixed
+
+- Webhook transport failure logs now use the effective trace id minted or
+  resolved for outbound headers, so failures remain correlated when the source
+  event did not carry `trace_id`.
+- Flattened CR/LF characters in dynamic log fields for transport failures,
+  retry/permanent-failure lifecycle logs, delivery success/skip/auto-disable
+  logs, repository failures, scheduler Redis warnings, retention cleanup
+  warnings, evidence sink ids, and evidence worker failure logs.
+- Added focused `LogSanitizerTest` coverage for null, CR/LF, and non-string
+  values.
+- Synced the `WebhookTransport` fallback user-agent version to `0.1.25.17`.
+
+### Compatibility
+
+- No webhook wire, Redis queue/key, evidence envelope, event payload, or spec
+  change.
+
+## [0.1.25.16] — 2026-06-24
+
+### Changed
+
+- **Ops logging context review.** Webhook delivery, retry scheduler, dispatch
+  loop, retention cleanup, Redis repository, event payload validation, and
+  evidence worker logs now include stable operational identifiers such as
+  `delivery_id`, `event_id`, `event_type`, `subscription_id`, `tenant_id`,
+  `correlation_id`, `request_id`, `trace_id`, retry counts, queue names, and
+  evidence source metadata where available.
+- Webhook transport failures no longer log the raw subscriber URL; they log the
+  subscription, tenant, event, delivery, target host, latency, trace id, and
+  exception class instead.
+- Evidence dead-letter and ack-failure logs avoid dumping source payloads while
+  preserving safe triage fields (`artifact_type`, `evidence_id`, `trace_id`,
+  `issued_at_ms`).
+- Container Trivy SARIF gates now set `limit-severities-for-sarif: true`, so
+  PR and release scans block on the declared `HIGH,CRITICAL` severities instead
+  of failing on lower-severity fixable findings included in all-severities SARIF
+  output.
+
+### Compatibility
+
+- No outbound webhook wire change.
+- No Redis key, queue, or payload-shape change.
+
 ## [0.1.25.15] — 2026-06-23
 
 ### Fixed

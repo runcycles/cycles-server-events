@@ -1,5 +1,7 @@
 package io.runcycles.events.service;
 
+import static io.runcycles.events.logging.LogSanitizer.safe;
+
 import io.runcycles.events.repository.DeliveryQueueRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,9 +34,10 @@ public class DispatchLoop {
                 deliveryHandler.handle(deliveryId);
             }
         } catch (JedisConnectionException e) {
-            LOG.warn("Redis connection error in dispatch loop: {}", e.getMessage());
+            LOG.warn("Dispatch loop Redis connection failure: queue=dispatch:pending timeout_seconds={} error={}",
+                    timeoutSeconds, safe(e.getMessage()));
         } catch (Exception e) {
-            LOG.error("Error in dispatch loop", e);
+            LOG.error("Dispatch loop failed: queue=dispatch:pending timeout_seconds={}", timeoutSeconds, e);
         }
     }
 }

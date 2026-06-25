@@ -2,6 +2,49 @@
 
 ## Implementation History
 
+### 2026-06-24 — v0.1.25.17: webhook trace logging and log sanitization follow-up
+
+Follow-up to the ops-log-context PR review. `WebhookTransport` now logs the
+effective trace id it resolves or mints for outbound webhook headers, not only
+the original `event.trace_id`. This keeps transport-failure logs joinable even
+when the incoming event lacked a trace id and the transport had to mint one for
+`X-Cycles-Trace-Id` / `traceparent`.
+
+Dynamic operator-log fields that can carry exception text, subscriber metadata,
+or evidence-source metadata are flattened before logging (`CR`/`LF` -> space).
+The same sanitizer covers transport failures, retry scheduling, permanent
+failure logs, scheduler Redis warnings, retention cleanup warnings, delivery /
+event / subscription repository failures, evidence sink ids, and evidence
+dead-letter/ack-failure logs. Final review follow-up also applies it to
+`DeliveryHandler` success/skip/auto-disable logs and adds a focused
+`LogSanitizerTest`. No outbound webhook payload/header contract change, Redis
+contract change, evidence envelope change, or spec change.
+
+### 2026-06-24 — v0.1.25.16: ops-focused logging context review
+
+Reviewed production `INFO`, `WARN`, and `ERROR` logging from an operator
+triage perspective and tightened the logs that were either too generic or too
+revealing. Webhook delivery state transitions now name the delivery, event,
+event type, subscription, tenant, retry counters, response status/latency, and
+trace id where available. The retry scheduler, dispatch loop, retention cleanup,
+and Redis repositories now include operation and queue/key-family context in
+failure logs.
+
+Webhook transport failures no longer log raw subscriber URLs, avoiding path or
+query-token leakage while preserving `target_host`, subscription, tenant, event,
+delivery, trace, latency, and exception class for triage. Event payload
+validation warnings gained tenant/scope/correlation/request/trace context.
+Evidence worker dead-letter and ack-failure logs no longer dump source records;
+they report safe source metadata (`artifact_type`, `evidence_id`, `trace_id`,
+`issued_at_ms`, parseable flag) and keep payload bodies out of logs.
+
+No outbound webhook wire change, Redis contract change, evidence envelope
+change, or spec change. The same PR also aligns the PR/release Trivy SARIF
+gates with `cycles-server-admin` by setting `limit-severities-for-sarif: true`
+so the blocking scan honors the declared `HIGH,CRITICAL` filter instead of
+failing on lower-severity fixable findings that are still present in a full
+SARIF upload. Version bump: `pom.xml` `<revision>` -> `0.1.25.16`.
+
 ### 2026-06-23 — v0.1.25.15: unconfigured CyclesEvidence is a supported disabled mode
 
 A blank `EVIDENCE_SERVER_ID` now prevents the evidence signer worker, envelope builder, and local signing key beans from being created. Webhook-only deployments no longer generate ephemeral signing identities or consume and dead-letter source records solely because `server_id` is absent.

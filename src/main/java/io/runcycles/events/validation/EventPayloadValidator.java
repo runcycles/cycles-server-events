@@ -100,7 +100,7 @@ public class EventPayloadValidator {
                 || event.getTimestamp() == null
                 || isBlank(event.getTenantId())
                 || isBlank(event.getSource())) {
-            warn(eventIdForLog, eventType, RULE_MISSING_REQUIRED,
+            warn(event, eventIdForLog, eventType, RULE_MISSING_REQUIRED,
                     "one or more required top-level fields missing");
         }
 
@@ -110,13 +110,13 @@ public class EventPayloadValidator {
             try {
                 resolved = EventType.fromValue(eventType);
             } catch (IllegalArgumentException e) {
-                warn(eventIdForLog, eventType, RULE_UNKNOWN_EVENT_TYPE,
+                warn(event, eventIdForLog, eventType, RULE_UNKNOWN_EVENT_TYPE,
                         "event_type not in local vocabulary");
             }
         }
         if (resolved != null && event.getCategory() != null
                 && resolved.getCategory() != event.getCategory()) {
-            warn(eventIdForLog, eventType, RULE_CATEGORY_MISMATCH,
+            warn(event, eventIdForLog, eventType, RULE_CATEGORY_MISMATCH,
                     "category " + event.getCategory() + " does not match "
                             + resolved + " (expected " + resolved.getCategory() + ")");
         }
@@ -124,7 +124,7 @@ public class EventPayloadValidator {
         // Rule 6: trace_id format (optional field; only warn if present and malformed)
         String traceId = event.getTraceId();
         if (traceId != null && !TRACE_ID_PATTERN.matcher(traceId).matches()) {
-            warn(eventIdForLog, eventType, RULE_TRACE_ID_SHAPE,
+            warn(event, eventIdForLog, eventType, RULE_TRACE_ID_SHAPE,
                     "trace_id does not match ^[0-9a-f]{32}$");
         }
 
@@ -133,19 +133,19 @@ public class EventPayloadValidator {
             Map<String, Object> data = event.getData();
             if (data != null) {
                 if (!(data.get("ledger_id") instanceof String s) || s.isBlank()) {
-                    warn(eventIdForLog, eventType, RULE_BUDGET_DATA_SHAPE,
+                    warn(event, eventIdForLog, eventType, RULE_BUDGET_DATA_SHAPE,
                             "budget event data missing ledger_id");
                 }
                 Object op = data.get("operation");
                 if (op != null && !(op instanceof String opStr
                         && VALID_BUDGET_OPERATIONS.contains(opStr))) {
-                    warn(eventIdForLog, eventType, RULE_BUDGET_DATA_SHAPE,
+                    warn(event, eventIdForLog, eventType, RULE_BUDGET_DATA_SHAPE,
                             "budget event operation '" + op + "' not in spec enum set");
                 }
                 if (resolved == EventType.BUDGET_RESET_SPENT) {
                     Object flag = data.get("spent_override_provided");
                     if (flag != null && !(flag instanceof Boolean)) {
-                        warn(eventIdForLog, eventType, RULE_RESET_SPENT_SHAPE,
+                        warn(event, eventIdForLog, eventType, RULE_RESET_SPENT_SHAPE,
                                 "spent_override_provided must be boolean, got "
                                         + flag.getClass().getSimpleName());
                     }
@@ -154,13 +154,19 @@ public class EventPayloadValidator {
         }
     }
 
-    private void warn(String eventId, String eventType, String rule, String detail) {
+    private void warn(Event event, String eventId, String eventType, String rule, String detail) {
         // Sanitise producer-supplied strings before logging: strip CR/LF so a
         // malicious or malformed event_type/event_id can't inject fake log
         // lines. Same mitigation cycles-server-admin applied in v0.1.25.8
         // (commit ad77546, "log injection + comments").
-        LOG.warn("Event payload validation warning: event_id={} event_type={} rule={} detail={}",
-                stripCrLf(eventId), stripCrLf(eventType), rule, detail);
+        LOG.warn("Event payload validation warning: event_id={} event_type={} tenant_id={} scope={} correlation_id={} request_id={} trace_id={} rule={} detail={}",
+                stripCrLf(eventId), stripCrLf(eventType),
+                event != null ? stripCrLf(event.getTenantId()) : null,
+                event != null ? stripCrLf(event.getScope()) : null,
+                event != null ? stripCrLf(event.getCorrelationId()) : null,
+                event != null ? stripCrLf(event.getRequestId()) : null,
+                event != null ? stripCrLf(event.getTraceId()) : null,
+                rule, detail);
         metrics.recordEventsPayloadInvalid(eventType, rule);
     }
 

@@ -1,5 +1,7 @@
 package io.runcycles.events.repository;
 
+import static io.runcycles.events.logging.LogSanitizer.safe;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.runcycles.events.model.Delivery;
 import org.slf4j.Logger;
@@ -28,7 +30,7 @@ public class DeliveryRepository {
             if (data == null) return null;
             return objectMapper.readValue(data, Delivery.class);
         } catch (Exception e) {
-            LOG.error("Failed to read delivery: {}", deliveryId, e);
+            LOG.error("Failed to read webhook delivery: delivery_id={}", safe(deliveryId), e);
             return null;
         }
     }
@@ -44,7 +46,15 @@ public class DeliveryRepository {
                 jedis.set(key, json);
             }
         } catch (Exception e) {
-            LOG.error("Failed to update delivery: {}", delivery.getDeliveryId(), e);
+            LOG.error("Failed to update webhook delivery: delivery_id={} event_id={} event_type={} subscription_id={} status={} attempts={} trace_id={}",
+                    safe(delivery != null ? delivery.getDeliveryId() : null),
+                    safe(delivery != null ? delivery.getEventId() : null),
+                    safe(delivery != null ? delivery.getEventType() : null),
+                    safe(delivery != null ? delivery.getSubscriptionId() : null),
+                    delivery != null ? delivery.getStatus() : null,
+                    delivery != null ? delivery.getAttempts() : null,
+                    safe(delivery != null ? delivery.getTraceId() : null),
+                    e);
         }
     }
 }

@@ -1,5 +1,7 @@
 package io.runcycles.events.service;
 
+import static io.runcycles.events.logging.LogSanitizer.safe;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -47,7 +49,8 @@ public class RetentionCleanupService {
                 // Trim global event index
                 long removedAll = trimZset(jedis, "events:_all", eventCutoff);
                 if (removedAll > 0) {
-                    LOG.info("Cleaned {} expired entries from events:_all", removedAll);
+                    LOG.info("Retention cleanup removed expired event index entries: key=events:_all removed={} cutoff_ms={} event_ttl_ms={}",
+                            removedAll, eventCutoff, eventTtlMs);
                 }
 
                 // Trim per-tenant event indexes (scan for events:* keys)
@@ -57,9 +60,10 @@ public class RetentionCleanupService {
                 trimZsetsByPattern(jedis, "deliveries:*", deliveryCutoff, null);
             }
         } catch (redis.clients.jedis.exceptions.JedisConnectionException e) {
-            LOG.warn("Redis connection error in retention cleanup: {}", e.getMessage());
+            LOG.warn("Retention cleanup Redis connection failure: event_ttl_ms={} delivery_ttl_ms={} error={}",
+                    eventTtlMs, deliveryTtlMs, safe(e.getMessage()));
         } catch (Exception e) {
-            LOG.error("Error in retention cleanup", e);
+            LOG.error("Retention cleanup failed: event_ttl_ms={} delivery_ttl_ms={}", eventTtlMs, deliveryTtlMs, e);
         }
     }
 
@@ -80,19 +84,19 @@ public class RetentionCleanupService {
         String type = jedis.type(key);
         if (!"zset".equals(type)) {
             if (!"none".equals(type)) {
-                LOG.debug("Skipping retention cleanup for {} because Redis type is {}, not zset", key, type);
+                LOG.debug("Skipping retention cleanup for {} because Redis type is {}, not zset", safe(key), safe(type));
             }
             return 0;
         }
         try {
             long removed = jedis.zremrangeByScore(key, "-inf", String.valueOf(cutoffMs));
             if (removed > 0) {
-                LOG.debug("Cleaned {} expired entries from {}", removed, key);
+                LOG.debug("Cleaned {} expired entries from {}", removed, safe(key));
             }
             return removed;
         } catch (JedisDataException e) {
             if (e.getMessage() != null && e.getMessage().contains("WRONGTYPE")) {
-                LOG.debug("Skipping retention cleanup for {} because Redis reported WRONGTYPE", key);
+                LOG.debug("Skipping retention cleanup for {} because Redis reported WRONGTYPE", safe(key));
                 return 0;
             }
             throw e;
