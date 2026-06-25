@@ -1,5 +1,7 @@
 package io.runcycles.events.repository;
 
+import static io.runcycles.events.logging.LogSanitizer.safe;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.runcycles.events.config.CryptoService;
@@ -34,7 +36,7 @@ public class SubscriptionRepository {
             if (data == null) return null;
             return objectMapper.readValue(data, Subscription.class);
         } catch (Exception e) {
-            LOG.error("Failed to read webhook subscription: subscription_id={}", subscriptionId, e);
+            LOG.error("Failed to read webhook subscription: subscription_id={}", safe(subscriptionId), e);
             return null;
         }
     }
@@ -45,7 +47,7 @@ public class SubscriptionRepository {
             return cryptoService.decrypt(encrypted);
         } catch (Exception e) {
             LOG.error("Failed to read webhook signing secret: subscription_id={} secret_present=unknown",
-                    subscriptionId, e);
+                    safe(subscriptionId), e);
             return null;
         }
     }
@@ -64,7 +66,7 @@ public class SubscriptionRepository {
             String existing = jedis.get(key);
             if (existing == null) {
                 LOG.warn("Webhook subscription not found during delivery-state update: subscription_id={} status={} consecutive_failures={} last_triggered_at={} last_success_at={} last_failure_at={}",
-                        subscriptionId, status, consecutiveFailures, lastTriggeredAt, lastSuccessAt, lastFailureAt);
+                        safe(subscriptionId), status, consecutiveFailures, lastTriggeredAt, lastSuccessAt, lastFailureAt);
                 return;
             }
             ObjectNode node = (ObjectNode) objectMapper.readTree(existing);
@@ -84,7 +86,7 @@ public class SubscriptionRepository {
             jedis.set(key, objectMapper.writeValueAsString(node));
         } catch (Exception e) {
             LOG.error("Failed to update webhook subscription delivery state: subscription_id={} status={} consecutive_failures={} last_triggered_at={} last_success_at={} last_failure_at={}",
-                    subscriptionId, status, consecutiveFailures, lastTriggeredAt, lastSuccessAt, lastFailureAt, e);
+                    safe(subscriptionId), status, consecutiveFailures, lastTriggeredAt, lastSuccessAt, lastFailureAt, e);
         }
     }
 }

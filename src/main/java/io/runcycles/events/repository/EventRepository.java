@@ -1,5 +1,7 @@
 package io.runcycles.events.repository;
 
+import static io.runcycles.events.logging.LogSanitizer.safe;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.runcycles.events.model.Event;
 import org.slf4j.Logger;
@@ -68,13 +70,13 @@ public class EventRepository {
             jedis.eval(SAVE_EVENT_LUA, keys, List.of(json, score, id, ttlSeconds));
         } catch (Exception e) {
             LOG.error("Failed to save event: event_id={} event_type={} tenant_id={} scope={} correlation_id={} request_id={} trace_id={}",
-                    event != null ? event.getEventId() : null,
-                    event != null ? event.getEventType() : null,
-                    event != null ? event.getTenantId() : null,
-                    event != null ? event.getScope() : null,
-                    event != null ? event.getCorrelationId() : null,
-                    event != null ? event.getRequestId() : null,
-                    event != null ? event.getTraceId() : null,
+                    safe(event != null ? event.getEventId() : null),
+                    safe(event != null ? event.getEventType() : null),
+                    safe(event != null ? event.getTenantId() : null),
+                    safe(event != null ? event.getScope() : null),
+                    safe(event != null ? event.getCorrelationId() : null),
+                    safe(event != null ? event.getRequestId() : null),
+                    safe(event != null ? event.getTraceId() : null),
                     e);
             throw new RuntimeException("Failed to save event", e);
         }
@@ -86,7 +88,7 @@ public class EventRepository {
             if (data == null) return null;
             return objectMapper.readValue(data, Event.class);
         } catch (Exception e) {
-            LOG.error("Failed to read event: event_id={}", eventId, e);
+            LOG.error("Failed to read event: event_id={}", safe(eventId), e);
             return null;
         }
     }

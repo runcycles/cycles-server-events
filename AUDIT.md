@@ -13,10 +13,12 @@ when the incoming event lacked a trace id and the transport had to mint one for
 Dynamic operator-log fields that can carry exception text, subscriber metadata,
 or evidence-source metadata are flattened before logging (`CR`/`LF` -> space).
 The same sanitizer covers transport failures, retry scheduling, permanent
-failure logs, scheduler Redis warnings, retention cleanup warnings, and
-evidence dead-letter/ack-failure logs. No outbound webhook payload/header
-contract change, Redis contract change, evidence envelope change, or spec
-change.
+failure logs, scheduler Redis warnings, retention cleanup warnings, delivery /
+event / subscription repository failures, evidence sink ids, and evidence
+dead-letter/ack-failure logs. Final review follow-up also applies it to
+`DeliveryHandler` success/skip/auto-disable logs and adds a focused
+`LogSanitizerTest`. No outbound webhook payload/header contract change, Redis
+contract change, evidence envelope change, or spec change.
 
 ### 2026-06-24 — v0.1.25.16: ops-focused logging context review
 

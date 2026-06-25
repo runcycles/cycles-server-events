@@ -1,5 +1,7 @@
 package io.runcycles.events.evidence;
 
+import static io.runcycles.events.logging.LogSanitizer.safe;
+
 import io.runcycles.events.evidence.CyclesEvidenceEnvelopeBuilder.BuiltEvidenceEnvelope;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,6 +21,6 @@ public class LoggingEvidenceSink implements EvidenceSink {
     @Override
     public void accept(BuiltEvidenceEnvelope envelope) {
         LOG.info("Built CyclesEvidence envelope without persistent store: evidence_id={} envelope_bytes={} sink=logging",
-                envelope.evidenceId(), envelope.json().length());
+                safe(envelope.evidenceId()), envelope.json().length());
     }
 }

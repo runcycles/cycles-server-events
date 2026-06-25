@@ -28,8 +28,11 @@ breaking.
   resolved for outbound headers, so failures remain correlated when the source
   event did not carry `trace_id`.
 - Flattened CR/LF characters in dynamic log fields for transport failures,
-  retry/permanent-failure lifecycle logs, scheduler Redis warnings, retention
-  cleanup warnings, and evidence worker failure logs.
+  retry/permanent-failure lifecycle logs, delivery success/skip/auto-disable
+  logs, repository failures, scheduler Redis warnings, retention cleanup
+  warnings, evidence sink ids, and evidence worker failure logs.
+- Added focused `LogSanitizerTest` coverage for null, CR/LF, and non-string
+  values.
 - Synced the `WebhookTransport` fallback user-agent version to `0.1.25.17`.
 
 ### Compatibility

@@ -84,19 +84,19 @@ public class RetentionCleanupService {
         String type = jedis.type(key);
         if (!"zset".equals(type)) {
             if (!"none".equals(type)) {
-                LOG.debug("Skipping retention cleanup for {} because Redis type is {}, not zset", key, type);
+                LOG.debug("Skipping retention cleanup for {} because Redis type is {}, not zset", safe(key), safe(type));
             }
             return 0;
         }
         try {
             long removed = jedis.zremrangeByScore(key, "-inf", String.valueOf(cutoffMs));
             if (removed > 0) {
-                LOG.debug("Cleaned {} expired entries from {}", removed, key);
+                LOG.debug("Cleaned {} expired entries from {}", removed, safe(key));
             }
             return removed;
         } catch (JedisDataException e) {
             if (e.getMessage() != null && e.getMessage().contains("WRONGTYPE")) {
-                LOG.debug("Skipping retention cleanup for {} because Redis reported WRONGTYPE", key);
+                LOG.debug("Skipping retention cleanup for {} because Redis reported WRONGTYPE", safe(key));
                 return 0;
             }
             throw e;
