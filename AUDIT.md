@@ -2,7 +2,7 @@
 
 ## Implementation History
 
-### 2026-06-25 — operational readiness hardening
+### 2026-06-25 — v0.1.25.18: operational readiness hardening
 
 Webhook dispatch now uses the same reliable-queue shape as the evidence worker:
 `BLMOVE dispatch:pending -> dispatch:processing`, `LREM` ack only after the
@@ -32,6 +32,9 @@ now includes the full six-event webhook lifecycle (`created`, `updated`,
 `paused`, `resumed`, `deleted`, `disabled`) to prevent validator noise on
 admin-emitted lifecycle events. Release image building now scans a fresh
 `no-cache`/`pull` image and pushes that exact scanned local image.
+
+Version bump: `pom.xml` `<revision>` -> `0.1.25.18`; validation:
+`mvn verify` passed with 293 tests and the JaCoCo gate met.
 
 ### 2026-06-24 — v0.1.25.17: webhook trace logging and log sanitization follow-up
 
