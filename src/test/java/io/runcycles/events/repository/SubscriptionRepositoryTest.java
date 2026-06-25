@@ -20,6 +20,7 @@ import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
@@ -77,9 +78,9 @@ class SubscriptionRepositoryTest {
     void findById_deserializationError() {
         when(jedis.get("webhook:sub-bad")).thenReturn("%%%bad-json");
 
-        Subscription result = repository.findById("sub-bad");
-
-        assertThat(result).isNull();
+        assertThatThrownBy(() -> repository.findById("sub-bad"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to read webhook subscription");
     }
 
     @Test
@@ -116,12 +117,21 @@ class SubscriptionRepositoryTest {
     }
 
     @Test
-    void getSigningSecret_redisError_returnsNull() {
+    void getSigningSecret_redisError_throws() {
         when(jedis.get("webhook:secret:sub-fail")).thenThrow(new RuntimeException("redis error"));
 
-        String result = repository.getSigningSecret("sub-fail");
+        assertThatThrownBy(() -> repository.getSigningSecret("sub-fail"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to read webhook signing secret");
+    }
 
-        assertThat(result).isNull();
+    @Test
+    void getSigningSecret_encryptedValueWithoutKey_throws() {
+        when(jedis.get("webhook:secret:sub-enc")).thenReturn("enc:someBase64Data");
+
+        assertThatThrownBy(() -> repository.getSigningSecret("sub-enc"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to read webhook signing secret");
     }
 
     @Test

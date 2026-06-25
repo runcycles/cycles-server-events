@@ -20,11 +20,23 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 
 @Component
 public class WebhookTransport implements Transport {
 
     private static final Logger LOG = LoggerFactory.getLogger(WebhookTransport.class);
+    private static final Set<String> RESERVED_HEADERS = Set.of(
+            "content-type",
+            "user-agent",
+            "x-cycles-event-id",
+            "x-cycles-event-type",
+            "x-cycles-trace-id",
+            "x-cycles-signature",
+            "x-request-id",
+            "traceparent");
 
     private final ObjectMapper objectMapper;
     private final PayloadSigner payloadSigner;
@@ -47,7 +59,7 @@ public class WebhookTransport implements Transport {
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds))
                 .build();
-        String version = buildProperties != null ? buildProperties.getVersion() : "0.1.25.17";
+        String version = buildProperties != null ? buildProperties.getVersion() : "0.1.25.18";
         this.userAgent = "cycles-server-events/" + version;
     }
 
@@ -90,7 +102,7 @@ public class WebhookTransport implements Transport {
                 reqBuilder.header("X-Cycles-Signature", payloadSigner.sign(payload, signingSecret));
             }
             if (subscription.getHeaders() != null) {
-                subscription.getHeaders().forEach(reqBuilder::header);
+                addCustomHeaders(reqBuilder, subscription.getHeaders(), subscription);
             }
 
             HttpResponse<Void> response = httpClient.send(reqBuilder.build(),
@@ -126,5 +138,22 @@ public class WebhookTransport implements Transport {
                     .errorMessage(e.getMessage())
                     .build();
         }
+    }
+
+    private void addCustomHeaders(HttpRequest.Builder reqBuilder, Map<String, String> headers, Subscription subscription) {
+        headers.forEach((name, value) -> {
+            if (isReservedHeader(name)) {
+                LOG.warn("Webhook custom header ignored because it is reserved: subscription_id={} tenant_id={} header_name={}",
+                        safe(subscription != null ? subscription.getSubscriptionId() : null),
+                        safe(subscription != null ? subscription.getTenantId() : null),
+                        safe(name));
+                return;
+            }
+            reqBuilder.header(name, value);
+        });
+    }
+
+    private static boolean isReservedHeader(String name) {
+        return name != null && RESERVED_HEADERS.contains(name.toLowerCase(Locale.ROOT));
     }
 }

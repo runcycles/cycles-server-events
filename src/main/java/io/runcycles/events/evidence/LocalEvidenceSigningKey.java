@@ -24,8 +24,9 @@ import java.util.HexFormat;
  *   <li><b>both</b> {@code private-key-hex} (32-byte seed) and {@code signer-did}
  *       (32-byte public key), each 64 hex chars → used as the server identity,
  *       validated at startup by a sign/verify probe;</li>
- *   <li><b>neither</b> → an EPHEMERAL keypair is generated and a warning logged
- *       (development only — the identity does not survive a restart);</li>
+ *   <li><b>neither</b> → startup fails unless {@code allow-ephemeral=true}; in
+ *       that development mode an EPHEMERAL keypair is generated and a warning
+ *       logged (the identity does not survive a restart);</li>
  *   <li><b>exactly one</b> → startup fails (half-configured).</li>
  * </ul>
  *
@@ -45,7 +46,8 @@ public class LocalEvidenceSigningKey implements EvidenceSigningKey {
     public LocalEvidenceSigningKey(
             EnvelopeSigner signer,
             @Value("${cycles.evidence.signing.private-key-hex:}") String privateKeyHex,
-            @Value("${cycles.evidence.signing.signer-did:}") String signerDid) {
+            @Value("${cycles.evidence.signing.signer-did:}") String signerDid,
+            @Value("${cycles.evidence.signing.allow-ephemeral:false}") boolean allowEphemeral) {
         this.signer = signer;
         boolean hasPriv = privateKeyHex != null && !privateKeyHex.isBlank();
         boolean hasDid = signerDid != null && !signerDid.isBlank();
@@ -59,15 +61,19 @@ public class LocalEvidenceSigningKey implements EvidenceSigningKey {
             }
             log.info("Evidence signing key loaded from configuration: signer_did={} key_mode=configured",
                     this.signerDid);
-        } else if (!hasPriv && !hasDid) {
+        } else if (!hasPriv && !hasDid && allowEphemeral) {
             KeyHex generated = generateEphemeral();
             this.privateKeyHex = generated.privateHex();
             this.signerDid = generated.publicHex();
             log.warn("Evidence signing key is ephemeral: signer_did={} key_mode=ephemeral production_safe=false reason=cycles.evidence.signing.private-key-hex_and_signer-did_not_configured",
                     this.signerDid);
+        } else if (!hasPriv && !hasDid) {
+            throw new IllegalStateException("evidence signing key is required when evidence is enabled: set BOTH "
+                    + "cycles.evidence.signing.private-key-hex and cycles.evidence.signing.signer-did, or set "
+                    + "cycles.evidence.signing.allow-ephemeral=true for development only");
         } else {
             throw new IllegalStateException("evidence signing is half-configured: set BOTH "
-                    + "cycles.evidence.signing.private-key-hex and cycles.evidence.signing.signer-did, or neither");
+                    + "cycles.evidence.signing.private-key-hex and cycles.evidence.signing.signer-did");
         }
     }
 

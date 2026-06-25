@@ -73,6 +73,24 @@ class EventPayloadValidatorTest {
         assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID).counters()).isEmpty();
     }
 
+    @Test
+    void valid_webhook_lifecycle_events_emitNoUnknownTypeWarnings() {
+        for (String type : new String[]{"webhook.created", "webhook.updated", "webhook.paused",
+                "webhook.resumed", "webhook.deleted", "webhook.disabled"}) {
+            Event event = Event.builder()
+                    .eventId("evt-" + type)
+                    .eventType(type)
+                    .category(EventCategory.WEBHOOK)
+                    .timestamp(Instant.now())
+                    .tenantId("t-1")
+                    .source("cycles-admin")
+                    .build();
+            validator.validate(event);
+        }
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID)
+                .tag("rule", EventPayloadValidator.RULE_UNKNOWN_EVENT_TYPE).counters()).isEmpty();
+    }
+
     // --- Rule 1: missing_required ---
 
     @Test

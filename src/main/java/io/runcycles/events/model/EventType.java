@@ -50,9 +50,12 @@ public enum EventType {
     SYSTEM_HIGH_LATENCY("system.high_latency", EventCategory.SYSTEM),
     SYSTEM_WEBHOOK_DELIVERY_FAILED("system.webhook_delivery_failed", EventCategory.SYSTEM),
     SYSTEM_WEBHOOK_TEST("system.webhook_test", EventCategory.SYSTEM),
-    // Webhook lifecycle (spec v0.1.25.33 — dispatcher emits webhook.disabled
-    // on auto-disable; other webhook.* EventTypes are emitted by the admin
-    // plane on operator lifecycle actions and are not produced here)
+    // Webhook lifecycle (6)
+    WEBHOOK_CREATED("webhook.created", EventCategory.WEBHOOK),
+    WEBHOOK_UPDATED("webhook.updated", EventCategory.WEBHOOK),
+    WEBHOOK_PAUSED("webhook.paused", EventCategory.WEBHOOK),
+    WEBHOOK_RESUMED("webhook.resumed", EventCategory.WEBHOOK),
+    WEBHOOK_DELETED("webhook.deleted", EventCategory.WEBHOOK),
     WEBHOOK_DISABLED("webhook.disabled", EventCategory.WEBHOOK);
 
     private final String value;

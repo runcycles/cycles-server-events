@@ -15,8 +15,15 @@ class LocalEvidenceSigningKeyTest {
     private final EnvelopeSigner signer = new EnvelopeSigner();
 
     @Test
-    void ephemeralWhenNothingConfigured() {
-        LocalEvidenceSigningKey key = new LocalEvidenceSigningKey(signer, "", "");
+    void rejectsMissingKeyByDefault() {
+        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, "", "", false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("evidence signing key is required");
+    }
+
+    @Test
+    void ephemeralWhenExplicitlyAllowed() {
+        LocalEvidenceSigningKey key = new LocalEvidenceSigningKey(signer, "", "", true);
 
         assertThat(key.signerDid()).hasSize(64);
         // a signature it produces verifies against the did it advertises
@@ -27,7 +34,7 @@ class LocalEvidenceSigningKeyTest {
     @Test
     void usesConfiguredKeyPair() {
         KeyHex kp = freshKeyPair();
-        LocalEvidenceSigningKey key = new LocalEvidenceSigningKey(signer, kp.priv(), kp.pub());
+        LocalEvidenceSigningKey key = new LocalEvidenceSigningKey(signer, kp.priv(), kp.pub(), false);
 
         assertThat(key.signerDid()).isEqualTo(kp.pub());
         byte[] msg = "envelope-bytes".getBytes();
@@ -38,7 +45,7 @@ class LocalEvidenceSigningKeyTest {
     void rejectsMismatchedPair() {
         String priv = freshKeyPair().priv();
         String unrelatedDid = freshKeyPair().pub();
-        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, priv, unrelatedDid))
+        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, priv, unrelatedDid, false))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("valid Ed25519 pair");
     }
@@ -46,7 +53,7 @@ class LocalEvidenceSigningKeyTest {
     @Test
     void rejectsHalfConfiguredKeyOnly() {
         String priv = freshKeyPair().priv();
-        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, priv, ""))
+        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, priv, "", false))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("half-configured");
     }
@@ -54,7 +61,7 @@ class LocalEvidenceSigningKeyTest {
     @Test
     void rejectsHalfConfiguredDidOnly() {
         String did = freshKeyPair().pub();
-        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, "", did))
+        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, "", did, false))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("half-configured");
     }
@@ -62,7 +69,7 @@ class LocalEvidenceSigningKeyTest {
     @Test
     void rejectsMalformedHex() {
         String did = freshKeyPair().pub();
-        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, "not-hex", did))
+        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, "not-hex", did, false))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("64 hex characters");
     }

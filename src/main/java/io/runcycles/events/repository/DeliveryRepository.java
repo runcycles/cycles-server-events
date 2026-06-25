@@ -31,7 +31,7 @@ public class DeliveryRepository {
             return objectMapper.readValue(data, Delivery.class);
         } catch (Exception e) {
             LOG.error("Failed to read webhook delivery: delivery_id={}", safe(deliveryId), e);
-            return null;
+            throw new IllegalStateException("Failed to read webhook delivery", e);
         }
     }
 
@@ -55,6 +55,7 @@ public class DeliveryRepository {
                     delivery != null ? delivery.getAttempts() : null,
                     safe(delivery != null ? delivery.getTraceId() : null),
                     e);
+            throw new IllegalStateException("Failed to update webhook delivery", e);
         }
     }
 }

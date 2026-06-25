@@ -20,6 +20,58 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.18] — 2026-06-25
+
+### Changed
+
+- **Webhook dispatcher now uses a reliable claim/ack queue.** Delivery IDs are
+  atomically claimed with `BLMOVE dispatch:pending -> dispatch:processing` and
+  acked with `LREM` only after handler state changes and retry scheduling are
+  durable. Startup recovery moves orphaned `dispatch:processing` entries back to
+  `dispatch:pending`, closing the crash-loss window from destructive `BRPOP`.
+- Retry promotion from `dispatch:retry` to `dispatch:pending` is now a single
+  Redis Lua `ZREM` + `LPUSH` operation, preserving the concurrent-worker
+  duplicate guard without a remove-before-push crash window.
+- Release image scanning now builds with `pull: true` and `no-cache: true`, then
+  pushes that exact locally scanned image instead of doing a second cached
+  rebuild.
+
+### Fixed
+
+- Redis, JSON, and decrypt failures in delivery/event/subscription repositories
+  now propagate instead of being treated as missing records. This leaves claimed
+  deliveries unacked for recovery instead of silently converting infrastructure
+  trouble into permanent `event_not_found` or `subscription_not_found` outcomes.
+- Encrypted webhook signing secrets now fail closed when
+  `WEBHOOK_SECRET_ENCRYPTION_KEY` is missing or wrong; the dispatcher will not
+  deliver an unsigned webhook after a decrypt failure.
+- CyclesEvidence signing now requires a configured
+  `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` + `EVIDENCE_SIGNING_SIGNER_DID` pair when
+  `EVIDENCE_SERVER_ID` is set. Ephemeral signing is available only for
+  development with `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY=true`.
+- Added a Redis `PING` health indicator and moved the container healthcheck to
+  `/actuator/health/readiness`; liveness remains process-only.
+- Added webhook lifecycle event vocabulary for `webhook.created`,
+  `webhook.updated`, `webhook.paused`, `webhook.resumed`, and `webhook.deleted`
+  so valid admin lifecycle events do not trigger `unknown_event_type` warnings.
+- Subscription custom headers can no longer duplicate reserved delivery headers
+  such as `Content-Type`, `User-Agent`, `X-Cycles-*`, `X-Request-Id`, or
+  `traceparent`.
+
+### Documentation
+
+- Updated README, OPERATIONS, evidence identity runbook, and AUDIT notes for the
+  reliable queue, Redis readiness, no-public-API deployment posture, explicit
+  evidence dev-mode flag, and 47-event vocabulary.
+
+### Compatibility
+
+- Outbound webhook payloads and standard headers remain compatible.
+- Redis producers still write delivery IDs to `dispatch:pending`; this release
+  adds the consumer-owned `dispatch:processing` in-flight list for recovery.
+- Docker image metadata now exposes only management port `9980`; the worker's
+  `7980` app port still exists internally but serves no public API.
+
 ## [0.1.25.17] — 2026-06-24
 
 ### Fixed

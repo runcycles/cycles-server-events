@@ -18,7 +18,7 @@ import java.time.Instant;
 import static org.assertj.core.api.Assertions.assertThat;
 import redis.clients.jedis.params.SetParams;
 
-import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -75,9 +75,9 @@ class DeliveryRepositoryTest {
     void findById_deserializationError() {
         when(jedis.get("delivery:del-bad")).thenReturn("not-valid-json{{{");
 
-        Delivery result = repository.findById("del-bad");
-
-        assertThat(result).isNull();
+        assertThatThrownBy(() -> repository.findById("del-bad"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to read webhook delivery");
     }
 
     @Test
@@ -121,8 +121,9 @@ class DeliveryRepositoryTest {
             // won't happen
         }
 
-        // Should not throw — error is logged
-        brokenRepo.update(delivery);
+        assertThatThrownBy(() -> brokenRepo.update(delivery))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to update webhook delivery");
         verify(jedis, never()).set(anyString(), anyString());
         verify(jedis, never()).set(anyString(), anyString(), any(SetParams.class));
     }

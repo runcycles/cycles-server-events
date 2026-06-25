@@ -23,7 +23,7 @@ class EvidenceWorkerTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final EnvelopeSigner signer = new EnvelopeSigner();
     private final CyclesEvidenceCanonicalizer canonicalizer = new CyclesEvidenceCanonicalizer();
-    private final EvidenceSigningKey key = new LocalEvidenceSigningKey(signer, "", ""); // ephemeral
+    private final EvidenceSigningKey key = new LocalEvidenceSigningKey(signer, "", "", true); // ephemeral dev key
     private final CyclesEvidenceEnvelopeBuilder builder = new CyclesEvidenceEnvelopeBuilder(canonicalizer, key);
 
     /** Captures the last envelope handed to the sink. */

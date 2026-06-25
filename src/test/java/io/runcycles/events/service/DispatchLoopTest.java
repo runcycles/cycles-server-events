@@ -23,35 +23,39 @@ class DispatchLoopTest {
     }
 
     @Test
-    void processNext_popsAndHandles() {
-        when(queueRepository.popPending(5)).thenReturn("del-1");
+    void processNext_claimsHandlesAndAcks() {
+        when(queueRepository.claimPending(5)).thenReturn("del-1");
 
         dispatchLoop.processNext();
 
         verify(deliveryHandler).handle("del-1");
+        verify(queueRepository).ack("del-1");
     }
 
     @Test
     void processNext_timeout_noOp() {
-        when(queueRepository.popPending(5)).thenReturn(null);
+        when(queueRepository.claimPending(5)).thenReturn(null);
 
         dispatchLoop.processNext();
 
         verify(deliveryHandler, never()).handle(anyString());
+        verify(queueRepository, never()).ack(anyString());
     }
 
     @Test
-    void processNext_handlerException_caught() {
-        when(queueRepository.popPending(5)).thenReturn("del-1");
+    void processNext_handlerException_caughtAndNotAcked() {
+        when(queueRepository.claimPending(5)).thenReturn("del-1");
         doThrow(new RuntimeException("handler error")).when(deliveryHandler).handle("del-1");
 
         // Should not throw
         dispatchLoop.processNext();
+
+        verify(queueRepository, never()).ack(anyString());
     }
 
     @Test
-    void processNext_popException_caught() {
-        when(queueRepository.popPending(5)).thenThrow(new RuntimeException("redis error"));
+    void processNext_claimException_caught() {
+        when(queueRepository.claimPending(5)).thenThrow(new RuntimeException("redis error"));
 
         // Should not throw
         dispatchLoop.processNext();

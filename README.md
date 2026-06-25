@@ -25,7 +25,7 @@ cycles-server-admin                    cycles-server (runtime)
          WebhookDispatchService → create PENDING delivery + LPUSH dispatch:pending
                │
                ▼
-Redis ──BRPOP──► cycles-server-events (DispatchLoop)
+Redis ──BLMOVE──► cycles-server-events (DispatchLoop)
                     │
                     ├── DeliveryHandler: load delivery + event + subscription
                     ├── SubscriptionRepository: decrypt signing secret (AES-256-GCM)
@@ -33,6 +33,7 @@ Redis ──BRPOP──► cycles-server-events (DispatchLoop)
                     ├── On success: mark SUCCESS, reset consecutive failures
                     ├── On failure + retries left: exponential backoff → RETRYING
                     ├── On failure + retries exhausted: FAILED + increment consecutive failures
+                    ├── Ack: LREM dispatch:processing only after state/retry is durable
                     └── On consecutive failures >= threshold: subscription → DISABLED
 ```
 
@@ -45,7 +46,7 @@ Event sources (per spec `source` field): `cycles-admin`, `cycles-server`, `expir
 | Workload | Synchronous CRUD + reservation ops | Asynchronous delivery, variable latency |
 | Scaling | Scale with API traffic | Scale with webhook volume |
 | Failure isolation | Servers stay responsive during delivery backlog | Delivery retries don't block API |
-| Concurrency | Multiple instances | Multiple instances safe (BRPOP is atomic) |
+| Concurrency | Multiple instances | Multiple instances safe (BLMOVE claim + ack) |
 
 ## CyclesEvidence signing
 
@@ -75,7 +76,7 @@ Why the signer is in this tier: the expensive work (JCS canonicalization + Ed255
 docker compose -f docker-compose.full-stack.yml up
 ```
 
-Services: Redis (6379), Admin (7979), Runtime Server (7878), Events (7980)
+Services: Redis (6379), Admin (7979), Runtime Server (7878), Events worker (9980 management; 7980 internal/no API)
 
 ### Standalone (requires existing Redis)
 
@@ -91,7 +92,7 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `REDIS_PORT` | 6379 | Redis port |
 | `REDIS_PASSWORD` | (empty) | Redis password |
 | `WEBHOOK_SECRET_ENCRYPTION_KEY` | (empty) | AES-256-GCM key for signing secret encryption (base64-encoded 32 bytes). If empty, secrets stored/read as plaintext (backward compatible). |
-| `dispatch.pending.timeout-seconds` | 5 | BRPOP blocking timeout (seconds) |
+| `dispatch.pending.timeout-seconds` | 5 | BLMOVE blocking timeout (seconds) |
 | `dispatch.retry.poll-interval-ms` | 5000 | Retry queue poll interval (ms) |
 | `RETRY_BATCH_SIZE` | 100 | Max retries to requeue per poll cycle |
 | `dispatch.http.timeout-seconds` | 30 | HTTP request timeout for webhook delivery |
@@ -102,7 +103,8 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `RETENTION_CLEANUP_INTERVAL_MS` | 3600000 | How often to trim expired ZSET index entries (ms). Default: 1 hour. |
 | `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. Blank disables the evidence signer. When set, it **must be byte-identical to `cycles-server`'s** value (incl. the `/v1` base) or the worker's id cross-check dead-letters. See the [enablement runbook](docs/evidence-identity-enablement.md). |
 | `EVIDENCE_SIGNING_SIGNER_DID` | (empty) | Public Ed25519 key (64 hex), the public half of `EVIDENCE_SIGNING_PRIVATE_KEY_HEX`, **identical to `cycles-server`'s** value. |
-| `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | (empty) | **Secret** — Ed25519 seed (64 hex) this service signs with; lives **only** here. Unset → ephemeral dev key (won't verify across restarts); setting only one of the signing pair fails startup. |
+| `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | (empty) | **Secret** — Ed25519 seed (64 hex) this service signs with; lives **only** here. Required when `EVIDENCE_SERVER_ID` is set unless ephemeral dev mode is explicitly allowed; setting only one of the signing pair fails startup. |
+| `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY` | false | Development-only escape hatch. When `true` and evidence is enabled without a signing pair, generates an ephemeral key that will not verify across restarts. Keep `false` in production. |
 
 ### Generating the encryption key
 
@@ -125,6 +127,7 @@ The same key must be configured in both `cycles-server-admin` and `cycles-server
 3. Events service reads + decrypts secret on each delivery
    └── CryptoService.decrypt(redis.get("webhook:secret:{id}"))
    └── Backward compatible: plaintext secrets (no "enc:" prefix) returned as-is
+   └── Fail closed: encrypted secrets without the correct key are not delivered unsigned
 
 4. PayloadSigner computes HMAC-SHA256(JSON payload, decrypted secret)
    └── Sent as X-Cycles-Signature: sha256=<hex> header
@@ -158,11 +161,15 @@ def verify(body: bytes, secret: str, signature: str) -> bool:
 | `X-Cycles-Signature` | `sha256=<hex>` | HMAC-SHA256 of body (if signing secret configured) |
 | `X-Cycles-Event-Id` | `evt_abc123...` | For deduplication (at-least-once delivery) |
 | `X-Cycles-Event-Type` | `budget.exhausted` | Event type for routing |
-| `User-Agent` | `cycles-server-events/0.1.25.8` | Service identifier |
+| `User-Agent` | `cycles-server-events/0.1.25.18` | Service identifier |
 | `X-Cycles-Trace-Id` | `<32-hex-lowercase>` | W3C trace-id (spec v0.1.25.27) — always present |
 | `traceparent` | `00-<trace-id>-<16-hex-span>-<flags>` | W3C Trace Context v00 — always present. `<flags>` preserves upstream sampling when `WebhookDelivery.traceparent_inbound_valid=true` (spec v0.1.25.28), else `01` |
 | `X-Request-Id` | `<request-id>` | Originating HTTP request id — present when `event.request_id` is populated |
 | Custom headers | Per subscription | From `WebhookSubscription.headers` map |
+
+Custom headers are additive only. Reserved delivery headers such as `Content-Type`,
+`User-Agent`, `X-Cycles-*`, `X-Request-Id`, and `traceparent` are ignored if a
+subscription tries to set them.
 
 ## Retry Policy
 
@@ -193,7 +200,8 @@ PENDING ──HTTP 2xx──► SUCCESS (reset consecutive_failures)
 
 | Key | Type | Written By | Read By | Description |
 |-----|------|-----------|---------|-------------|
-| `dispatch:pending` | LIST | Admin (LPUSH) | Events (BRPOP) | Delivery IDs awaiting processing |
+| `dispatch:pending` | LIST | Admin (LPUSH), Events retry scheduler (LPUSH) | Events (BLMOVE) | Delivery IDs awaiting processing |
+| `dispatch:processing` | LIST | Events (BLMOVE) | Events (LREM/recovery) | In-flight delivery IDs claimed but not yet acked |
 | `dispatch:retry` | ZSET | Events (ZADD) | Events (ZRANGEBYSCORE) | Retry queue (score = timestamp) |
 | `delivery:{id}` | STRING | Admin (SET) | Events (GET/SET) | Delivery record JSON |
 | `event:{id}` | STRING | Admin (SET) | Events (GET) | Event record JSON |
@@ -202,7 +210,7 @@ PENDING ──HTTP 2xx──► SUCCESS (reset consecutive_failures)
 
 ### Concurrent safety
 
-Multiple events service instances can safely BRPOP from the same `dispatch:pending` list — BRPOP is atomic, so each delivery is processed by exactly one consumer. No distributed locking needed.
+Multiple events service instances can safely claim from the same `dispatch:pending` list. Each claim atomically moves one delivery ID to `dispatch:processing`; the worker removes it from processing only after the delivery state or retry schedule is durable. On startup, orphaned processing entries are moved back to pending for reprocessing.
 
 ### TTL and retention
 
@@ -212,7 +220,8 @@ Multiple events service instances can safely BRPOP from the same `dispatch:pendi
 | `delivery:{id}` | 14 days (configurable) | Auto-expire via Redis EXPIRE |
 | `events:{tenantId}`, `events:_all` | N/A (ZSET) | Hourly trim via RetentionCleanupService |
 | `deliveries:{subId}` | N/A (ZSET) | Hourly trim via RetentionCleanupService |
-| `dispatch:pending` | Self-draining | Consumed by BRPOP |
+| `dispatch:pending` | Self-draining | Claimed by BLMOVE into `dispatch:processing` |
+| `dispatch:processing` | Self-draining | Acked by LREM; recovered to pending on startup |
 | `dispatch:retry` | Self-draining | Entries move to pending when ready |
 
 ### Resilience: events service down
@@ -224,7 +233,8 @@ If `cycles-server-events` is not running or not deployed:
 3. **Redis memory is bounded** — TTLs ensure keys auto-expire even if never consumed
 4. **When the events service restarts:**
    - Stale deliveries (older than `MAX_DELIVERY_AGE_MS`, default 24h) are immediately marked FAILED — they won't be delivered late
-   - Fresh deliveries are processed normally via BRPOP
+   - Orphaned in-flight deliveries in `dispatch:processing` are recovered to `dispatch:pending`
+   - Fresh deliveries are processed normally via BLMOVE claim + ack
    - RetentionCleanupService trims orphaned ZSET index entries hourly
 5. **No data loss for events** — event records persist in Redis for 90 days regardless of delivery status
 
@@ -236,7 +246,7 @@ Admin-initiated updates record `actor_type=admin_on_behalf_of` in audit metadata
 
 **No functional impact on this service** — `cycles-server-events` reads subscriptions from Redis directly and does not call those admin HTTP endpoints. Noted here for observability and ops awareness.
 
-## Event Types (41)
+## Event Types (47)
 
 | Category | Count | Types |
 |----------|-------|-------|
@@ -246,6 +256,7 @@ Admin-initiated updates record `actor_type=admin_on_behalf_of` in audit metadata
 | `api_key` | 6 | created, revoked, expired, permissions_changed, auth_failed, auth_failure_rate_spike |
 | `policy` | 3 | created, updated, deleted |
 | `system` | 5 | store_connection_lost, store_connection_restored, high_latency, webhook_delivery_failed, webhook_test |
+| `webhook` | 6 | created, updated, paused, resumed, deleted, disabled |
 
 `budget.reset_spent` (v0.1.25.6, admin-spec v0.1.25.18) is emitted for billing-period rollovers and is distinct from `budget.reset` (which is a ceiling resize that preserves spent). Consumers can route these separately. The payload's `spent_override_provided` flag indicates whether `spent` was explicitly supplied (migration / proration / correction) vs defaulted to 0 (routine rollover).
 
@@ -256,17 +267,19 @@ Pluggable transport interface. Currently implements `webhook` (HTTP POST).
 ```java
 public interface Transport {
     String type();
-    TransportResult deliver(Event event, Subscription subscription, String signingSecret);
+    TransportResult deliver(Event event, Subscription subscription, String signingSecret, Delivery delivery);
 }
 ```
 
 ## Monitoring
 
-Spring Actuator endpoints run on a **separate management port (9980)** so they are not reachable from the public API port (7980). Keep 9980 on an internal-only ClusterIP / network; scrape from there.
+Spring Actuator endpoints run on a **separate management port (9980)**. This worker has no public HTTP API; do not publish 7980 on an ingress. Keep 9980 on an internal-only ClusterIP / network and scrape from there.
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET :9980/actuator/health` | Liveness check (UP/DOWN) |
+| `GET :9980/actuator/health/liveness` | Process liveness check |
+| `GET :9980/actuator/health/readiness` | Readiness check, including Redis `PING` |
+| `GET :9980/actuator/health` | Aggregate health |
 | `GET :9980/actuator/info` | Build info (version, artifact) |
 | `GET :9980/actuator/prometheus` | Prometheus-format metrics for scraping |
 
@@ -315,7 +328,7 @@ The webhook POST body is the full event JSON. Null fields are omitted.
 ## Build & Test
 
 ```bash
-# Build and run unit tests (201 unit tests, 95%+ line coverage enforced by JaCoCo)
+# Build and run unit tests (293 unit tests, 95%+ line coverage enforced by JaCoCo)
 mvn verify
 
 # Run all tests including integration (requires Docker for Testcontainers Redis)

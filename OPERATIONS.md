@@ -5,9 +5,10 @@ Covers metrics, alerting recipes, SLOs, dashboards, and an incident playbook.
 
 Assumes you are already deploying via the published Docker image
 (`ghcr.io/runcycles/cycles-server-events:<version>`) with Prometheus scraping
-`/actuator/prometheus` on the **management port (9980)** — actuators moved off
-the public API port 7980 in 0.1.25.9 for defense-in-depth. If you haven't set
-that up yet, see the Monitoring section of [`README.md`](README.md) first.
+`/actuator/prometheus` on the **management port (9980)**. This worker has no
+public HTTP API; do not publish 7980 on an ingress. Use
+`/actuator/health/readiness` for dependency-aware readiness, and see the
+Monitoring section of [`README.md`](README.md) for endpoint details.
 
 Also worth reading: [`cycles-server/OPERATIONS.md`](https://github.com/runcycles/cycles-server/blob/main/OPERATIONS.md)
 and [`cycles-server-admin/OPERATIONS.md`](https://github.com/runcycles/cycles-server-admin/blob/main/OPERATIONS.md).
@@ -225,9 +226,10 @@ producer.
 
 ### Redis connectivity (infers from missing traffic)
 
-The dispatcher blocks on BRPOP; when Redis is unavailable, attempts go to
-zero. Pair with the `up` check to distinguish "Redis down" from "no
-traffic."
+The dispatcher claims with BLMOVE; when Redis is unavailable, attempts go to
+zero and readiness goes DOWN because the Redis health indicator cannot `PING`.
+Pair traffic alerts with the readiness endpoint to distinguish "Redis down"
+from "no producer traffic."
 
 ```yaml
 - alert: CyclesWebhookAttemptsStopped
@@ -332,6 +334,7 @@ sum by (type, rule) (rate(cycles_webhook_events_payload_invalid_total[5m]))
 **Row 7 — Redis queue depth (external scrape via `redis_exporter`, not this service):**
 ```promql
 redis_list_length{key="dispatch:pending"}
+redis_list_length{key="dispatch:processing"}
 redis_zset_length{key="dispatch:retry"}
 ```
 
@@ -366,9 +369,10 @@ Contributions of a packaged dashboard JSON are welcome.
 
 ### Symptom: Redis unavailable
 
-The dispatcher's BRPOP call blocks; new deliveries sit in
-`dispatch:pending` until Redis comes back. Existing in-flight deliveries
-fail on their final write-back.
+The dispatcher claims work with `BLMOVE dispatch:pending -> dispatch:processing`.
+When Redis is unavailable, new deliveries sit in `dispatch:pending`; deliveries
+that were already claimed remain in `dispatch:processing` until ack or startup
+recovery.
 
 1. Confirm Redis health: `redis-cli PING`, check disk/memory on the
    Redis host.
@@ -377,8 +381,9 @@ fail on their final write-back.
    while connect attempts pile up.
 3. Once Redis recovers, the service resumes without restart
    (`JedisConnectionException` is caught in the scheduled services; they
-   skip the tick and try again on next poll). If it doesn't pick up,
-   `kill -15 <pid>` and let your orchestrator restart it.
+   skip the tick and try again on next poll). If a pod crashed while a
+   delivery was in-flight, startup recovery moves `dispatch:processing`
+   entries back to `dispatch:pending`.
 4. After recovery, expect a one-time spike on
    `cycles_webhook_delivery_stale_total` for any delivery whose
    `attempted_at` now exceeds `MAX_DELIVERY_AGE_MS` — silence the
@@ -386,8 +391,9 @@ fail on their final write-back.
 
 ### Symptom: delivery queue backing up
 
-`redis_list_length{key="dispatch:pending"}` climbing without a
-corresponding climb in `cycles_webhook_delivery_attempts_total`.
+`redis_list_length{key="dispatch:pending"}` or
+`redis_list_length{key="dispatch:processing"}` climbing without a corresponding
+climb in `cycles_webhook_delivery_attempts_total`.
 
 1. Is the dispatcher running? Check `up{job="cycles-server-events"}`.
 2. Is it receiving work? `cycles_webhook_delivery_attempts_total` rate
@@ -396,8 +402,8 @@ corresponding climb in `cycles_webhook_delivery_attempts_total`.
    `cycles_webhook_delivery_latency_seconds_sum` rate. A tenant with a
    slow endpoint can hold a dispatcher thread for the full HTTP timeout
    (default 30s).
-4. Remediation: scale dispatcher instances horizontally (BRPOP is atomic;
-   N instances safely parallelise), or lower
+4. Remediation: scale dispatcher instances horizontally (BLMOVE claim + ack
+   is atomic; N instances safely parallelise), or lower
    `dispatch.http.timeout-seconds` so one slow subscriber doesn't block
    the queue.
 
@@ -479,12 +485,13 @@ don't fit.
 | `dispatch.retry.poll-interval-ms` | `5000` | How often `RetryScheduler` drains `dispatch:retry`. Lower for tighter retry latency at the cost of slightly more Redis load. |
 | `RETENTION_CLEANUP_INTERVAL_MS` | `3600000` (1h) | How often `RetentionCleanupService` trims expired ZSET entries. Rarely needs tuning. |
 | `cycles.metrics.tenant-tag.enabled` | `true` | Set `false` if you have thousands of tenants and Prometheus cardinality is stressed. Flip both this service and `cycles-server` together for dashboard consistency. |
-| `spring.task.scheduling.pool.size` (`SCHEDULING_POOL_SIZE`) | `5` | Size of the scheduled-task executor. `DispatchLoop` always runs a continuous webhook BRPOP; `EvidenceWorker` adds a second BLMOVE loop only when `EVIDENCE_SERVER_ID` is set. **Don't lower below 5** when evidence is enabled or webhook retries/cleanup can starve behind the blocking loops (see "Scheduler pool" under the runbook below). |
+| `spring.task.scheduling.pool.size` (`SCHEDULING_POOL_SIZE`) | `5` | Size of the scheduled-task executor. `DispatchLoop` always runs a continuous webhook BLMOVE claim loop; `EvidenceWorker` adds a second BLMOVE loop only when `EVIDENCE_SERVER_ID` is set. **Don't lower below 5** when evidence is enabled or webhook retries/cleanup can starve behind the blocking loops (see "Scheduler pool" under the runbook below). |
 | `management.endpoints.web.exposure.include` | `health,info,prometheus` | Add more actuator endpoints if needed, but `prometheus` is the one ops cares about. |
-| `MANAGEMENT_PORT` | `9980` | Separate port actuators bind to — keep this on an internal-only network. The public API port 7980 serves no actuator endpoints. |
+| `MANAGEMENT_PORT` | `9980` | Separate port actuators bind to — keep this on an internal-only network. This worker has no public HTTP API; do not publish 7980 on an ingress. |
 | `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. Blank disables the evidence signer. When set, it **must be byte-identical to `cycles-server`'s** value (incl. the `/v1` base) or the worker's id cross-check fails and records dead-letter. See the enablement runbook below. |
 | `EVIDENCE_SIGNING_SIGNER_DID` | (empty) | Public Ed25519 key (64 hex) stamped as `signer_did`. Must be the public half of `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` **and** identical to `cycles-server`'s value. |
-| `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | (empty) | **Secret** — Ed25519 seed (64 hex) this worker signs with. Lives **only** here, never on `cycles-server`. If unset, an ephemeral key is generated (dev only; envelopes won't verify across restarts). Setting only one of the signing pair fails startup. |
+| `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | (empty) | **Secret** — Ed25519 seed (64 hex) this worker signs with. Lives **only** here, never on `cycles-server`. Required when evidence is enabled unless `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY=true`. Setting only one of the signing pair fails startup. |
+| `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY` | `false` | Development-only escape hatch. When `true`, evidence can start without a configured signing pair and will generate a per-process ephemeral signer. Keep `false` in production. |
 
 Turning CyclesEvidence **on** (the shared identity across `cycles-server` + this
 worker, key generation, coherence rules, and end-to-end verification) is documented
@@ -570,12 +577,13 @@ it to the sink. Operational notes:
   incomplete. Records that were already in `evidence:pending` before disabling
   remain there until evidence is re-enabled or an operator drains them manually.
   Set it to the deployment's stable Cycles server URI to turn signing on.
-- **Signing key must be configured in production when evidence is enabled.** Set BOTH
+- **Signing key must be configured when evidence is enabled.** Set BOTH
   `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` and `EVIDENCE_SIGNING_SIGNER_DID` (a paired
-  Ed25519 key). If left unset the service generates an **ephemeral** key per
-  process and logs a WARN — so multiple un-configured replicas would each sign
-  with a **different `signer_did`**, and signatures would not survive a restart.
-  Provision the key once and set it identically on every replica.
+  Ed25519 key). If both are unset, startup fails by default. For local
+  development only, `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY=true` generates an
+  **ephemeral** key per process and logs a WARN, so signatures will not survive a
+  restart and multiple un-configured replicas would each sign with a different
+  `signer_did`. Provision the key once and set it identically on every replica.
 - **Reliable queue.** The worker claims records with `BLMOVE evidence:pending →
   evidence:processing` and only `LREM`s them from `evidence:processing` after the
   envelope is stored (or dead-lettered). On startup, orphaned in-flight records

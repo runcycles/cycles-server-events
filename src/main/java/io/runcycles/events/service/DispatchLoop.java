@@ -29,15 +29,17 @@ public class DispatchLoop {
     @Scheduled(fixedDelay = 1)
     public void processNext() {
         try {
-            String deliveryId = queueRepository.popPending(timeoutSeconds);
+            String deliveryId = queueRepository.claimPending(timeoutSeconds);
             if (deliveryId != null) {
                 deliveryHandler.handle(deliveryId);
+                queueRepository.ack(deliveryId);
             }
         } catch (JedisConnectionException e) {
-            LOG.warn("Dispatch loop Redis connection failure: queue=dispatch:pending timeout_seconds={} error={}",
+            LOG.warn("Dispatch loop Redis connection failure: queue=dispatch:pending processing_queue=dispatch:processing timeout_seconds={} error={}",
                     timeoutSeconds, safe(e.getMessage()));
         } catch (Exception e) {
-            LOG.error("Dispatch loop failed: queue=dispatch:pending timeout_seconds={}", timeoutSeconds, e);
+            LOG.error("Dispatch loop failed before ack: queue=dispatch:pending processing_queue=dispatch:processing timeout_seconds={}",
+                    timeoutSeconds, e);
         }
     }
 }

@@ -261,13 +261,18 @@ class ModelTest {
     @Test
     void eventType_allValues() {
         EventType[] values = EventType.values();
-        assertThat(values.length).isEqualTo(42);
+        assertThat(values.length).isEqualTo(47);
         // Spot-check a few
         assertThat(EventType.valueOf("BUDGET_CREATED")).isNotNull();
         assertThat(EventType.valueOf("BUDGET_RESET_SPENT")).isNotNull();
         assertThat(EventType.valueOf("TENANT_CREATED")).isNotNull();
         assertThat(EventType.valueOf("API_KEY_CREATED")).isNotNull();
         assertThat(EventType.valueOf("SYSTEM_HIGH_LATENCY")).isNotNull();
+        assertThat(EventType.valueOf("WEBHOOK_CREATED")).isNotNull();
+        assertThat(EventType.valueOf("WEBHOOK_UPDATED")).isNotNull();
+        assertThat(EventType.valueOf("WEBHOOK_PAUSED")).isNotNull();
+        assertThat(EventType.valueOf("WEBHOOK_RESUMED")).isNotNull();
+        assertThat(EventType.valueOf("WEBHOOK_DELETED")).isNotNull();
         assertThat(EventType.valueOf("WEBHOOK_DISABLED")).isNotNull();
     }
 
@@ -277,15 +282,17 @@ class ModelTest {
         assertThat(EventType.fromValue("budget.reset_spent")).isEqualTo(EventType.BUDGET_RESET_SPENT);
         assertThat(EventType.fromValue("tenant.created")).isEqualTo(EventType.TENANT_CREATED);
         assertThat(EventType.fromValue("system.high_latency")).isEqualTo(EventType.SYSTEM_HIGH_LATENCY);
+        assertThat(EventType.fromValue("webhook.created")).isEqualTo(EventType.WEBHOOK_CREATED);
         assertThat(EventType.fromValue("webhook.disabled")).isEqualTo(EventType.WEBHOOK_DISABLED);
         assertThatThrownBy(() -> EventType.fromValue("nonexistent"))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
-    void eventType_webhookDisabled_metadata() {
-        // Dispatcher-only emission — not tenant-accessible per spec
-        // (audit-plane category, admin operator reads).
+    void eventType_webhookLifecycle_metadata() {
+        assertThat(EventType.WEBHOOK_CREATED.getValue()).isEqualTo("webhook.created");
+        assertThat(EventType.WEBHOOK_CREATED.getCategory()).isEqualTo(EventCategory.WEBHOOK);
+        assertThat(EventType.WEBHOOK_CREATED.isTenantAccessible()).isFalse();
         assertThat(EventType.WEBHOOK_DISABLED.getValue()).isEqualTo("webhook.disabled");
         assertThat(EventType.WEBHOOK_DISABLED.getCategory()).isEqualTo(EventCategory.WEBHOOK);
         assertThat(EventType.WEBHOOK_DISABLED.isTenantAccessible()).isFalse();
