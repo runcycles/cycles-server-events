@@ -89,7 +89,7 @@ public class EventRepository {
             return objectMapper.readValue(data, Event.class);
         } catch (Exception e) {
             LOG.error("Failed to read event: event_id={}", safe(eventId), e);
-            return null;
+            throw new IllegalStateException("Failed to read event", e);
         }
     }
 }

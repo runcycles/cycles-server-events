@@ -79,12 +79,13 @@ class CryptoServiceTest {
     }
 
     @Test
-    void decrypt_encryptedValueWithNoKey_returnsNull() {
+    void decrypt_encryptedValueWithNoKey_throws() {
         CryptoService noKey = new CryptoService("");
         String encrypted = "enc:someBase64Data";
 
-        // No key = can't decrypt, returns null to prevent signing with garbage
-        assertThat(noKey.decrypt(encrypted)).isNull();
+        assertThatThrownBy(() -> noKey.decrypt(encrypted))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("WEBHOOK_SECRET_ENCRYPTION_KEY");
     }
 
     @Test

@@ -51,7 +51,7 @@ class CyclesEvidenceEnvelopeBuilderTest {
 
     @Test
     void buildsSelfConsistentSignedEnvelope() throws Exception {
-        EvidenceSigningKey key = new LocalEvidenceSigningKey(signer, "", ""); // ephemeral
+        EvidenceSigningKey key = new LocalEvidenceSigningKey(signer, "", "", true); // ephemeral dev key
         CyclesEvidenceEnvelopeBuilder builder = new CyclesEvidenceEnvelopeBuilder(canonicalizer, key);
         ObjectNode src = loadFixture("02-reserve-allow");
 
@@ -74,7 +74,7 @@ class CyclesEvidenceEnvelopeBuilderTest {
 
     @Test
     void omitsTraceIdWhenBlank() throws Exception {
-        EvidenceSigningKey key = new LocalEvidenceSigningKey(signer, "", "");
+        EvidenceSigningKey key = new LocalEvidenceSigningKey(signer, "", "", true);
         CyclesEvidenceEnvelopeBuilder builder = new CyclesEvidenceEnvelopeBuilder(canonicalizer, key);
         ObjectNode src = loadFixture("02-reserve-allow");
 

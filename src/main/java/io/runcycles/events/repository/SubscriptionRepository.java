@@ -37,7 +37,7 @@ public class SubscriptionRepository {
             return objectMapper.readValue(data, Subscription.class);
         } catch (Exception e) {
             LOG.error("Failed to read webhook subscription: subscription_id={}", safe(subscriptionId), e);
-            return null;
+            throw new IllegalStateException("Failed to read webhook subscription", e);
         }
     }
 
@@ -48,7 +48,7 @@ public class SubscriptionRepository {
         } catch (Exception e) {
             LOG.error("Failed to read webhook signing secret: subscription_id={} secret_present=unknown",
                     safe(subscriptionId), e);
-            return null;
+            throw new IllegalStateException("Failed to read webhook signing secret", e);
         }
     }
 

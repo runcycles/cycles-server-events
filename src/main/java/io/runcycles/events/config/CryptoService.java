@@ -15,7 +15,9 @@ import java.util.Base64;
 
 /**
  * AES-256-GCM decryption for webhook signing secrets at rest.
- * If no encryption key is configured, operates in pass-through mode.
+ * If no encryption key is configured, plaintext values operate in pass-through
+ * mode. Encrypted values fail closed because delivering an unsigned webhook
+ * when a stored signing secret cannot be decrypted breaks authenticity.
  */
 @Component
 public class CryptoService {
@@ -65,8 +67,8 @@ public class CryptoService {
             return value; // Plaintext (backward compatible)
         }
         if (key == null) {
-            LOG.warn("Webhook secret decrypt skipped because encryption key is not configured: encrypted_value_present=true");
-            return null;
+            throw new IllegalStateException(
+                    "Webhook secret is encrypted but WEBHOOK_SECRET_ENCRYPTION_KEY is not configured");
         }
         try {
             byte[] combined = Base64.getDecoder().decode(value.substring(ENCRYPTED_PREFIX.length()));

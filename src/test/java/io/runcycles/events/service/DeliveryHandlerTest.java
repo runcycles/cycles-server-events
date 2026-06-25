@@ -21,6 +21,7 @@ import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
@@ -439,6 +440,22 @@ class DeliveryHandlerTest {
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
         verify(transport).deliver(any(), eq(sub), isNull(), any());
+    }
+
+    @Test
+    void handle_signingSecretFailure_failsClosedBeforeTransport() {
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1"))
+                .thenThrow(new IllegalStateException("decrypt failed"));
+
+        assertThatThrownBy(() -> handler.handle("del-1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("decrypt failed");
+        verify(transport, never()).deliver(any(), any(), any(), any());
     }
 
     // --- Null attempts ---

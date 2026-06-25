@@ -4,8 +4,9 @@
 > configured, no usable signed evidence is produced: `cycles-server` fail-opens
 > without queueing source records or returning a `cycles_evidence` ref, and the
 > `cycles-server-events` signer stays disabled when `EVIDENCE_SERVER_ID` is
-> blank. If `server_id` is set but the signing key is unset, it signs with a
-> **throwaway** development key.
+> blank. If `server_id` is set but the signing key is unset, startup fails by
+> default; a **throwaway** development key requires
+> `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY=true`.
 > See [Startup behavior](#startup-behavior-so-you-can-read-the-logs) for the exact
 > per-variable modes. Nothing else breaks.
 
@@ -28,6 +29,7 @@ only reproduces the `evidence_id` content hash, which needs the public identity 
 | `EVIDENCE_SERVER_ID` | `cycles.evidence.server-id` | ✅ | ✅ | public |
 | `EVIDENCE_SIGNING_SIGNER_DID` | `cycles.evidence.signing.signer-did` | ✅ | ✅ | public (Ed25519 pubkey, 64 hex) |
 | `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | `cycles.evidence.signing.private-key-hex` | ❌ never | ✅ | **secret** (Ed25519 seed, 64 hex) |
+| `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY` | `cycles.evidence.signing.allow-ephemeral` | ❌ never | dev only | development override; keep false in production |
 
 These are the required signing variables. JWKS publication and rotation history add
 public `cycles-server` variables later in this runbook:
@@ -92,8 +94,11 @@ not queued and there is **no** `evidence_id` / `cycles_evidence` (fail-open, sil
 **cycles-server-events** signing key (`LocalEvidenceSigningKey`, evaluated once `server_id` is set):
 - both private-key + signer-did set → loads them, validates the pair, logs
   `evidence signing key loaded from configuration (signer_did=…)`.
-- **neither** set → generates an **EPHEMERAL** key and logs a `WARN`:
-  *"emitted evidence will NOT verify across restarts"*. Fine for dev; **never** production.
+- **neither** set and `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY=false` (default) →
+  **throws** (`evidence signing key is required …`). Fail fast.
+- **neither** set and `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY=true` → generates
+  an **EPHEMERAL** key and logs a `WARN`. Fine for local dev only; **never**
+  production because signatures will not verify across restarts.
 - **exactly one** set → **throws** (`evidence signing is half-configured …`). Fail fast.
 
 ## Provisioning steps
@@ -118,7 +123,7 @@ not queued and there is **no** `evidence_id` / `cycles_evidence` (fail-open, sil
 4. **Set on `cycles-server`** (public only): `EVIDENCE_SERVER_ID`, `EVIDENCE_SIGNING_SIGNER_DID`
    — **identical** values to the worker's. Do **not** set the private key here.
 5. **Restart both.** Confirm the worker logs `evidence signing key loaded from configuration`
-   (not the EPHEMERAL warning).
+   (not an EPHEMERAL warning, and not a startup failure).
 
 ## Verify end-to-end
 

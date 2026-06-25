@@ -84,9 +84,9 @@ class EventRepositoryTest {
     void findById_deserializationError() {
         when(jedis.get("event:evt-bad")).thenReturn("{invalid json}}}");
 
-        Event result = repository.findById("evt-bad");
-
-        assertThat(result).isNull();
+        assertThatThrownBy(() -> repository.findById("evt-bad"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to read event");
     }
 
     @Test

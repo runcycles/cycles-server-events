@@ -2,6 +2,37 @@
 
 ## Implementation History
 
+### 2026-06-25 — operational readiness hardening
+
+Webhook dispatch now uses the same reliable-queue shape as the evidence worker:
+`BLMOVE dispatch:pending -> dispatch:processing`, `LREM` ack only after the
+handler returns, and startup recovery that moves orphaned processing entries back
+to pending. Retry promotion from `dispatch:retry` to `dispatch:pending` is now a
+single Redis Lua operation, removing the crash window between `ZREM` and `LPUSH`.
+
+Delivery, event, subscription, and signing-secret repository failures no longer
+turn Redis/JSON/decrypt problems into normal "missing record" control flow.
+Missing keys still return `null`, but infrastructure and parsing failures throw,
+which leaves claimed delivery IDs unacked for recovery instead of silently
+dropping work. Encrypted webhook secrets now fail closed when
+`WEBHOOK_SECRET_ENCRYPTION_KEY` is missing or wrong; the transport is not called
+with a null secret after decrypt failure.
+
+Operational probes now include a custom Jedis `PING` health indicator. Docker
+health uses `/actuator/health/readiness`, and readiness includes Redis while
+liveness remains process-only. Docs now state that this worker has no public HTTP
+API and 7980 should not be published on an ingress.
+
+CyclesEvidence signing no longer generates an ephemeral key by default when
+`EVIDENCE_SERVER_ID` is set. Production startup requires a configured
+`EVIDENCE_SIGNING_PRIVATE_KEY_HEX` + `EVIDENCE_SIGNING_SIGNER_DID` pair; the
+old throwaway-key path is available only with
+`EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY=true` for development. The event vocabulary
+now includes the full six-event webhook lifecycle (`created`, `updated`,
+`paused`, `resumed`, `deleted`, `disabled`) to prevent validator noise on
+admin-emitted lifecycle events. Release image building now scans a fresh
+`no-cache`/`pull` image and pushes that exact scanned local image.
+
 ### 2026-06-24 — v0.1.25.17: webhook trace logging and log sanitization follow-up
 
 Follow-up to the ops-log-context PR review. `WebhookTransport` now logs the
@@ -246,6 +277,7 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 | 32-byte key length enforced (CryptoService) | PASS |
 | Random IV per encryption (12 bytes) | PASS |
 | Backward-compatible plaintext fallback | PASS |
+| Encrypted webhook secrets fail closed without the decrypt key | PASS |
 | No TODO/FIXME/HACK in source | PASS |
 | Actuators isolated to separate management port (0.1.25.9) | PASS |
 
@@ -267,23 +299,25 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 | events.retention.event-ttl-days | 90 | EVENT_TTL_DAYS | OK |
 | events.retention.delivery-ttl-days | 14 | DELIVERY_TTL_DAYS | OK |
 | events.retention.cleanup-interval-ms | 3600000 | RETENTION_CLEANUP_INTERVAL_MS | OK |
-| spring.task.scheduling.pool.size | 3 | - | OK |
+| spring.task.scheduling.pool.size | 5 | SCHEDULING_POOL_SIZE | OK |
 | management.endpoints.web.exposure.include | health,info,prometheus | - | OK |
 | management.server.port | 9980 | MANAGEMENT_PORT | OK (0.1.25.9: actuators off public port) |
+| management.endpoint.health.group.readiness.include | readinessState,redis | - | OK |
+| cycles.evidence.signing.allow-ephemeral | false | EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY | OK |
 
 ## Dependencies
 
 | Dependency | Version | Purpose |
 |------------|---------|---------|
-| spring-boot-starter-web | 3.5.11 | REST + embedded Tomcat |
-| spring-boot-starter-actuator | 3.5.11 | Health + metrics |
-| jedis | 6.2.0 | Redis client |
+| spring-boot-starter-web | 3.5.15 | Embedded worker/management web server |
+| spring-boot-starter-actuator | 3.5.15 | Health + metrics |
+| jedis | 7.5.0 | Redis client |
 | jackson-datatype-jsr310 | (parent) | Java time serialization |
 | lombok | (parent) | Compile-time only |
-| spring-boot-starter-test | 3.5.11 | Test framework |
+| spring-boot-starter-test | 3.5.15 | Test framework |
 | testcontainers | 1.20.4 | Integration test Redis |
 | micrometer-registry-prometheus | (parent) | Prometheus metrics endpoint |
-| jacoco | 0.8.12 | Coverage enforcement |
+| jacoco | 0.8.15 | Coverage enforcement |
 
 ## Resilience Patterns
 
@@ -293,14 +327,14 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 | Auto-disable webhooks | After N consecutive failures (default 10) |
 | Stale delivery pruning | Deliveries > 24h auto-failed |
 | Redis connection errors | Caught and logged, schedulers continue |
-| Concurrent safety | BRPOP atomic consumption, multi-instance safe |
+| Concurrent safety | BLMOVE claim + LREM ack, multi-instance safe |
 | TTL-based retention | Events 90d, deliveries 14d, ZSET indexes trimmed hourly |
 
 ## Spec Compliance (v0.1.25)
 
 | Requirement | Status |
 |-------------|--------|
-| 41 event types across 6 categories (v0.1.25.18 incl. budget.reset_spent) | PASS |
+| 47 event types across 7 categories (incl. webhook lifecycle and budget.reset_spent) | PASS |
 | Enum serialization (lowercase) | PASS - ActorType, EventCategory, EventType |
 | Status fields use enums | PASS - DeliveryStatus, WebhookStatus (not string literals) |
 | Subscription model fields | PASS - all spec fields present |

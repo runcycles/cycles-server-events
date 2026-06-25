@@ -26,7 +26,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Full Redis round-trip: a source record LPUSH'd to {@code evidence:pending} is
  * picked up by the scheduled {@link EvidenceWorker}, built and signed against a
  * configured Ed25519 key, and PERSISTED to the durable store — this test reads
- * it back from Redis and verifies the signature. Exercises the real BRPOP loop,
+ * it back from Redis and verifies the signature. Exercises the real BLMOVE loop,
  * builder, signer, and store against real Redis (Testcontainers), not mocks.
  *
  * <p>Requires Docker. Excluded from unit runs by the {@code *IntegrationTest}

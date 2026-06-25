@@ -31,14 +31,37 @@ class EvidenceConfigurationConditionTest {
     }
 
     @Test
-    void evidenceSignerBeansArePresentWhenServerIdIsSet() {
+    void evidenceSignerBeansFailWhenServerIdIsSetWithoutSigningKey() {
         contextRunner
                 .withPropertyValues("cycles.evidence.server-id=https://cycles.example.com/v1")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasRootCauseInstanceOf(IllegalStateException.class);
+                    assertThat(rootCause(context.getStartupFailure()))
+                            .hasMessageContaining("evidence signing key is required");
+                });
+    }
+
+    @Test
+    void evidenceSignerBeansArePresentWhenServerIdIsSetAndEphemeralDevModeAllowed() {
+        contextRunner
+                .withPropertyValues(
+                        "cycles.evidence.server-id=https://cycles.example.com/v1",
+                        "cycles.evidence.signing.allow-ephemeral=true")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(LocalEvidenceSigningKey.class);
                     assertThat(context).hasSingleBean(CyclesEvidenceEnvelopeBuilder.class);
                     assertThat(context).hasSingleBean(EvidenceWorker.class);
                 });
+    }
+
+    private static Throwable rootCause(Throwable t) {
+        Throwable current = t;
+        while (current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
     }
 }

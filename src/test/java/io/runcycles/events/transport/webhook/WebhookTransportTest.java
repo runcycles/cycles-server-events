@@ -240,6 +240,36 @@ class WebhookTransportTest {
     }
 
     @Test
+    void deliver_customHeadersCannotDuplicateReservedHeaders() {
+        AtomicReference<List<String>> capturedContentType = new AtomicReference<>();
+        AtomicReference<List<String>> capturedSignature = new AtomicReference<>();
+        AtomicReference<String> capturedCustom = new AtomicReference<>();
+
+        server.createContext("/reserved", exchange -> {
+            capturedContentType.set(exchange.getRequestHeaders().get("Content-Type"));
+            capturedSignature.set(exchange.getRequestHeaders().get("X-Cycles-Signature"));
+            capturedCustom.set(exchange.getRequestHeaders().getFirst("X-Custom-Header"));
+            exchange.sendResponseHeaders(200, 2);
+            try (OutputStream os = exchange.getResponseBody()) {
+                os.write("OK".getBytes());
+            }
+        });
+
+        Subscription sub = testSubscription("/reserved");
+        sub.setHeaders(Map.of(
+                "content-type", "text/plain",
+                "X-Cycles-Signature", "sha256=attacker",
+                "X-Custom-Header", "custom-value"));
+
+        transport.deliver(testEvent(), sub, "real-secret", null);
+
+        assertThat(capturedContentType.get()).containsExactly("application/json");
+        assertThat(capturedSignature.get()).hasSize(1);
+        assertThat(capturedSignature.get().getFirst()).isNotEqualTo("sha256=attacker");
+        assertThat(capturedCustom.get()).isEqualTo("custom-value");
+    }
+
+    @Test
     void deliver_connectionRefused() {
         Subscription sub = Subscription.builder()
                 .subscriptionId("sub-1")

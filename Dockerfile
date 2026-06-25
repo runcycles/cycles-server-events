@@ -22,9 +22,9 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 WORKDIR /app
 COPY --from=build /app/target/cycles-server-events-*.jar app.jar
 USER appuser
-EXPOSE 7980 9980
+EXPOSE 9980
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
-  CMD wget -qO- http://localhost:9980/actuator/health || exit 1
+  CMD wget -qO- http://localhost:9980/actuator/health/readiness || exit 1
 ENTRYPOINT ["java", \
   "-XX:+UseG1GC", \
   "-XX:MaxRAMPercentage=75.0", \

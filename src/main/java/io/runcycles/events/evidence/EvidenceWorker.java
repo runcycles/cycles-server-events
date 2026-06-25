@@ -22,8 +22,8 @@ import java.util.Locale;
  * identity it stamps. cycles-server emits only operational facts
  * ({@code artifact_type}, {@code issued_at_ms}, {@code trace_id}, payload);
  * this worker adds {@code server_id} (config) and {@code signer_did} (the
- * signing key) at build time. Mirrors the webhook {@code DispatchLoop} BRPOP
- * scheduling.
+ * signing key) at build time. Mirrors the webhook {@code DispatchLoop} reliable
+ * queue scheduling.
  */
 @Component
 @ConditionalOnEvidenceConfigured
