@@ -2,6 +2,13 @@
 
 ## Implementation History
 
+### 2026-06-26 — v0.1.25.19: dependency alignment
+
+Upgrades Jedis 7.5.0 to 7.5.2, aligning with `cycles-server` and picking up the
+latest 7.5.x client patches. The application uses stable Jedis APIs. No Spring
+Boot bump (3.5.16 brings no used-dependency or security change). No code,
+Redis-data, webhook-wire, or spec change.
+
 ### 2026-06-25 — v0.1.25.18: operational readiness hardening
 
 Webhook dispatch now uses the same reliable-queue shape as the evidence worker:
@@ -314,7 +321,7 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 |------------|---------|---------|
 | spring-boot-starter-web | 3.5.15 | Embedded worker/management web server |
 | spring-boot-starter-actuator | 3.5.15 | Health + metrics |
-| jedis | 7.5.0 | Redis client |
+| jedis | 7.5.2 | Redis client |
 | jackson-datatype-jsr310 | (parent) | Java time serialization |
 | lombok | (parent) | Compile-time only |
 | spring-boot-starter-test | 3.5.15 | Test framework |
