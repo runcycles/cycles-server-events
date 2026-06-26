@@ -46,6 +46,9 @@ from `cycles-server`, which is a pure HTTP server and doesn't need one.
 
 ### Delivery lifecycle
 
+The `tenant` tag listed here is emitted only when
+`CYCLES_METRICS_TENANT_TAG_ENABLED=true`; production defaults omit it.
+
 | Metric | Tags | What it tells you |
 |---|---|---|
 | `cycles_webhook_delivery_attempts_total` | `tenant`, `event_type` | Every HTTP POST attempt to a subscriber endpoint. Increments before the wire call, so it counts intended attempts (including ones that will fail at the transport layer). |
@@ -80,16 +83,16 @@ Stale deliveries (age > `MAX_DELIVERY_AGE_MS`) increment only
 
 ### Tag-cardinality control
 
-The `tenant` tag is the only high-card dimension. For deployments with
-thousands of tenants, disable it:
+The `tenant` tag is the only high-card dimension. It is disabled by default for
+production cardinality control. Enable it only when per-tenant drill-down is
+worth the additional time series:
 
 ```properties
-cycles.metrics.tenant-tag.enabled=false
+cycles.metrics.tenant-tag.enabled=true
 ```
 
-Same property name and default (`true`) as `cycles-server`. When disabled,
-per-tenant drill-down is lost but the time-series count drops to
-O(event_type × reason × status_code_family) — bounded and small. Flip both
+When disabled, per-tenant drill-down is lost but the time-series count drops to
+O(event_type × reason × status_code_family) — bounded and small. Flip sibling
 services together to keep dashboards consistent.
 
 Null or blank tag values are normalised to the literal sentinel `UNKNOWN`
@@ -263,8 +266,9 @@ Starting point — adjust to your SLA with customers.
 endpoint returning 5xx or being unreachable is *expected* — the service
 retries and eventually auto-disables. It must **not** count against your
 delivery-success SLO if the tenant's endpoint is the culprit. Exclude
-`reason=subscription_inactive` when computing success ratios, and consider
-segmenting by tenant when reporting to detect per-tenant drag.
+`reason=subscription_inactive` when computing success ratios. If
+`CYCLES_METRICS_TENANT_TAG_ENABLED=true`, segment by tenant when reporting to
+detect per-tenant drag.
 
 **Enabling percentile histograms** (opt-in, increases scrape size):
 
@@ -312,7 +316,7 @@ sum(rate(cycles_webhook_delivery_stale_total[5m]))
 sum(rate(cycles_webhook_subscription_auto_disabled_total[1h]))
 ```
 
-**Row 4 — Per-tenant delivery health (top 10 by attempts):**
+**Row 4 — Per-tenant delivery health (requires `CYCLES_METRICS_TENANT_TAG_ENABLED=true`):**
 ```promql
 topk(10, sum by (tenant) (rate(cycles_webhook_delivery_attempts_total[5m])))
 topk(10, sum by (tenant) (rate(cycles_webhook_delivery_failed_total[5m])))
@@ -371,7 +375,7 @@ Contributions of a packaged dashboard JSON are welcome.
 
 The dispatcher claims work with `BLMOVE dispatch:pending -> dispatch:processing`.
 When Redis is unavailable, new deliveries sit in `dispatch:pending`; deliveries
-that were already claimed remain in `dispatch:processing` until ack or startup
+that were already claimed remain in `dispatch:processing` until ack or stale
 recovery.
 
 1. Confirm Redis health: `redis-cli PING`, check disk/memory on the
@@ -382,8 +386,10 @@ recovery.
 3. Once Redis recovers, the service resumes without restart
    (`JedisConnectionException` is caught in the scheduled services; they
    skip the tick and try again on next poll). If a pod crashed while a
-   delivery was in-flight, startup recovery moves `dispatch:processing`
-   entries back to `dispatch:pending`.
+   delivery was in-flight, recovery moves `dispatch:processing` entries back
+   to `dispatch:pending` only after `DISPATCH_PROCESSING_RECOVERY_IDLE_MS`.
+   This avoids requeueing another live replica's active delivery during a
+   rolling deploy.
 4. After recovery, expect a one-time spike on
    `cycles_webhook_delivery_stale_total` for any delivery whose
    `attempted_at` now exceeds `MAX_DELIVERY_AGE_MS` — silence the
@@ -478,13 +484,15 @@ don't fit.
 | `WEBHOOK_SECRET_ENCRYPTION_KEY` | (empty) | Set to a base64-encoded 32-byte key to enable AES-256-GCM for webhook signing secrets at rest. Must match the key configured in `cycles-server-admin`. If empty, secrets are stored/read as plaintext (backward-compatible, not recommended for production). |
 | `dispatch.http.timeout-seconds` | `30` | Lower if one slow subscriber is blocking the queue and you can tolerate more retries. Raise if you have legitimately slow subscribers that need more time. |
 | `dispatch.http.connect-timeout-seconds` | `5` | Rarely needs tuning. Lower if your egress is fast and you want to fail faster on unreachable DNS. |
+| `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | `120000` | Minimum age before an in-flight delivery in `dispatch:processing` is considered stale and requeued. Keep above the max expected webhook HTTP timeout plus Redis write time. |
 | `MAX_DELIVERY_AGE_MS` | `86400000` (24h) | Raise if you legitimately replay multi-day-old events. Lower (with caution) if you'd rather drop old deliveries than burden subscribers with stale data. |
 | `EVENT_TTL_DAYS` | `90` | Matches spec "90 days hot" recommendation. Lower only if Redis memory is tight. |
 | `DELIVERY_TTL_DAYS` | `14` | Two weeks of delivery history. Lower if Redis memory is tight; raise if compliance review needs a longer window. |
 | `RETRY_BATCH_SIZE` | `100` | Max retries requeued per poll cycle. Raise on spiky workloads where retries cluster. |
 | `dispatch.retry.poll-interval-ms` | `5000` | How often `RetryScheduler` drains `dispatch:retry`. Lower for tighter retry latency at the cost of slightly more Redis load. |
 | `RETENTION_CLEANUP_INTERVAL_MS` | `3600000` (1h) | How often `RetentionCleanupService` trims expired ZSET entries. Rarely needs tuning. |
-| `cycles.metrics.tenant-tag.enabled` | `true` | Set `false` if you have thousands of tenants and Prometheus cardinality is stressed. Flip both this service and `cycles-server` together for dashboard consistency. |
+| `CYCLES_METRICS_TENANT_TAG_ENABLED` | `false` | Set `true` only if per-tenant Prometheus drill-down is worth the added cardinality. Flip sibling services together for dashboard consistency. |
+| `JAVA_OPTS` | (empty) | Extra JVM options appended after the Docker image defaults, for example heap sizing or GC logging flags. |
 | `spring.task.scheduling.pool.size` (`SCHEDULING_POOL_SIZE`) | `5` | Size of the scheduled-task executor. `DispatchLoop` always runs a continuous webhook BLMOVE claim loop; `EvidenceWorker` adds a second BLMOVE loop only when `EVIDENCE_SERVER_ID` is set. **Don't lower below 5** when evidence is enabled or webhook retries/cleanup can starve behind the blocking loops (see "Scheduler pool" under the runbook below). |
 | `management.endpoints.web.exposure.include` | `health,info,prometheus` | Add more actuator endpoints if needed, but `prometheus` is the one ops cares about. |
 | `MANAGEMENT_PORT` | `9980` | Separate port actuators bind to — keep this on an internal-only network. This worker has no public HTTP API; do not publish 7980 on an ingress. |
