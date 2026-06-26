@@ -20,6 +20,13 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.19] — 2026-06-26
+
+### Changed
+
+- **Jedis 7.5.0 → 7.5.2** — aligns with `cycles-server` and picks up the latest
+  7.5.x Redis-client patches. No code, Redis-data, webhook-wire, or spec change.
+
 ## [0.1.25.18] — 2026-06-25
 
 ### Changed
