@@ -5,13 +5,13 @@
 ### 2026-06-26 — v0.1.25.20: production readiness follow-up
 
 Addresses the follow-up production/security/ops review against the admin
-deployment hardening pattern. Subscription delivery-state writes now fail closed:
-`updateDeliveryState` returns `false` only when the subscription disappeared, and
-throws on Redis, JSON, or write failures. `DeliveryHandler` now persists
-subscription success/failure state before writing terminal delivery state, and
-emits `webhook.disabled` metrics/audit events only after the `DISABLED` state
-write succeeds. This prevents a claimed delivery from being acked after losing
-auto-disable counters or status.
+deployment hardening pattern. Subscription delivery-state writes now fail
+closed: `updateDeliveryState` returns `false` only when the subscription
+disappeared, and throws on Redis, JSON, or write failures. `DeliveryHandler`
+now persists subscription success/failure state before writing terminal
+delivery state, and emits `webhook.disabled` metrics/audit events only after
+the `DISABLED` state write succeeds. This prevents a claimed delivery from
+being acked after losing auto-disable counters or status.
 
 Webhook recovery is now age-gated for multi-replica deployments. Claims add a
 timestamp in `dispatch:processing:claimed_at`; ack removes both the processing
