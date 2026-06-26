@@ -46,6 +46,9 @@ class DeliveryHandlerTest {
         validator = new EventPayloadValidator(metrics);
         handler = new DeliveryHandler(deliveryRepository, eventRepository,
                 subscriptionRepository, queueRepository, transport, metrics, validator, 86400000L);
+        lenient().when(subscriptionRepository.updateDeliveryState(
+                anyString(), anyInt(), any(), any(), any(), any()))
+                .thenReturn(true);
     }
 
     private double counter(String name, String... tags) {
@@ -137,6 +140,27 @@ class DeliveryHandlerTest {
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
         assertThat(delivery.getAttempts()).isEqualTo(3);
+    }
+
+    @Test
+    void handle_successfulDelivery_subscriptionStateFailureDoesNotPersistTerminalDelivery() {
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
+        when(transport.deliver(any(), any(), eq("secret"), any())).thenReturn(successResult());
+        when(subscriptionRepository.updateDeliveryState(
+                eq("sub-1"), eq(0), any(), any(), isNull(), isNull()))
+                .thenThrow(new IllegalStateException("redis down"));
+
+        assertThatThrownBy(() -> handler.handle("del-1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("redis down");
+
+        verify(deliveryRepository, never()).update(any());
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.PENDING);
     }
 
     // --- Delivery not found / wrong status ---
@@ -854,6 +878,32 @@ class DeliveryHandlerTest {
         // Metric still incremented
         assertThat(counter(CyclesMetrics.SUBSCRIPTION_AUTO_DISABLED,
                 "tenant", "t-1", "reason", "consecutive_failures")).isEqualTo(1.0);
+    }
+
+    @Test
+    void autoDisable_subscriptionStateFailureDoesNotMarkFailedOrEmitDisabledEvent() {
+        Delivery delivery = pendingDelivery();
+        delivery.setAttempts(5);
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        sub.setConsecutiveFailures(9);
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
+        when(subscriptionRepository.updateDeliveryState(
+                eq("sub-1"), eq(10), any(), isNull(), any(), eq(WebhookStatus.DISABLED)))
+                .thenThrow(new IllegalStateException("redis down"));
+
+        assertThatThrownBy(() -> handler.handle("del-1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("redis down");
+
+        verify(eventRepository, never()).save(any());
+        verify(deliveryRepository, never()).update(any());
+        assertThat(counter(CyclesMetrics.SUBSCRIPTION_AUTO_DISABLED,
+                "tenant", "t-1", "reason", "consecutive_failures")).isZero();
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.PENDING);
     }
 
     @Test

@@ -25,9 +25,4 @@ USER appuser
 EXPOSE 9980
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
   CMD wget -qO- http://localhost:9980/actuator/health/readiness || exit 1
-ENTRYPOINT ["java", \
-  "-XX:+UseG1GC", \
-  "-XX:MaxRAMPercentage=75.0", \
-  "-XX:+HeapDumpOnOutOfMemoryError", \
-  "-XX:HeapDumpPath=/tmp/heapdump.hprof", \
-  "-jar", "app.jar"]
+ENTRYPOINT ["sh", "-c", "exec java -XX:+UseG1GC -XX:MaxRAMPercentage=75.0 -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/tmp/heapdump.hprof ${JAVA_OPTS:-} -jar app.jar"]

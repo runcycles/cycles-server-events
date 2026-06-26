@@ -2,6 +2,32 @@
 
 ## Implementation History
 
+### 2026-06-26 — v0.1.25.20: production readiness follow-up
+
+Addresses the follow-up production/security/ops review against the admin
+deployment hardening pattern. Subscription delivery-state writes now fail
+closed: `updateDeliveryState` returns `false` only when the subscription
+disappeared, and throws on Redis, JSON, or write failures. `DeliveryHandler`
+now persists subscription success/failure state before writing terminal
+delivery state, and emits `webhook.disabled` metrics/audit events only after
+the `DISABLED` state write succeeds. This prevents a claimed delivery from
+being acked after losing auto-disable counters or status.
+
+Webhook recovery is now age-gated for multi-replica deployments. Claims add a
+timestamp in `dispatch:processing:claimed_at`; ack removes both the processing
+list entry and timestamp; recovery requeues only entries older than
+`DISPATCH_PROCESSING_RECOVERY_IDLE_MS` (default 120s). Entries first observed
+without a timestamp get a full idle window before recovery, closing the
+BLMOVE-to-ZADD race without requeueing another live replica's active delivery
+during rolling deploys.
+
+Deployment defaults now match the admin production hardening posture more
+closely: the Docker entrypoint uses `exec java ... ${JAVA_OPTS:-} -jar app.jar`,
+tenant-labelled custom metrics default off with
+`CYCLES_METRICS_TENANT_TAG_ENABLED=false`, and docs/config tables document the
+new recovery and JVM tuning knobs. Version bump: `pom.xml` `<revision>` ->
+`0.1.25.20`; fallback webhook `User-Agent` and README examples are aligned.
+
 ### 2026-06-26 — v0.1.25.19: dependency alignment
 
 Upgrades Jedis 7.5.0 to 7.5.2, aligning with `cycles-server` and picking up the
@@ -301,6 +327,7 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 | redis.password | (empty) | REDIS_PASSWORD | OK |
 | webhook.secret.encryption-key | (empty) | WEBHOOK_SECRET_ENCRYPTION_KEY | OK |
 | dispatch.pending.timeout-seconds | 5 | - | OK |
+| dispatch.processing.recovery-idle-ms | 120000 | DISPATCH_PROCESSING_RECOVERY_IDLE_MS | OK |
 | dispatch.retry.poll-interval-ms | 5000 | - | OK |
 | dispatch.retry.batch-size | 100 | RETRY_BATCH_SIZE | OK |
 | dispatch.http.timeout-seconds | 30 | - | OK |
@@ -310,6 +337,7 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 | events.retention.delivery-ttl-days | 14 | DELIVERY_TTL_DAYS | OK |
 | events.retention.cleanup-interval-ms | 3600000 | RETENTION_CLEANUP_INTERVAL_MS | OK |
 | spring.task.scheduling.pool.size | 5 | SCHEDULING_POOL_SIZE | OK |
+| cycles.metrics.tenant-tag.enabled | false | CYCLES_METRICS_TENANT_TAG_ENABLED | OK |
 | management.endpoints.web.exposure.include | health,info,prometheus | - | OK |
 | management.server.port | 9980 | MANAGEMENT_PORT | OK (0.1.25.9: actuators off public port) |
 | management.endpoint.health.group.readiness.include | readinessState,redis | - | OK |
@@ -337,7 +365,7 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 | Auto-disable webhooks | After N consecutive failures (default 10) |
 | Stale delivery pruning | Deliveries > 24h auto-failed |
 | Redis connection errors | Caught and logged, schedulers continue |
-| Concurrent safety | BLMOVE claim + LREM ack, multi-instance safe |
+| Concurrent safety | BLMOVE claim + LREM ack; stale recovery age-gated by `dispatch:processing:claimed_at` |
 | TTL-based retention | Events 90d, deliveries 14d, ZSET indexes trimmed hourly |
 
 ## Spec Compliance (v0.1.25)

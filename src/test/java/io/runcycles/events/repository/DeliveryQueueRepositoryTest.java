@@ -40,6 +40,7 @@ class DeliveryQueueRepositoryTest {
         String result = repository.claimPending(5);
 
         assertThat(result).isEqualTo("del-1");
+        verify(jedis).zadd(eq("dispatch:processing:claimed_at"), anyDouble(), eq("del-1"));
     }
 
     @Test
@@ -56,17 +57,39 @@ class DeliveryQueueRepositoryTest {
     void ack_removesDeliveryFromProcessing() {
         repository.ack("del-1");
 
-        verify(jedis).lrem("dispatch:processing", 1L, "del-1");
+        verify(jedis).eval(anyString(),
+                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at")),
+                eq(List.of("del-1")));
     }
 
     @Test
-    void recoverProcessing_movesAllInFlightBackToPending() {
-        when(jedis.lmove("dispatch:processing", "dispatch:pending",
-                ListDirection.LEFT, ListDirection.RIGHT)).thenReturn("del-1", "del-2", null);
+    void recoverStaleProcessing_marksUntrackedEntriesWithoutRequeueing() {
+        when(jedis.lrange("dispatch:processing", 0, -1)).thenReturn(List.of("del-1"));
+        when(jedis.zscore("dispatch:processing:claimed_at", "del-1")).thenReturn(null);
 
-        long recovered = repository.recoverProcessing();
+        long recovered = repository.recoverStaleProcessing(10_000L, 120_000L);
 
-        assertThat(recovered).isEqualTo(2L);
+        assertThat(recovered).isZero();
+        verify(jedis).zadd("dispatch:processing:claimed_at", 10_000L, "del-1");
+        verify(jedis, never()).eval(anyString(), anyList(), anyList());
+    }
+
+    @Test
+    void recoverStaleProcessing_requeuesOnlyIdleEntries() {
+        when(jedis.lrange("dispatch:processing", 0, -1)).thenReturn(List.of("fresh", "stale"));
+        when(jedis.zscore("dispatch:processing:claimed_at", "fresh")).thenReturn(9_500.0);
+        when(jedis.zscore("dispatch:processing:claimed_at", "stale")).thenReturn(1_000.0);
+        when(jedis.eval(anyString(),
+                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at", "dispatch:pending")),
+                eq(List.of("stale")))).thenReturn(1L);
+
+        long recovered = repository.recoverStaleProcessing(10_000L, 5_000L);
+
+        assertThat(recovered).isEqualTo(1L);
+        verify(jedis, never()).eval(anyString(), anyList(), eq(List.of("fresh")));
+        verify(jedis).eval(anyString(),
+                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at", "dispatch:pending")),
+                eq(List.of("stale")));
     }
 
     @Test

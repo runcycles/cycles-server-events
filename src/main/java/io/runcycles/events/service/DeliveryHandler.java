@@ -156,15 +156,15 @@ public class DeliveryHandler {
     }
 
     private void handleSuccess(Delivery delivery, Subscription sub, TransportResult result) {
+        Instant now = Instant.now();
+        subscriptionRepository.updateDeliveryState(
+                sub.getSubscriptionId(), 0, now, now, null, null);
+
         delivery.setStatus(DeliveryStatus.SUCCESS);
         delivery.setResponseStatus(result.getStatusCode());
         delivery.setResponseTimeMs(result.getLatencyMs());
         delivery.setCompletedAt(Instant.now());
         deliveryRepository.update(delivery);
-
-        Instant now = Instant.now();
-        subscriptionRepository.updateDeliveryState(
-                sub.getSubscriptionId(), 0, now, now, null, null);
 
         metrics.recordDeliverySuccess(sub.getTenantId(), delivery.getEventType(),
                 result.getStatusCode(), result.getLatencyMs());
@@ -183,8 +183,8 @@ public class DeliveryHandler {
         metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(), reason, result.getLatencyMs());
 
         if (delivery.getAttempts() > maxRetries) {
-            markFailed(delivery, result.getErrorMessage());
             incrementConsecutiveFailures(sub, delivery);
+            markFailed(delivery, result.getErrorMessage());
             return;
         }
 
@@ -234,21 +234,19 @@ public class DeliveryHandler {
         WebhookStatus newStatus = null;
         if (failures >= disableAfter) {
             newStatus = WebhookStatus.DISABLED;
-            // Safe-once: handle() gates on status == ACTIVE at line 106-108,
-            // so once updateDeliveryState persists DISABLED below, subsequent
-            // deliveries short-circuit before reaching this path — the metric
-            // fires exactly once per auto-disable transition.
+        }
+
+        Instant now = Instant.now();
+        boolean updated = subscriptionRepository.updateDeliveryState(
+                sub.getSubscriptionId(), failures, now, null, now, newStatus);
+
+        if (updated && newStatus == WebhookStatus.DISABLED) {
+            // Safe-once: handle() gates on status == ACTIVE before this path, so once
+            // updateDeliveryState persists DISABLED, subsequent deliveries short-circuit.
             metrics.recordSubscriptionAutoDisabled(sub.getTenantId(), REASON_CONSECUTIVE_FAILURES);
             LOG.warn("Webhook subscription auto-disabled: subscription_id={} tenant_id={} failures={} disable_after={} delivery_id={} event_id={} trace_id={}",
                     safe(sub.getSubscriptionId()), safe(sub.getTenantId()), failures, disableAfter,
                     safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(delivery.getTraceId()));
-        }
-
-        Instant now = Instant.now();
-        subscriptionRepository.updateDeliveryState(
-                sub.getSubscriptionId(), failures, now, null, now, newStatus);
-
-        if (newStatus == WebhookStatus.DISABLED) {
             emitWebhookDisabled(sub, delivery, previousStatus);
         }
     }

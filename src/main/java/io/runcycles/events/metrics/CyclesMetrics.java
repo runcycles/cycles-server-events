@@ -20,9 +20,9 @@ import java.util.List;
  * to {@code cycles_webhook_*_total} on scrape. Tag choices prioritise
  * operational signal while keeping cardinality bounded: the only inherently
  * high-card tag is {@code tenant}, toggleable via
- * {@code cycles.metrics.tenant-tag.enabled} (default {@code true}) — same
- * semantics as cycles-server so deployments can flip it consistently across
- * services when the per-tenant series count would stress Prometheus.
+ * {@code cycles.metrics.tenant-tag.enabled} (default {@code false}) so
+ * production Prometheus cardinality stays bounded. Deployments that need
+ * per-tenant drill-down can enable it consistently across services.
  *
  * <p>Null or blank tag values are normalised to the sentinel
  * {@link #TAG_UNKNOWN} ({@code "UNKNOWN"}) to keep series names stable and
@@ -62,7 +62,7 @@ public class CyclesMetrics {
     private final boolean tenantTagEnabled;
 
     public CyclesMetrics(MeterRegistry registry,
-                         @Value("${cycles.metrics.tenant-tag.enabled:true}") boolean tenantTagEnabled) {
+                         @Value("${cycles.metrics.tenant-tag.enabled:false}") boolean tenantTagEnabled) {
         this.registry = registry;
         this.tenantTagEnabled = tenantTagEnabled;
     }

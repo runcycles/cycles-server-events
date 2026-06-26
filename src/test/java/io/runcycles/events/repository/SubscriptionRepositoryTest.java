@@ -186,16 +186,19 @@ class SubscriptionRepositoryTest {
     void updateDeliveryState_subscriptionNotFound() {
         when(jedis.get("webhook:sub-missing")).thenReturn(null);
 
-        repository.updateDeliveryState("sub-missing", 1, Instant.now(), null, Instant.now(), null);
+        boolean updated = repository.updateDeliveryState("sub-missing", 1, Instant.now(), null, Instant.now(), null);
 
+        assertThat(updated).isFalse();
         verify(jedis, never()).set(eq("webhook:sub-missing"), anyString());
     }
 
     @Test
-    void updateDeliveryState_redisError_doesNotThrow() {
+    void updateDeliveryState_redisError_throws() {
         when(jedis.get("webhook:sub-fail")).thenThrow(new RuntimeException("redis error"));
 
-        // Should not throw
-        repository.updateDeliveryState("sub-fail", 1, Instant.now(), null, Instant.now(), null);
+        assertThatThrownBy(() ->
+                repository.updateDeliveryState("sub-fail", 1, Instant.now(), null, Instant.now(), null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to update webhook subscription delivery state");
     }
 }

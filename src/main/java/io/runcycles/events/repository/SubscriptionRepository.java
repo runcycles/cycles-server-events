@@ -58,16 +58,16 @@ public class SubscriptionRepository {
      * This prevents overwriting admin config changes (url, headers, event_types, etc.)
      * that may have been applied between our initial read and this write.
      */
-    public void updateDeliveryState(String subscriptionId, int consecutiveFailures,
-                                     Instant lastTriggeredAt, Instant lastSuccessAt,
-                                     Instant lastFailureAt, WebhookStatus status) {
+    public boolean updateDeliveryState(String subscriptionId, int consecutiveFailures,
+                                       Instant lastTriggeredAt, Instant lastSuccessAt,
+                                       Instant lastFailureAt, WebhookStatus status) {
         try (Jedis jedis = jedisPool.getResource()) {
             String key = "webhook:" + subscriptionId;
             String existing = jedis.get(key);
             if (existing == null) {
                 LOG.warn("Webhook subscription not found during delivery-state update: subscription_id={} status={} consecutive_failures={} last_triggered_at={} last_success_at={} last_failure_at={}",
                         safe(subscriptionId), status, consecutiveFailures, lastTriggeredAt, lastSuccessAt, lastFailureAt);
-                return;
+                return false;
             }
             ObjectNode node = (ObjectNode) objectMapper.readTree(existing);
             node.put("consecutive_failures", consecutiveFailures);
@@ -84,9 +84,11 @@ public class SubscriptionRepository {
                 node.put("status", status.name());
             }
             jedis.set(key, objectMapper.writeValueAsString(node));
+            return true;
         } catch (Exception e) {
             LOG.error("Failed to update webhook subscription delivery state: subscription_id={} status={} consecutive_failures={} last_triggered_at={} last_success_at={} last_failure_at={}",
                     safe(subscriptionId), status, consecutiveFailures, lastTriggeredAt, lastSuccessAt, lastFailureAt, e);
+            throw new IllegalStateException("Failed to update webhook subscription delivery state", e);
         }
     }
 }

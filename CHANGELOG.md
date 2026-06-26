@@ -20,6 +20,32 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.20] — 2026-06-26
+
+### Changed
+
+- **Webhook processing recovery is now multi-replica safe.** Claimed delivery IDs
+  are timestamped in `dispatch:processing:claimed_at`, and recovery only requeues
+  `dispatch:processing` entries older than
+  `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` (default 120s). Rolling deploys no
+  longer drain another live replica's active in-flight delivery.
+- Docker entrypoint now uses `exec java ... ${JAVA_OPTS:-} -jar app.jar`, so
+  operators can append JVM flags without replacing the image entrypoint.
+- Tenant-labelled webhook metrics now default off via
+  `CYCLES_METRICS_TENANT_TAG_ENABLED=false`; enable only when per-tenant
+  Prometheus drill-down is worth the cardinality.
+
+### Fixed
+
+- Subscription delivery-state write failures now fail closed. Redis/JSON/write
+  errors from `updateDeliveryState` throw, leaving the claimed delivery unacked
+  instead of marking a delivery terminal while silently losing subscription
+  counters or auto-disable state.
+- `webhook.disabled` audit events and auto-disable metrics are emitted only
+  after the `DISABLED` subscription state write succeeds.
+- Synced the fallback webhook `User-Agent` and README examples to
+  `cycles-server-events/0.1.25.20`.
+
 ## [0.1.25.19] — 2026-06-26
 
 ### Changed

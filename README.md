@@ -93,6 +93,7 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `REDIS_PASSWORD` | (empty) | Redis password |
 | `WEBHOOK_SECRET_ENCRYPTION_KEY` | (empty) | AES-256-GCM key for signing secret encryption (base64-encoded 32 bytes). If empty, secrets stored/read as plaintext (backward compatible). |
 | `dispatch.pending.timeout-seconds` | 5 | BLMOVE blocking timeout (seconds) |
+| `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | 120000 | Minimum age before an in-flight `dispatch:processing` delivery is considered stale and requeued. Keep above the max expected webhook HTTP + Redis write time. |
 | `dispatch.retry.poll-interval-ms` | 5000 | Retry queue poll interval (ms) |
 | `RETRY_BATCH_SIZE` | 100 | Max retries to requeue per poll cycle |
 | `dispatch.http.timeout-seconds` | 30 | HTTP request timeout for webhook delivery |
@@ -101,6 +102,8 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `EVENT_TTL_DAYS` | 90 | Redis TTL for `event:{id}` keys (days). Spec: "90 days hot." |
 | `DELIVERY_TTL_DAYS` | 14 | Redis TTL for `delivery:{id}` keys (days). |
 | `RETENTION_CLEANUP_INTERVAL_MS` | 3600000 | How often to trim expired ZSET index entries (ms). Default: 1 hour. |
+| `CYCLES_METRICS_TENANT_TAG_ENABLED` | false | Include tenant IDs as Prometheus metric labels. Keep false in production unless per-tenant drill-down is worth the cardinality. |
+| `JAVA_OPTS` | (empty) | Extra JVM options appended after image defaults by the Docker entrypoint. |
 | `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. Blank disables the evidence signer. When set, it **must be byte-identical to `cycles-server`'s** value (incl. the `/v1` base) or the worker's id cross-check dead-letters. See the [enablement runbook](docs/evidence-identity-enablement.md). |
 | `EVIDENCE_SIGNING_SIGNER_DID` | (empty) | Public Ed25519 key (64 hex), the public half of `EVIDENCE_SIGNING_PRIVATE_KEY_HEX`, **identical to `cycles-server`'s** value. |
 | `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | (empty) | **Secret** — Ed25519 seed (64 hex) this service signs with; lives **only** here. Required when `EVIDENCE_SERVER_ID` is set unless ephemeral dev mode is explicitly allowed; setting only one of the signing pair fails startup. |
@@ -161,7 +164,7 @@ def verify(body: bytes, secret: str, signature: str) -> bool:
 | `X-Cycles-Signature` | `sha256=<hex>` | HMAC-SHA256 of body (if signing secret configured) |
 | `X-Cycles-Event-Id` | `evt_abc123...` | For deduplication (at-least-once delivery) |
 | `X-Cycles-Event-Type` | `budget.exhausted` | Event type for routing |
-| `User-Agent` | `cycles-server-events/0.1.25.18` | Service identifier |
+| `User-Agent` | `cycles-server-events/0.1.25.20` | Service identifier |
 | `X-Cycles-Trace-Id` | `<32-hex-lowercase>` | W3C trace-id (spec v0.1.25.27) — always present |
 | `traceparent` | `00-<trace-id>-<16-hex-span>-<flags>` | W3C Trace Context v00 — always present. `<flags>` preserves upstream sampling when `WebhookDelivery.traceparent_inbound_valid=true` (spec v0.1.25.28), else `01` |
 | `X-Request-Id` | `<request-id>` | Originating HTTP request id — present when `event.request_id` is populated |
@@ -202,6 +205,7 @@ PENDING ──HTTP 2xx──► SUCCESS (reset consecutive_failures)
 |-----|------|-----------|---------|-------------|
 | `dispatch:pending` | LIST | Admin (LPUSH), Events retry scheduler (LPUSH) | Events (BLMOVE) | Delivery IDs awaiting processing |
 | `dispatch:processing` | LIST | Events (BLMOVE) | Events (LREM/recovery) | In-flight delivery IDs claimed but not yet acked |
+| `dispatch:processing:claimed_at` | ZSET | Events (ZADD/ZREM) | Events recovery | Claim timestamps used to recover only stale in-flight deliveries |
 | `dispatch:retry` | ZSET | Events (ZADD) | Events (ZRANGEBYSCORE) | Retry queue (score = timestamp) |
 | `delivery:{id}` | STRING | Admin (SET) | Events (GET/SET) | Delivery record JSON |
 | `event:{id}` | STRING | Admin (SET) | Events (GET) | Event record JSON |
@@ -210,7 +214,7 @@ PENDING ──HTTP 2xx──► SUCCESS (reset consecutive_failures)
 
 ### Concurrent safety
 
-Multiple events service instances can safely claim from the same `dispatch:pending` list. Each claim atomically moves one delivery ID to `dispatch:processing`; the worker removes it from processing only after the delivery state or retry schedule is durable. On startup, orphaned processing entries are moved back to pending for reprocessing.
+Multiple events service instances can safely claim from the same `dispatch:pending` list. Each claim atomically moves one delivery ID to `dispatch:processing`; the worker removes it from processing only after delivery, subscription, and retry state is durable. Recovery is age-gated: only entries that remain in `dispatch:processing` longer than `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` are moved back to pending, so rolling deploys do not requeue another live replica's active delivery.
 
 ### TTL and retention
 
@@ -221,7 +225,7 @@ Multiple events service instances can safely claim from the same `dispatch:pendi
 | `events:{tenantId}`, `events:_all` | N/A (ZSET) | Hourly trim via RetentionCleanupService |
 | `deliveries:{subId}` | N/A (ZSET) | Hourly trim via RetentionCleanupService |
 | `dispatch:pending` | Self-draining | Claimed by BLMOVE into `dispatch:processing` |
-| `dispatch:processing` | Self-draining | Acked by LREM; recovered to pending on startup |
+| `dispatch:processing` | Self-draining | Acked by LREM; stale entries recovered to pending after the idle window |
 | `dispatch:retry` | Self-draining | Entries move to pending when ready |
 
 ### Resilience: events service down
@@ -233,7 +237,7 @@ If `cycles-server-events` is not running or not deployed:
 3. **Redis memory is bounded** — TTLs ensure keys auto-expire even if never consumed
 4. **When the events service restarts:**
    - Stale deliveries (older than `MAX_DELIVERY_AGE_MS`, default 24h) are immediately marked FAILED — they won't be delivered late
-   - Orphaned in-flight deliveries in `dispatch:processing` are recovered to `dispatch:pending`
+   - Orphaned in-flight deliveries in `dispatch:processing` are recovered to `dispatch:pending` after `DISPATCH_PROCESSING_RECOVERY_IDLE_MS`
    - Fresh deliveries are processed normally via BLMOVE claim + ack
    - RetentionCleanupService trims orphaned ZSET index entries hourly
 5. **No data loss for events** — event records persist in Redis for 90 days regardless of delivery status
