@@ -1,6 +1,5 @@
 package io.runcycles.events.model;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 public enum ActorType {
@@ -20,11 +19,18 @@ public enum ActorType {
         return value;
     }
 
-    @JsonCreator
+    /**
+     * Local-vocabulary resolution helper — NOT a Jackson creator.
+     * {@code Actor.type} is an open string on the wire (see
+     * {@code Event.category} for the rationale: producer-controlled, additive,
+     * and re-serialized verbatim into the outbound webhook body). Returns
+     * {@code null} for unknown values.
+     */
     public static ActorType fromValue(String value) {
+        if (value == null) return null;
         for (ActorType t : values()) {
             if (t.value.equals(value)) return t;
         }
-        throw new IllegalArgumentException("Unknown actor type: " + value);
+        return null;
     }
 }

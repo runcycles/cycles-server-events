@@ -2,6 +2,49 @@
 
 ## Implementation History
 
+### 2026-07-03 — v0.1.25.21: spec-conformance audit + retry-contract and enum-tolerance fixes
+
+End-to-end audit of the dispatcher against cycles-protocol-v0.yaml's WEBHOOK
+EVENT GUIDANCE and the governance spec's Event/WebhookDelivery schemas. The
+outbound wire contract verified conformant by hand: all required delivery
+headers with exact construction (traceparent `00-{trace}-{fresh-span}-{flags}`
+with the inbound-flags preservation rule, HMAC `sha256=`+lowercase-hex over
+raw body bytes), retry defaults (5 retries, 1s ×2.0 capped 60s) with
+per-subscription overrides, auto-disable at 10 consecutive failures emitting
+`webhook.disabled`, stale auto-fail at 24h, retention TTLs (90d events / 14d
+deliveries / hourly ZSET trim), and the v0.1.25.28 trace fields on Delivery.
+
+Three conformance gaps found and fixed (313 tests green, JaCoCo ≥95%):
+
+1. **`system.webhook_delivery_failed` was never emitted** — the spec's retry
+   contract requires it when retries are exhausted; the enum value existed
+   unused. Now emitted from the give-up branch with an `EventDataSystem`
+   payload and `tenant_id=__system__`. Save-only, loop-safe, best-effort.
+2. **Closed `category`/`actor.type` enums were poison-pills.** Throwing
+   `@JsonCreator`s failed the whole delivery on unrecognized values — the
+   defect class spec v0.1.25.34 (`EventCategory`+`webhook`) demonstrated —
+   and burned the subscription's consecutive-failure budget on events the
+   subscriber never got. First cut mapped unknowns to null, but review
+   caught that this corrupts the outbound payload instead: the dispatcher
+   re-serializes the same `Event` object as the webhook body, so a nulled
+   `category` (a required field) would reach subscribers. Final shape:
+   both fields are OPEN STRINGS on the wire, mirroring `event_type` —
+   unknown values round-trip verbatim to subscribers; enum resolution is a
+   local-vocabulary helper only, and unknown categories surface as a new
+   `unknown_category` validator WARN + metric. Also added the four
+   `*_via_tenant_cascade` EventTypes (spec v0.1.25.35) so cascade events
+   validate cleanly instead of warning as unknown.
+3. **`request_id` propagation** — dispatcher-emitted events are causally
+   downstream of the originating HTTP request, so they now carry the
+   originating event's `request_id` per CORRELATION AND TRACING.
+
+Flagged, not changed: no delivery-time SSRF/URL re-validation (admin validates
+at subscription create/update; delivery-time re-checks would need the shared
+`WebhookSecurityConfig` and are a behavior change — tracked as a follow-up
+decision); per-tenant ordering holds for initial dispatch (single-threaded
+global FIFO) but retries re-enter out of order, which any backoff scheme
+implies — noted as a spec ambiguity rather than "fixed".
+
 ### 2026-06-26 — v0.1.25.20: production readiness follow-up
 
 Addresses the follow-up production/security/ops review against the admin

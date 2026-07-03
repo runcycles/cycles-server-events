@@ -20,6 +20,52 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.21] — 2026-07-03
+
+### Added
+
+- **`system.webhook_delivery_failed` meta-alert now emitted** when a delivery
+  exhausts all retries, closing the gap against the protocol spec's retry
+  contract ("delivery marked FAILED, system.webhook_delivery_failed event
+  emitted"). Payload follows the admin spec's `EventDataSystem` shape
+  (`component=webhook_dispatcher`, `severity=warning`, subscription/delivery
+  context in `details`) with `tenant_id=__system__`. Save-only (no delivery
+  fan-out happens in this service), so a failing meta-event cannot loop;
+  emit failures are swallowed and logged.
+- The four `*_via_tenant_cascade` EventTypes (spec v0.1.25.35) added to the
+  local vocabulary, so cascade events emitted by the admin tenant-close
+  cascade no longer trip the `unknown_event_type` payload-validation warning.
+- Dispatcher-emitted events (`webhook.disabled`,
+  `system.webhook_delivery_failed`) now carry the originating event's
+  `request_id`, per the CORRELATION AND TRACING contract's requirement that
+  events causally downstream of an HTTP request propagate `request_id`
+  across queue boundaries.
+
+### Fixed
+
+- **Unknown `category` / `actor.type` values no longer poison deliveries —
+  and are delivered verbatim.** Both fields previously deserialized through
+  closed enums whose `@JsonCreator`s threw on unrecognized values, so an
+  event carrying a newer category (exactly what happened when spec
+  v0.1.25.34 added `webhook`) or an actor type this service doesn't model
+  (e.g. the admin plane's `admin_on_behalf_of`) failed deserialization,
+  errored the delivery, and counted against the subscription's
+  consecutive-failure budget — a poison-pill that could auto-disable
+  innocent subscriptions. Because the dispatcher re-serializes the same
+  `Event` object as the outbound webhook body, a null-on-unknown mapping
+  would have corrupted the delivered payload instead; both fields are now
+  OPEN STRINGS on the wire (like `event_type` always was), so subscribers
+  receive exactly what the producer wrote. Enum resolution remains as a
+  local-vocabulary helper; an unrecognized category surfaces as a new
+  `unknown_category` payload-validation WARN + metric, observability-only.
+
+### Compatibility
+
+- Additive only: one new emitted event type, `request_id` now populated on
+  dispatcher-emitted events, and more tolerant inbound enum parsing. No
+  outbound webhook wire-format, signature, Redis key/queue, or retry-schedule
+  change.
+
 ## [0.1.25.20] — 2026-06-26
 
 ### Changed

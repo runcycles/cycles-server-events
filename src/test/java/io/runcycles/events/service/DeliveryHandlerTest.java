@@ -71,7 +71,7 @@ class DeliveryHandlerTest {
         return Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -697,7 +697,7 @@ class DeliveryHandlerTest {
         Event malformed = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .build();
         when(eventRepository.findById("evt-1")).thenReturn(malformed);
@@ -792,11 +792,15 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
+        // Two emits on this path: webhook.disabled (auto-disable) and
+        // system.webhook_delivery_failed (retries exhausted).
         ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
-        verify(eventRepository).save(captor.capture());
-        Event emitted = captor.getValue();
+        verify(eventRepository, times(2)).save(captor.capture());
+        Event emitted = captor.getAllValues().stream()
+                .filter(e -> "webhook.disabled".equals(e.getEventType()))
+                .findFirst().orElseThrow();
         assertThat(emitted.getEventType()).isEqualTo("webhook.disabled");
-        assertThat(emitted.getCategory()).isEqualTo(EventCategory.WEBHOOK);
+        assertThat(emitted.getCategory()).isEqualTo("webhook");
         assertThat(emitted.getTenantId()).isEqualTo("t-1");
         // scope null matches admin's WebhookAdminController.emitWebhookLifecycleEvent
         // convention on all webhook.* lifecycle emits.
@@ -804,7 +808,7 @@ class DeliveryHandlerTest {
         assertThat(emitted.getSource()).isEqualTo("cycles-events");
         assertThat(emitted.getCorrelationId()).isEqualTo("webhook_auto_disable:sub-1:del-1");
         assertThat(emitted.getActor()).isNotNull();
-        assertThat(emitted.getActor().getType()).isEqualTo(ActorType.SYSTEM);
+        assertThat(emitted.getActor().getType()).isEqualTo("system");
         assertThat(emitted.getData()).containsEntry("subscription_id", "sub-1");
         assertThat(emitted.getData()).containsEntry("tenant_id", "t-1");
         assertThat(emitted.getData()).containsEntry("previous_status", "ACTIVE");
@@ -830,9 +834,10 @@ class DeliveryHandlerTest {
         handler.handle("del-1");
 
         ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
-        verify(eventRepository).save(captor.capture());
-        assertThat(captor.getValue().getTraceId())
-                .isEqualTo("0123456789abcdef0123456789abcdef");
+        verify(eventRepository, times(2)).save(captor.capture());
+        assertThat(captor.getAllValues())
+                .allSatisfy(e -> assertThat(e.getTraceId())
+                        .isEqualTo("0123456789abcdef0123456789abcdef"));
     }
 
     @Test
@@ -849,7 +854,122 @@ class DeliveryHandlerTest {
 
         handler.handle("del-1");
 
+        // Retries exhausted still emits the delivery-failed meta-alert,
+        // but no webhook.disabled below the auto-disable threshold.
+        ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
+        verify(eventRepository).save(captor.capture());
+        assertThat(captor.getValue().getEventType())
+                .isEqualTo("system.webhook_delivery_failed");
+    }
+
+    // --- system.webhook_delivery_failed emit on retries exhausted (protocol spec retry contract) ---
+
+    @Test
+    void retriesExhausted_emitsSystemWebhookDeliveryFailed_withConformingPayload() {
+        Delivery delivery = pendingDelivery();
+        delivery.setAttempts(5); // becomes 6 > maxRetries(5), exhausts retries
+        delivery.setTraceId("0123456789abcdef0123456789abcdef");
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        sub.setConsecutiveFailures(0); // stays far below auto-disable
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+        ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
+        verify(eventRepository).save(captor.capture());
+        Event emitted = captor.getValue();
+        assertThat(emitted.getEventType()).isEqualTo("system.webhook_delivery_failed");
+        assertThat(emitted.getCategory()).isEqualTo("system");
+        // System events use the __system__ sentinel per the standard event payload schema
+        assertThat(emitted.getTenantId()).isEqualTo("__system__");
+        assertThat(emitted.getSource()).isEqualTo("cycles-events");
+        assertThat(emitted.getActor()).isNotNull();
+        assertThat(emitted.getActor().getType()).isEqualTo("system");
+        assertThat(emitted.getCorrelationId()).isEqualTo("webhook_delivery_failed:sub-1:del-1");
+        assertThat(emitted.getTraceId()).isEqualTo("0123456789abcdef0123456789abcdef");
+        // EventDataSystem shape
+        assertThat(emitted.getData()).containsEntry("component", "webhook_dispatcher");
+        assertThat(emitted.getData()).containsEntry("severity", "warning");
+        assertThat(emitted.getData().get("message").toString())
+                .contains("failed after 6 attempts");
+        @SuppressWarnings("unchecked")
+        java.util.Map<String, Object> details =
+                (java.util.Map<String, Object>) emitted.getData().get("details");
+        assertThat(details).containsEntry("subscription_id", "sub-1");
+        assertThat(details).containsEntry("tenant_id", "t-1");
+        assertThat(details).containsEntry("delivery_id", "del-1");
+        assertThat(details).containsEntry("event_id", "evt-1");
+        assertThat(details).containsEntry("event_type", "tenant.created");
+        assertThat(details).containsEntry("attempts", 6);
+        assertThat(details).containsEntry("last_response_status", 500);
+        assertThat(details).containsEntry("error", "HTTP 500");
+    }
+
+    @Test
+    void retriesExhausted_propagatesOriginatingRequestId_ontoEmittedEvents() {
+        // Spec (CORRELATION AND TRACING): request_id MUST be populated on every
+        // event causally downstream of an HTTP request, including deferred work.
+        Delivery delivery = pendingDelivery();
+        delivery.setAttempts(5);
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        Event origin = testEvent();
+        origin.setRequestId("req_abc123");
+        when(eventRepository.findById("evt-1")).thenReturn(origin);
+        Subscription sub = activeSubscription();
+        sub.setConsecutiveFailures(9); // becomes 10 → auto-disable too
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
+
+        handler.handle("del-1");
+
+        ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
+        verify(eventRepository, times(2)).save(captor.capture());
+        assertThat(captor.getAllValues())
+                .allSatisfy(e -> assertThat(e.getRequestId()).isEqualTo("req_abc123"));
+    }
+
+    @Test
+    void retryScheduled_doesNotEmitSystemWebhookDeliveryFailed() {
+        Delivery delivery = pendingDelivery();
+        delivery.setAttempts(1); // becomes 2 <= maxRetries(5) → retry, not exhausted
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.RETRYING);
         verify(eventRepository, never()).save(any());
+    }
+
+    @Test
+    void retriesExhausted_emitFailure_doesNotAffectFailedStatus() {
+        // The meta-alert is best-effort: a Redis write failure must not
+        // revert or block the FAILED delivery status persistence.
+        Delivery delivery = pendingDelivery();
+        delivery.setAttempts(5);
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        sub.setConsecutiveFailures(0);
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
+        doThrow(new RuntimeException("Redis down")).when(eventRepository).save(any());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+        verify(deliveryRepository).update(delivery);
     }
 
     @Test

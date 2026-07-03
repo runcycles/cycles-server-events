@@ -1,6 +1,5 @@
 package io.runcycles.events.model;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonValue;
 
 public enum EventCategory {
@@ -23,11 +22,20 @@ public enum EventCategory {
         return value;
     }
 
-    @JsonCreator
+    /**
+     * Local-vocabulary resolution helper — NOT a Jackson creator.
+     * {@code Event.category} is an open string on the wire (spec enum
+     * EXTENSIBILITY: categories are additive, and the dispatcher re-serializes
+     * the same object as the outbound webhook body, so the original value must
+     * survive unknown-to-us categories byte-for-byte). Returns {@code null}
+     * for unknown values; {@code EventPayloadValidator} turns that into the
+     * {@code unknown_category} WARN + metric.
+     */
     public static EventCategory fromValue(String value) {
+        if (value == null) return null;
         for (EventCategory c : values()) {
             if (c.value.equals(value)) return c;
         }
-        throw new IllegalArgumentException("Unknown event category: " + value);
+        return null;
     }
 }

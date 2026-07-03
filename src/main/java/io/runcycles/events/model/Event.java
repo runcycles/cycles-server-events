@@ -24,8 +24,17 @@ public class Event {
     @JsonProperty("event_type")
     private String eventType;
 
+    /**
+     * OPEN STRING on the wire, like {@code event_type}: categories are additive
+     * (spec enum EXTENSIBILITY; v0.1.25.34 added "webhook"), and this service
+     * re-serializes the SAME object as the outbound webhook body — a closed enum
+     * here either poison-pills unknown values (throwing creator) or corrupts the
+     * delivered payload (nulling a required field). Resolve to
+     * {@link EventCategory} via {@link EventCategory#fromValue} only for local
+     * vocabulary checks; never on the wire path.
+     */
     @JsonProperty("category")
-    private EventCategory category;
+    private String category;
 
     @JsonProperty("timestamp")
     private Instant timestamp;
