@@ -261,7 +261,8 @@ class ModelTest {
     @Test
     void eventType_allValues() {
         EventType[] values = EventType.values();
-        assertThat(values.length).isEqualTo(47);
+        // 47 spec-base values + 4 *_via_tenant_cascade (spec v0.1.25.35)
+        assertThat(values.length).isEqualTo(51);
         // Spot-check a few
         assertThat(EventType.valueOf("BUDGET_CREATED")).isNotNull();
         assertThat(EventType.valueOf("BUDGET_RESET_SPENT")).isNotNull();
@@ -286,6 +287,56 @@ class ModelTest {
         assertThat(EventType.fromValue("webhook.disabled")).isEqualTo(EventType.WEBHOOK_DISABLED);
         assertThatThrownBy(() -> EventType.fromValue("nonexistent"))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void eventType_cascadeKinds_metadata() {
+        // spec v0.1.25.35 — the four tenant-close cascade kinds and their category bindings
+        assertThat(EventType.fromValue("budget.closed_via_tenant_cascade"))
+                .isEqualTo(EventType.BUDGET_CLOSED_VIA_TENANT_CASCADE);
+        assertThat(EventType.BUDGET_CLOSED_VIA_TENANT_CASCADE.getCategory()).isEqualTo(EventCategory.BUDGET);
+        assertThat(EventType.fromValue("reservation.released_via_tenant_cascade"))
+                .isEqualTo(EventType.RESERVATION_RELEASED_VIA_TENANT_CASCADE);
+        assertThat(EventType.RESERVATION_RELEASED_VIA_TENANT_CASCADE.getCategory()).isEqualTo(EventCategory.RESERVATION);
+        assertThat(EventType.fromValue("webhook.disabled_via_tenant_cascade"))
+                .isEqualTo(EventType.WEBHOOK_DISABLED_VIA_TENANT_CASCADE);
+        assertThat(EventType.WEBHOOK_DISABLED_VIA_TENANT_CASCADE.getCategory()).isEqualTo(EventCategory.WEBHOOK);
+        assertThat(EventType.fromValue("api_key.revoked_via_tenant_cascade"))
+                .isEqualTo(EventType.API_KEY_REVOKED_VIA_TENANT_CASCADE);
+        assertThat(EventType.API_KEY_REVOKED_VIA_TENANT_CASCADE.getCategory()).isEqualTo(EventCategory.API_KEY);
+    }
+
+    @Test
+    void eventCategory_fromValue_unknownTolerated() {
+        // Spec enum EXTENSIBILITY: consumers MUST ignore unrecognized values.
+        // Unknown categories deserialize to null instead of poisoning delivery.
+        assertThat(EventCategory.fromValue("some_future_category")).isNull();
+        assertThat(EventCategory.fromValue(null)).isNull();
+    }
+
+    @Test
+    void actorType_fromValue_unknownTolerated() {
+        // admin plane models actor types this enum does not carry
+        // (e.g. admin_on_behalf_of) — unknown values must not throw.
+        assertThat(ActorType.fromValue("admin_on_behalf_of")).isNull();
+        assertThat(ActorType.fromValue(null)).isNull();
+        assertThat(ActorType.fromValue("system")).isEqualTo(ActorType.SYSTEM);
+    }
+
+    @Test
+    void event_unknownCategoryAndActorType_deserializeWithoutThrowing() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        String json = "{\"event_id\":\"evt-1\",\"event_type\":\"future.kind\","
+                + "\"category\":\"future_category\",\"tenant_id\":\"t-1\",\"source\":\"cycles-admin\","
+                + "\"actor\":{\"type\":\"admin_on_behalf_of\"}}";
+
+        Event event = mapper.readValue(json, Event.class);
+
+        assertThat(event.getEventId()).isEqualTo("evt-1");
+        assertThat(event.getEventType()).isEqualTo("future.kind");
+        assertThat(event.getCategory()).isNull();
+        assertThat(event.getActor()).isNotNull();
+        assertThat(event.getActor().getType()).isNull();
     }
 
     @Test
