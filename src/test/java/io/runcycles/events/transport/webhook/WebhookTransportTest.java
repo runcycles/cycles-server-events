@@ -58,7 +58,7 @@ class WebhookTransportTest {
         return Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.parse("2026-01-01T00:00:00Z"))
                 .tenantId("t-1")
                 .source("admin")

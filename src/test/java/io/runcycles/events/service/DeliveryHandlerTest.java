@@ -71,7 +71,7 @@ class DeliveryHandlerTest {
         return Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -697,7 +697,7 @@ class DeliveryHandlerTest {
         Event malformed = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .build();
         when(eventRepository.findById("evt-1")).thenReturn(malformed);
@@ -800,7 +800,7 @@ class DeliveryHandlerTest {
                 .filter(e -> "webhook.disabled".equals(e.getEventType()))
                 .findFirst().orElseThrow();
         assertThat(emitted.getEventType()).isEqualTo("webhook.disabled");
-        assertThat(emitted.getCategory()).isEqualTo(EventCategory.WEBHOOK);
+        assertThat(emitted.getCategory()).isEqualTo("webhook");
         assertThat(emitted.getTenantId()).isEqualTo("t-1");
         // scope null matches admin's WebhookAdminController.emitWebhookLifecycleEvent
         // convention on all webhook.* lifecycle emits.
@@ -808,7 +808,7 @@ class DeliveryHandlerTest {
         assertThat(emitted.getSource()).isEqualTo("cycles-events");
         assertThat(emitted.getCorrelationId()).isEqualTo("webhook_auto_disable:sub-1:del-1");
         assertThat(emitted.getActor()).isNotNull();
-        assertThat(emitted.getActor().getType()).isEqualTo(ActorType.SYSTEM);
+        assertThat(emitted.getActor().getType()).isEqualTo("system");
         assertThat(emitted.getData()).containsEntry("subscription_id", "sub-1");
         assertThat(emitted.getData()).containsEntry("tenant_id", "t-1");
         assertThat(emitted.getData()).containsEntry("previous_status", "ACTIVE");
@@ -884,12 +884,12 @@ class DeliveryHandlerTest {
         verify(eventRepository).save(captor.capture());
         Event emitted = captor.getValue();
         assertThat(emitted.getEventType()).isEqualTo("system.webhook_delivery_failed");
-        assertThat(emitted.getCategory()).isEqualTo(EventCategory.SYSTEM);
+        assertThat(emitted.getCategory()).isEqualTo("system");
         // System events use the __system__ sentinel per the standard event payload schema
         assertThat(emitted.getTenantId()).isEqualTo("__system__");
         assertThat(emitted.getSource()).isEqualTo("cycles-events");
         assertThat(emitted.getActor()).isNotNull();
-        assertThat(emitted.getActor().getType()).isEqualTo(ActorType.SYSTEM);
+        assertThat(emitted.getActor().getType()).isEqualTo("system");
         assertThat(emitted.getCorrelationId()).isEqualTo("webhook_delivery_failed:sub-1:del-1");
         assertThat(emitted.getTraceId()).isEqualTo("0123456789abcdef0123456789abcdef");
         // EventDataSystem shape

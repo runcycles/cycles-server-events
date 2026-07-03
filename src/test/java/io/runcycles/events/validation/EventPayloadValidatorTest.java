@@ -35,7 +35,7 @@ class EventPayloadValidatorTest {
         return Event.builder()
                 .eventId("evt-1")
                 .eventType("budget.reset_spent")
-                .category(EventCategory.BUDGET)
+                .category("budget")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -64,7 +64,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -80,7 +80,7 @@ class EventPayloadValidatorTest {
             Event event = Event.builder()
                     .eventId("evt-" + type)
                     .eventType(type)
-                    .category(EventCategory.WEBHOOK)
+                    .category("webhook")
                     .timestamp(Instant.now())
                     .tenantId("t-1")
                     .source("cycles-admin")
@@ -97,7 +97,7 @@ class EventPayloadValidatorTest {
     void missing_event_id_emitsWarning() {
         Event event = Event.builder()
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -112,7 +112,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .tenantId("  ")
                 .source("admin")
@@ -141,7 +141,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .tenantId("t-1")
                 .source("admin")
                 .build();
@@ -155,7 +155,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .build();
@@ -171,7 +171,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("custom.mystery.event") // not in enum
-                .category(EventCategory.BUDGET)
+                .category("budget")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -181,6 +181,34 @@ class EventPayloadValidatorTest {
                 EventPayloadValidator.RULE_UNKNOWN_EVENT_TYPE)).isEqualTo(1.0);
     }
 
+    // --- Rule 2b: unknown_category ---
+
+    @Test
+    void unknown_category_emitsWarning_only() {
+        // category is an open string on the wire (delivered verbatim); an
+        // unknown value warns for observability but never blocks delivery.
+        Event event = Event.builder()
+                .eventId("evt-1")
+                .eventType("tenant.created")
+                .category("future_category") // not in enum
+                .timestamp(Instant.now())
+                .tenantId("t-1")
+                .source("admin")
+                .build();
+        validator.validate(event);
+        assertThat(warningCount("tenant.created",
+                EventPayloadValidator.RULE_UNKNOWN_CATEGORY)).isEqualTo(1.0);
+        // Not counted as missing (the field IS present) and no mismatch
+        // (mismatch requires a resolvable category) — those counters were
+        // never created, so look them up null-safely.
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID)
+                .tags("type", "tenant.created", "rule", EventPayloadValidator.RULE_MISSING_REQUIRED)
+                .counter()).isNull();
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID)
+                .tags("type", "tenant.created", "rule", EventPayloadValidator.RULE_CATEGORY_MISMATCH)
+                .counter()).isNull();
+    }
+
     // --- Rule 3: category_mismatch ---
 
     @Test
@@ -188,7 +216,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("budget.created") // BUDGET per EventType
-                .category(EventCategory.TENANT)  // mismatch
+                .category("tenant")  // mismatch
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -207,7 +235,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("budget.funded")
-                .category(EventCategory.BUDGET)
+                .category("budget")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -226,7 +254,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("budget.updated")
-                .category(EventCategory.BUDGET)
+                .category("budget")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -245,7 +273,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("budget.updated")
-                .category(EventCategory.BUDGET)
+                .category("budget")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -266,7 +294,7 @@ class EventPayloadValidatorTest {
             Event event = Event.builder()
                     .eventId("evt-" + op)
                     .eventType("budget.updated")
-                    .category(EventCategory.BUDGET)
+                    .category("budget")
                     .timestamp(Instant.now())
                     .tenantId("t-1")
                     .source("admin")
@@ -288,7 +316,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("budget.reset_spent")
-                .category(EventCategory.BUDGET)
+                .category("budget")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -308,7 +336,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("budget.reset_spent")
-                .category(EventCategory.BUDGET)
+                .category("budget")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -327,7 +355,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("budget.reset_spent")
-                .category(EventCategory.BUDGET)
+                .category("budget")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -350,7 +378,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("budget.created")
-                .category(EventCategory.BUDGET)
+                .category("budget")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -366,7 +394,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1\nFAKE: forged")
                 .eventType("tenant.created\r\nINJECTED=yes")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -392,7 +420,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -408,7 +436,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -423,7 +451,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -440,7 +468,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -458,7 +486,7 @@ class EventPayloadValidatorTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("api_key.created")
-                .category(EventCategory.API_KEY)
+                .category("api_key")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")

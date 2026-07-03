@@ -43,16 +43,21 @@ breaking.
 
 ### Fixed
 
-- **Unknown `category` / `actor.type` enum values no longer poison
-  deliveries.** Both `@JsonCreator`s previously threw on unrecognized values,
-  so an event carrying a newer category (exactly what happened when spec
+- **Unknown `category` / `actor.type` values no longer poison deliveries —
+  and are delivered verbatim.** Both fields previously deserialized through
+  closed enums whose `@JsonCreator`s threw on unrecognized values, so an
+  event carrying a newer category (exactly what happened when spec
   v0.1.25.34 added `webhook`) or an actor type this service doesn't model
   (e.g. the admin plane's `admin_on_behalf_of`) failed deserialization,
   errored the delivery, and counted against the subscription's
-  consecutive-failure budget — a poison-pill that could auto-disable innocent
-  subscriptions. Unknown values now parse as absent (WARN logged), per the
-  spec's enum EXTENSIBILITY rule that consumers MUST ignore unrecognized
-  values. `event_type` was already tolerant (open string on the wire).
+  consecutive-failure budget — a poison-pill that could auto-disable
+  innocent subscriptions. Because the dispatcher re-serializes the same
+  `Event` object as the outbound webhook body, a null-on-unknown mapping
+  would have corrupted the delivered payload instead; both fields are now
+  OPEN STRINGS on the wire (like `event_type` always was), so subscribers
+  receive exactly what the producer wrote. Enum resolution remains as a
+  local-vocabulary helper; an unrecognized category surfaces as a new
+  `unknown_category` payload-validation WARN + metric, observability-only.
 
 ### Compatibility
 

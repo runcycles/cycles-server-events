@@ -278,9 +278,9 @@ public class DeliveryHandler {
             // which plane wrote the Event.
             Event event = Event.builder()
                     .eventType(EventType.WEBHOOK_DISABLED.getValue())
-                    .category(EventCategory.WEBHOOK)
+                    .category(EventCategory.WEBHOOK.getValue())
                     .tenantId(sub.getTenantId())
-                    .actor(Actor.builder().type(ActorType.SYSTEM).build())
+                    .actor(Actor.builder().type(ActorType.SYSTEM.getValue()).build())
                     .source("cycles-events")
                     .data(data)
                     .correlationId("webhook_auto_disable:" + sub.getSubscriptionId()
@@ -341,9 +341,9 @@ public class DeliveryHandler {
 
             Event event = Event.builder()
                     .eventType(EventType.SYSTEM_WEBHOOK_DELIVERY_FAILED.getValue())
-                    .category(EventCategory.SYSTEM)
+                    .category(EventCategory.SYSTEM.getValue())
                     .tenantId("__system__")
-                    .actor(Actor.builder().type(ActorType.SYSTEM).build())
+                    .actor(Actor.builder().type(ActorType.SYSTEM.getValue()).build())
                     .source("cycles-events")
                     .data(data)
                     .correlationId("webhook_delivery_failed:" + sub.getSubscriptionId()

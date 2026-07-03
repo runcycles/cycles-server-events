@@ -56,7 +56,7 @@ class EventRepositoryTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.now())
                 .tenantId("t-1")
                 .source("admin")
@@ -68,7 +68,7 @@ class EventRepositoryTest {
         assertThat(result).isNotNull();
         assertThat(result.getEventId()).isEqualTo("evt-1");
         assertThat(result.getEventType()).isEqualTo("tenant.created");
-        assertThat(result.getCategory()).isEqualTo(EventCategory.TENANT);
+        assertThat(result.getCategory()).isEqualTo("tenant");
     }
 
     @Test
@@ -93,7 +93,7 @@ class EventRepositoryTest {
     void save_mintsEventIdAndTimestamp_andEvaluatesLuaWithExpectedKeysAndArgs() {
         Event event = Event.builder()
                 .eventType("webhook.disabled")
-                .category(EventCategory.WEBHOOK)
+                .category("webhook")
                 .tenantId("t-1")
                 .source("cycles-events")
                 .correlationId("webhook_auto_disable:sub-1:del-1")
@@ -131,7 +131,7 @@ class EventRepositoryTest {
     void save_withoutCorrelationId_omitsCorrelationKey() {
         Event event = Event.builder()
                 .eventType("webhook.disabled")
-                .category(EventCategory.WEBHOOK)
+                .category("webhook")
                 .tenantId("t-1")
                 .source("cycles-events")
                 .build();
@@ -151,7 +151,7 @@ class EventRepositoryTest {
                 .eventId("evt_preset")
                 .timestamp(fixed)
                 .eventType("webhook.disabled")
-                .category(EventCategory.WEBHOOK)
+                .category("webhook")
                 .tenantId("t-1")
                 .source("cycles-events")
                 .build();
@@ -168,7 +168,7 @@ class EventRepositoryTest {
                 .thenThrow(new RuntimeException("Redis down"));
         Event event = Event.builder()
                 .eventType("webhook.disabled")
-                .category(EventCategory.WEBHOOK)
+                .category("webhook")
                 .tenantId("t-1")
                 .source("cycles-events")
                 .build();
@@ -182,7 +182,7 @@ class EventRepositoryTest {
     void save_blankCorrelationId_omitsCorrelationKey() {
         Event event = Event.builder()
                 .eventType("webhook.disabled")
-                .category(EventCategory.WEBHOOK)
+                .category("webhook")
                 .tenantId("t-1")
                 .source("cycles-events")
                 .correlationId("   ")

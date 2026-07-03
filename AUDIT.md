@@ -24,8 +24,14 @@ Three conformance gaps found and fixed (313 tests green, JaCoCo ≥95%):
    `@JsonCreator`s failed the whole delivery on unrecognized values — the
    defect class spec v0.1.25.34 (`EventCategory`+`webhook`) demonstrated —
    and burned the subscription's consecutive-failure budget on events the
-   subscriber never got. Both now parse unknown values as absent (WARN),
-   per the enum EXTENSIBILITY consumer MUST. Also added the four
+   subscriber never got. First cut mapped unknowns to null, but review
+   caught that this corrupts the outbound payload instead: the dispatcher
+   re-serializes the same `Event` object as the webhook body, so a nulled
+   `category` (a required field) would reach subscribers. Final shape:
+   both fields are OPEN STRINGS on the wire, mirroring `event_type` —
+   unknown values round-trip verbatim to subscribers; enum resolution is a
+   local-vocabulary helper only, and unknown categories surface as a new
+   `unknown_category` validator WARN + metric. Also added the four
    `*_via_tenant_cascade` EventTypes (spec v0.1.25.35) so cascade events
    validate cleanly instead of warning as unknown.
 3. **`request_id` propagation** — dispatcher-emitted events are causally

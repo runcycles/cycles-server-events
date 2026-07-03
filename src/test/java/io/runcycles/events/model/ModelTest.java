@@ -75,11 +75,11 @@ class ModelTest {
     @Test
     void event_builderAndGetters() {
         Instant now = Instant.now();
-        Actor actor = Actor.builder().type(ActorType.ADMIN).keyId("key-1").sourceIp("127.0.0.1").build();
+        Actor actor = Actor.builder().type("admin").keyId("key-1").sourceIp("127.0.0.1").build();
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(now)
                 .tenantId("t-1")
                 .scope("tenant:t-1")
@@ -94,7 +94,7 @@ class ModelTest {
 
         assertThat(event.getEventId()).isEqualTo("evt-1");
         assertThat(event.getEventType()).isEqualTo("tenant.created");
-        assertThat(event.getCategory()).isEqualTo(EventCategory.TENANT);
+        assertThat(event.getCategory()).isEqualTo("tenant");
         assertThat(event.getTimestamp()).isEqualTo(now);
         assertThat(event.getTenantId()).isEqualTo("t-1");
         assertThat(event.getScope()).isEqualTo("tenant:t-1");
@@ -182,12 +182,12 @@ class ModelTest {
     @Test
     void actor_builderAndGetters() {
         Actor actor = Actor.builder()
-                .type(ActorType.API_KEY)
+                .type("api_key")
                 .keyId("key-1")
                 .sourceIp("10.0.0.1")
                 .build();
 
-        assertThat(actor.getType()).isEqualTo(ActorType.API_KEY);
+        assertThat(actor.getType()).isEqualTo("api_key");
         assertThat(actor.getKeyId()).isEqualTo("key-1");
         assertThat(actor.getSourceIp()).isEqualTo("10.0.0.1");
     }
@@ -324,7 +324,11 @@ class ModelTest {
     }
 
     @Test
-    void event_unknownCategoryAndActorType_deserializeWithoutThrowing() throws Exception {
+    void event_unknownCategoryAndActorType_roundTripPreservedVerbatim() throws Exception {
+        // category and actor.type are OPEN strings on the wire: unknown values
+        // must neither throw (poison-pill) nor be dropped (payload corruption) —
+        // the dispatcher re-serializes this same object as the outbound webhook
+        // body, so subscribers must receive exactly what the producer wrote.
         ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
         String json = "{\"event_id\":\"evt-1\",\"event_type\":\"future.kind\","
                 + "\"category\":\"future_category\",\"tenant_id\":\"t-1\",\"source\":\"cycles-admin\","
@@ -334,9 +338,14 @@ class ModelTest {
 
         assertThat(event.getEventId()).isEqualTo("evt-1");
         assertThat(event.getEventType()).isEqualTo("future.kind");
-        assertThat(event.getCategory()).isNull();
+        assertThat(event.getCategory()).isEqualTo("future_category");
         assertThat(event.getActor()).isNotNull();
-        assertThat(event.getActor().getType()).isNull();
+        assertThat(event.getActor().getType()).isEqualTo("admin_on_behalf_of");
+
+        // Outbound-body fidelity: WebhookTransport POSTs writeValueAsString(event)
+        String outbound = mapper.writeValueAsString(event);
+        assertThat(outbound).contains("\"category\":\"future_category\"");
+        assertThat(outbound).contains("\"type\":\"admin_on_behalf_of\"");
     }
 
     @Test
@@ -396,7 +405,7 @@ class ModelTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.parse("2026-04-18T00:00:00Z"))
                 .tenantId("t-1")
                 .source("admin")
@@ -417,7 +426,7 @@ class ModelTest {
         Event event = Event.builder()
                 .eventId("evt-1")
                 .eventType("tenant.created")
-                .category(EventCategory.TENANT)
+                .category("tenant")
                 .timestamp(Instant.parse("2026-04-18T00:00:00Z"))
                 .tenantId("t-1")
                 .source("admin")

@@ -43,6 +43,9 @@ import java.util.regex.Pattern;
  *       (spec: cycles-governance-admin-v0.1.25.yaml line 1897).</li>
  *   <li><b>unknown_event_type</b>: event_type string doesn't map to any
  *       {@link EventType} enum value.</li>
+ *   <li><b>unknown_category</b>: category string doesn't map to any
+ *       {@link EventCategory} enum value (category is an open string on the
+ *       wire and is delivered verbatim; this rule is observability-only).</li>
  *   <li><b>category_mismatch</b>: event_type resolves to an EventType whose
  *       declared category differs from the event's category field.</li>
  *   <li><b>budget_data_shape</b>: BUDGET-category event missing ledger_id in
@@ -64,6 +67,7 @@ public class EventPayloadValidator {
 
     static final String RULE_MISSING_REQUIRED = "missing_required";
     static final String RULE_UNKNOWN_EVENT_TYPE = "unknown_event_type";
+    static final String RULE_UNKNOWN_CATEGORY = "unknown_category";
     static final String RULE_CATEGORY_MISMATCH = "category_mismatch";
     static final String RULE_BUDGET_DATA_SHAPE = "budget_data_shape";
     static final String RULE_RESET_SPENT_SHAPE = "reset_spent_shape";
@@ -96,7 +100,7 @@ public class EventPayloadValidator {
         // Rule 1: required fields
         if (isBlank(event.getEventId())
                 || isBlank(event.getEventType())
-                || event.getCategory() == null
+                || isBlank(event.getCategory())
                 || event.getTimestamp() == null
                 || isBlank(event.getTenantId())
                 || isBlank(event.getSource())) {
@@ -104,7 +108,9 @@ public class EventPayloadValidator {
                     "one or more required top-level fields missing");
         }
 
-        // Rule 2 + 3: event_type resolution + category consistency
+        // Rule 2 + 2b + 3: event_type resolution + category vocabulary + consistency.
+        // category is an OPEN string on the wire (delivered verbatim); resolution
+        // to the local enum happens only here, for observability.
         EventType resolved = null;
         if (!isBlank(eventType)) {
             try {
@@ -114,8 +120,16 @@ public class EventPayloadValidator {
                         "event_type not in local vocabulary");
             }
         }
-        if (resolved != null && event.getCategory() != null
-                && resolved.getCategory() != event.getCategory()) {
+        EventCategory categoryEnum = null;
+        if (!isBlank(event.getCategory())) {
+            categoryEnum = EventCategory.fromValue(event.getCategory());
+            if (categoryEnum == null) {
+                warn(event, eventIdForLog, eventType, RULE_UNKNOWN_CATEGORY,
+                        "category not in local vocabulary");
+            }
+        }
+        if (resolved != null && categoryEnum != null
+                && resolved.getCategory() != categoryEnum) {
             warn(event, eventIdForLog, eventType, RULE_CATEGORY_MISMATCH,
                     "category " + event.getCategory() + " does not match "
                             + resolved + " (expected " + resolved.getCategory() + ")");
