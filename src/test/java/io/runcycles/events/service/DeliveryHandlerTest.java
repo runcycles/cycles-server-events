@@ -970,6 +970,34 @@ class DeliveryHandlerTest {
     }
 
     @Test
+    void ssrfConfigIndeterminate_propagates_noPermanentFail_noAck() {
+        // Review finding: a transient config read failure must NOT become a
+        // permanent policy block. The guard propagates IllegalStateException;
+        // the handler rethrows so DispatchLoop skips ack and the
+        // stale-processing recovery retries the delivery later.
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(urlGuard.check("https://example.com/webhook"))
+                .thenThrow(new IllegalStateException("Webhook security config indeterminate"));
+
+        assertThatThrownBy(() -> handler.handle("del-1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("indeterminate");
+
+        // Delivery untouched: no FAILED write, no transport contact, no retry
+        // scheduling, no consecutive-failure accounting.
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.PENDING);
+        verify(deliveryRepository, never()).update(any());
+        verify(transport, never()).deliver(any(), any(), any(), any());
+        verify(queueRepository, never()).scheduleRetry(anyString(), anyLong());
+        verify(subscriptionRepository, never()).updateDeliveryState(
+                anyString(), anyInt(), any(), any(), any(), any());
+    }
+
+    @Test
     void ssrfAllowed_deliveryProceeds() {
         Delivery delivery = pendingDelivery();
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);

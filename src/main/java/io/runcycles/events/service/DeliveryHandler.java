@@ -137,12 +137,26 @@ public class DeliveryHandler {
         }
 
         // Delivery-time SSRF guard: re-validate the target URL against the
-        // CURRENT admin webhook-security config. Permanent fail, no retry
-        // (the target is policy-blocked, not unhealthy) and no
-        // consecutive-failure increment (the endpoint was never contacted,
-        // so this says nothing about its health — and a config tightening
-        // must not auto-disable subscriptions as a side effect).
-        String violation = urlGuard.check(sub.getUrl());
+        // CURRENT admin webhook-security config. A CONFIRMED violation is a
+        // permanent fail, no retry (the target is policy-blocked, not
+        // unhealthy) and no consecutive-failure increment (the endpoint was
+        // never contacted, so this says nothing about its health — and a
+        // config tightening must not auto-disable subscriptions as a side
+        // effect). An INDETERMINATE config (Redis read/parse failure inside
+        // the guard) is NOT a violation: rethrow so the delivery stays
+        // un-acked in dispatch:processing and the stale-processing recovery
+        // retries it — a transient config blip must never permanently drop
+        // a valid delivery.
+        String violation;
+        try {
+            violation = urlGuard.check(sub.getUrl());
+        } catch (RuntimeException configIndeterminate) {
+            LOG.warn("Webhook security config indeterminate; leaving delivery for retry: delivery_id={} event_id={} subscription_id={} tenant_id={} trace_id={}",
+                    safe(delivery.getDeliveryId()), safe(delivery.getEventId()),
+                    safe(sub.getSubscriptionId()), safe(sub.getTenantId()),
+                    safe(effectiveTraceId(delivery, event)));
+            throw configIndeterminate;
+        }
         if (violation != null) {
             metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(), REASON_SSRF_BLOCKED, 0);
             LOG.warn("Webhook delivery blocked by security policy: delivery_id={} event_id={} event_type={} subscription_id={} tenant_id={} reason={} trace_id={}",

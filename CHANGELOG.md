@@ -39,7 +39,12 @@ breaking.
   permanently (`ssrf_blocked` metric reason, no retry) and does NOT count
   against the subscription's consecutive-failure budget — a policy block
   says nothing about endpoint health, and a config tightening must not
-  auto-disable subscriptions as a side effect.
+  auto-disable subscriptions as a side effect. A config READ/PARSE failure
+  is treated as INDETERMINATE, not as a denial: the delivery is left
+  un-acked and retried by the stale-processing recovery once the config is
+  readable again (review hardening — a transient Redis blip must never
+  permanently drop a valid delivery). The restrictive defaults apply only
+  when the config key is legitimately absent (never stored).
 
 ### Changed
 

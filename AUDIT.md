@@ -25,7 +25,14 @@ and does NOT increment the subscription's consecutive-failure counter (a
 config tightening must not auto-disable subscriptions as a side effect;
 the endpoint was never contacted, so the failure says nothing about its
 health). Unresolvable hosts fail closed when CIDR ranges are configured,
-mirroring admin. Integration suite seeds the same permissive config the
+mirroring admin. Review hardening (pre-release): the first cut substituted
+the restrictive defaults on ANY config read failure, which converted a
+transient Redis blip into a permanent no-retry policy block for
+subscriptions relying on `allow_http`/custom CIDR config. Indeterminate is
+now distinct from denial — a read/parse failure throws, the handler leaves
+the delivery un-acked, and the stale-processing recovery retries it;
+defaults apply only to the legitimately-absent key (never stored), the
+same baseline admin validates against. Integration suite seeds the same permissive config the
 nightly workflow sets via the admin API; a dedicated integration test
 proves the restrictive defaults block an http/loopback target without
 contacting it.
