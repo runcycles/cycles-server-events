@@ -10,6 +10,20 @@ public HTTP API; do not publish 7980 on an ingress. Use
 `/actuator/health/readiness` for dependency-aware readiness, and see the
 Monitoring section of [`README.md`](README.md) for endpoint details.
 
+**Management-port security posture (deliberate exception).** Unlike
+`cycles-server` and `cycles-server-admin` — whose actuator endpoints share
+the API port and are therefore gated behind `X-Admin-API-Key` since their
+v0.1.25.45-era hardening — this worker's actuator lives on a **separate
+management port (9980) with no authentication**. The separate port IS the
+isolation mechanism: bind it to an internal-only network (Prometheus
+scrapes over the container network), never publish it on a host or ingress,
+and treat any reachable 9980 from outside the deployment network as a
+misconfiguration. Container healthchecks probe `127.0.0.1:9980` in-container
+and need no host publish. If your environment cannot provide network-level
+isolation for 9980, front it with an authenticating proxy — this worker
+deliberately ships no Spring Security of its own (it has no API surface to
+protect and no key-management plane to validate against).
+
 Also worth reading: [`cycles-server/OPERATIONS.md`](https://github.com/runcycles/cycles-server/blob/main/OPERATIONS.md)
 and [`cycles-server-admin/OPERATIONS.md`](https://github.com/runcycles/cycles-server-admin/blob/main/OPERATIONS.md).
 Metrics naming, tag-cardinality controls, and the tenant-tag toggle are

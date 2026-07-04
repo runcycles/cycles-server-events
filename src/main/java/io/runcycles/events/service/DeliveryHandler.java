@@ -19,6 +19,7 @@ import io.runcycles.events.repository.EventRepository;
 import io.runcycles.events.repository.SubscriptionRepository;
 import io.runcycles.events.transport.Transport;
 import io.runcycles.events.transport.TransportResult;
+import io.runcycles.events.transport.webhook.WebhookUrlGuard;
 import io.runcycles.events.validation.EventPayloadValidator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +44,7 @@ public class DeliveryHandler {
     static final String REASON_HTTP_5XX = "http_5xx";
     static final String REASON_TRANSPORT_ERROR = "transport_error";
     static final String REASON_CONSECUTIVE_FAILURES = "consecutive_failures";
+    static final String REASON_SSRF_BLOCKED = "ssrf_blocked";
 
     private final DeliveryRepository deliveryRepository;
     private final EventRepository eventRepository;
@@ -51,6 +53,7 @@ public class DeliveryHandler {
     private final Transport transport;
     private final CyclesMetrics metrics;
     private final EventPayloadValidator validator;
+    private final WebhookUrlGuard urlGuard;
     private final long maxDeliveryAgeMs;
 
     public DeliveryHandler(DeliveryRepository deliveryRepository, EventRepository eventRepository,
@@ -58,6 +61,7 @@ public class DeliveryHandler {
                            Transport transport,
                            CyclesMetrics metrics,
                            EventPayloadValidator validator,
+                           WebhookUrlGuard urlGuard,
                            @Value("${dispatch.max-delivery-age-ms:86400000}") long maxDeliveryAgeMs) {
         this.deliveryRepository = deliveryRepository;
         this.eventRepository = eventRepository;
@@ -66,6 +70,7 @@ public class DeliveryHandler {
         this.transport = transport;
         this.metrics = metrics;
         this.validator = validator;
+        this.urlGuard = urlGuard;
         this.maxDeliveryAgeMs = maxDeliveryAgeMs;
     }
 
@@ -128,6 +133,23 @@ public class DeliveryHandler {
                     safe(sub.getSubscriptionId()), safe(sub.getTenantId()), sub.getStatus(),
                     safe(effectiveTraceId(delivery, event)));
             markFailed(delivery, "Subscription not active: " + sub.getStatus());
+            return;
+        }
+
+        // Delivery-time SSRF guard: re-validate the target URL against the
+        // CURRENT admin webhook-security config. Permanent fail, no retry
+        // (the target is policy-blocked, not unhealthy) and no
+        // consecutive-failure increment (the endpoint was never contacted,
+        // so this says nothing about its health — and a config tightening
+        // must not auto-disable subscriptions as a side effect).
+        String violation = urlGuard.check(sub.getUrl());
+        if (violation != null) {
+            metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(), REASON_SSRF_BLOCKED, 0);
+            LOG.warn("Webhook delivery blocked by security policy: delivery_id={} event_id={} event_type={} subscription_id={} tenant_id={} reason={} trace_id={}",
+                    safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(delivery.getEventType()),
+                    safe(sub.getSubscriptionId()), safe(sub.getTenantId()), safe(violation),
+                    safe(effectiveTraceId(delivery, event)));
+            markFailed(delivery, "Delivery blocked by webhook security policy: " + violation);
             return;
         }
 

@@ -28,6 +28,8 @@ cycles-server-admin                    cycles-server (runtime)
 Redis ──BLMOVE──► cycles-server-events (DispatchLoop)
                     │
                     ├── DeliveryHandler: load delivery + event + subscription
+                    ├── WebhookUrlGuard: delivery-time SSRF re-validation against
+                    │     config:webhook-security (blocked → permanent FAIL, no retry)
                     ├── SubscriptionRepository: decrypt signing secret (AES-256-GCM)
                     ├── WebhookTransport: HTTP POST with HMAC-SHA256 signature
                     ├── On success: mark SUCCESS, reset consecutive failures
@@ -164,7 +166,7 @@ def verify(body: bytes, secret: str, signature: str) -> bool:
 | `X-Cycles-Signature` | `sha256=<hex>` | HMAC-SHA256 of body (if signing secret configured) |
 | `X-Cycles-Event-Id` | `evt_abc123...` | For deduplication (at-least-once delivery) |
 | `X-Cycles-Event-Type` | `budget.exhausted` | Event type for routing |
-| `User-Agent` | `cycles-server-events/0.1.25.21` | Service identifier |
+| `User-Agent` | `cycles-server-events/0.1.25.22` | Service identifier |
 | `X-Cycles-Trace-Id` | `<32-hex-lowercase>` | W3C trace-id (spec v0.1.25.27) — always present |
 | `traceparent` | `00-<trace-id>-<16-hex-span>-<flags>` | W3C Trace Context v00 — always present. `<flags>` preserves upstream sampling when `WebhookDelivery.traceparent_inbound_valid=true` (spec v0.1.25.28), else `01` |
 | `X-Request-Id` | `<request-id>` | Originating HTTP request id — present when `event.request_id` is populated |

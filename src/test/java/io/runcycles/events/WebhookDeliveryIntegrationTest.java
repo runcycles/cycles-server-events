@@ -114,6 +114,15 @@ class WebhookDeliveryIntegrationTest {
     @BeforeEach
     void resetState() {
         receivedWebhooks.clear();
+        // The delivery-time SSRF guard enforces the admin webhook-security
+        // config; the receiver here is http://localhost, which the restrictive
+        // defaults (HTTPS required, loopback blocked) would reject. Seed the
+        // same permissive config the nightly workflow sets via
+        // PUT /v1/admin/config/webhook-security before its e2e run.
+        try (Jedis jedis = jedisPool.getResource()) {
+            jedis.set("config:webhook-security",
+                    "{\"allow_http\":true,\"blocked_cidr_ranges\":[]}");
+        }
     }
 
     @Test
@@ -344,6 +353,42 @@ class WebhookDeliveryIntegrationTest {
                     .contains("\"traceparent_inbound_valid\":true");
 
             jedis.srem("webhooks:" + TENANT_ID, subId);
+        }
+    }
+
+    @Test
+    @Order(5)
+    @DisplayName("SSRF guard: restrictive default config blocks http/loopback delivery permanently")
+    void ssrfGuard_defaultConfigBlocksLoopbackHttpDelivery() throws Exception {
+        try (Jedis jedis = jedisPool.getResource()) {
+            // Remove the permissive config seeded in @BeforeEach — the guard
+            // falls back to the restrictive defaults (HTTPS required,
+            // loopback/private ranges blocked), which must reject the
+            // http://localhost receiver WITHOUT contacting it.
+            jedis.del("config:webhook-security");
+
+            String eventId = "evt_ssrf_" + UUID.randomUUID().toString().substring(0, 8);
+            jedis.set("event:" + eventId, objectMapper.writeValueAsString(Map.of(
+                    "event_id", eventId, "event_type", "tenant.created",
+                    "category", "tenant", "timestamp", Instant.now().toString(),
+                    "tenant_id", TENANT_ID, "source", "test")));
+
+            String deliveryId = "del_ssrf_" + UUID.randomUUID().toString().substring(0, 8);
+            jedis.set("delivery:" + deliveryId, objectMapper.writeValueAsString(Map.of(
+                    "delivery_id", deliveryId, "subscription_id", SUBSCRIPTION_ID,
+                    "event_id", eventId, "event_type", "tenant.created",
+                    "status", "PENDING", "attempted_at", Instant.now().toString(),
+                    "attempts", 0)));
+            jedis.lpush("dispatch:pending", deliveryId);
+
+            Thread.sleep(5000);
+
+            assertThat(receivedWebhooks)
+                    .as("policy-blocked delivery must never reach the receiver")
+                    .isEmpty();
+            String deliveryJson = jedis.get("delivery:" + deliveryId);
+            assertThat(deliveryJson).contains("\"status\":\"FAILED\"");
+            assertThat(deliveryJson).contains("blocked by webhook security policy");
         }
     }
 

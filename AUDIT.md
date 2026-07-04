@@ -2,6 +2,41 @@
 
 ## Implementation History
 
+### 2026-07-04 — v0.1.25.22: delivery-time SSRF guard + management-port posture
+
+Closes the "flagged, not changed" security item from the v0.1.25.21 audit.
+`WebhookUrlGuard` re-validates the subscription URL against the CURRENT
+admin webhook-security config (`config:webhook-security`) immediately
+before every outbound POST. Semantics are a line-for-line port of admin's
+create/update-time `WebhookUrlValidator` — same config key, same
+restrictive defaults when the key is absent/unreadable (private ranges
+blocked, HTTPS required; a config-read failure can only tighten, never
+loosen), same CIDR matching incl. IPv4-mapped IPv6, same glob dialect —
+so a URL admitted by admin under a given config is admitted here under
+the same config. Gaps closed: target drift/DNS rebinding after creation
+(narrowed to a single request's resolve-then-connect window — full
+resolve-and-pin is not expressible with java.net.http; residual TOCTOU
+accepted and documented here), config tightened after creation, and
+legacy subscriptions predating admin validation.
+
+Design choices: a blocked delivery fails PERMANENTLY (`ssrf_blocked`
+metric reason, no retry — the target is policy-blocked, not unhealthy)
+and does NOT increment the subscription's consecutive-failure counter (a
+config tightening must not auto-disable subscriptions as a side effect;
+the endpoint was never contacted, so the failure says nothing about its
+health). Unresolvable hosts fail closed when CIDR ranges are configured,
+mirroring admin. Integration suite seeds the same permissive config the
+nightly workflow sets via the admin API; a dedicated integration test
+proves the restrictive defaults block an http/loopback target without
+contacting it.
+
+OPERATIONS.md now records the management-port posture as a deliberate
+exception: 9980 is unauthenticated by design — the separate management
+port is the isolation mechanism (unlike runtime/admin, whose actuators
+share the API port and are admin-key-gated). Companion PRs de-publish
+9980 from the host in the full-stack **prod** compose examples in
+cycles-server and cycles-server-admin, which contradicted this posture.
+
 ### 2026-07-03 — v0.1.25.21: spec-conformance audit + retry-contract and enum-tolerance fixes
 
 End-to-end audit of the dispatcher against cycles-protocol-v0.yaml's WEBHOOK

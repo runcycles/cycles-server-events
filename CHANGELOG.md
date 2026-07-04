@@ -20,6 +20,48 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.22] — 2026-07-04
+
+### Added
+
+- **Delivery-time SSRF guard.** The dispatcher now re-validates the
+  subscription URL against the CURRENT admin webhook-security config
+  (`config:webhook-security`, managed via
+  `PUT /v1/admin/config/webhook-security`) immediately before every
+  outbound POST — scheme rules (`allow_http`), resolved-IP checks against
+  `blocked_cidr_ranges` (incl. IPv4-mapped IPv6), and
+  `allowed_url_patterns` globs. Validation semantics are a line-for-line
+  port of the admin plane's create/update-time `WebhookUrlValidator`, so
+  the two ends cannot disagree under the same config. Closes the gaps
+  admin-side-only validation leaves open: DNS rebinding / target drift
+  after creation, config tightened after creation, and legacy
+  subscriptions that predate admin validation. A blocked delivery fails
+  permanently (`ssrf_blocked` metric reason, no retry) and does NOT count
+  against the subscription's consecutive-failure budget — a policy block
+  says nothing about endpoint health, and a config tightening must not
+  auto-disable subscriptions as a side effect.
+
+### Changed
+
+- OPERATIONS.md now records the management-port security posture as a
+  deliberate exception: 9980 is unauthenticated by design (the separate
+  port is the isolation mechanism) — bind it internal-only, never publish
+  on a host or ingress.
+
+### Compatibility
+
+- **Behavioral change for policy-violating targets only.** Subscriptions
+  whose URL passes the current webhook-security config are unaffected. A
+  subscription that violates the CURRENT config (created before admin
+  validation existed, or before a config tightening) now permanently fails
+  at dispatch instead of being delivered. With no config stored, the
+  restrictive defaults apply (HTTPS required; loopback/private ranges
+  blocked) — deployments that rely on http/loopback targets (e.g. local
+  smoke stacks) must set `allow_http` / clear `blocked_cidr_ranges` via
+  the admin config endpoint, exactly as the org nightly workflow already
+  does. Residual DNS-rebinding TOCTOU (resolve-then-connect is not
+  resolve-and-pin) is documented in AUDIT.md.
+
 ## [0.1.25.21] — 2026-07-03
 
 ### Added
