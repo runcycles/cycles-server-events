@@ -13,12 +13,15 @@ import redis.clients.jedis.JedisPool;
  * ({@code config:webhook-security} — written by
  * {@code PUT /v1/admin/config/webhook-security} on cycles-server-admin).
  *
- * <p>Failure posture: absent key OR any read/parse failure returns the
- * built-in defaults (private ranges blocked, HTTPS required). Defaults are
- * the restrictive baseline, so a transient Redis blip or a corrupt config
- * value can only tighten delivery-time checks, never loosen them — and a
- * corrupt config must not poison the dispatch loop the way a throwing
- * reader would.
+ * <p>Failure posture (review-hardened): an ABSENT/blank key is a legitimate
+ * state ("no config ever stored") and returns the built-in restrictive
+ * defaults — the same absent-key baseline admin validates new subscriptions
+ * against, so the two ends agree. A read or parse FAILURE, however, is
+ * INDETERMINATE and throws: silently substituting the restrictive defaults
+ * here would let a transient Redis blip or a corrupt value permanently fail
+ * valid deliveries (the SSRF guard treats a violation as a no-retry policy
+ * block). The caller leaves the delivery un-acked instead, and the
+ * stale-processing recovery retries it once the config is readable again.
  */
 @Repository
 public class WebhookSecurityConfigRepository {
@@ -34,6 +37,13 @@ public class WebhookSecurityConfigRepository {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * @return the stored config, or the restrictive defaults when no config
+     *         has ever been stored (absent/blank key)
+     * @throws IllegalStateException when the config cannot be read or parsed
+     *         — the current policy is unknown, which is NOT the same as
+     *         "policy denies this URL"
+     */
     public WebhookSecurityConfig get() {
         try (Jedis jedis = jedisPool.getResource()) {
             String data = jedis.get(CONFIG_KEY);
@@ -42,9 +52,9 @@ public class WebhookSecurityConfigRepository {
             }
             return objectMapper.readValue(data, WebhookSecurityConfig.class);
         } catch (Exception e) {
-            LOG.warn("Failed to read webhook security config; using restrictive defaults: config_key={}",
+            LOG.warn("Webhook security config indeterminate (read/parse failure): config_key={}",
                     CONFIG_KEY, e);
-            return WebhookSecurityConfig.builder().build();
+            throw new IllegalStateException("Webhook security config indeterminate", e);
         }
     }
 }

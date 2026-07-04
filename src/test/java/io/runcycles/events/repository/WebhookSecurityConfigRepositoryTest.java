@@ -13,6 +13,7 @@ import redis.clients.jedis.JedisPool;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
@@ -64,23 +65,25 @@ class WebhookSecurityConfigRepositoryTest {
     }
 
     @Test
-    void corruptValue_fallsBackToRestrictiveDefaults() {
+    void corruptValue_throwsIndeterminate_notSilentDefaults() {
+        // Review finding: substituting restrictive defaults on a read/parse
+        // failure let a corrupt value permanently fail valid deliveries via
+        // the guard's no-retry policy block. Indeterminate must THROW so the
+        // delivery is retried instead.
         when(jedis.get("config:webhook-security")).thenReturn("{not json");
 
-        WebhookSecurityConfig config = repository.get();
-
-        assertThat(config.getAllowHttp()).isFalse();
-        assertThat(config.getBlockedCidrRanges()).isNotEmpty();
+        assertThatThrownBy(() -> repository.get())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("indeterminate");
     }
 
     @Test
-    void redisFailure_fallsBackToRestrictiveDefaults() {
+    void redisFailure_throwsIndeterminate_notSilentDefaults() {
         when(jedisPool.getResource()).thenThrow(new IllegalStateException("pool exhausted"));
 
-        WebhookSecurityConfig config = repository.get();
-
-        assertThat(config.getAllowHttp()).isFalse();
-        assertThat(config.getBlockedCidrRanges()).isNotEmpty();
+        assertThatThrownBy(() -> repository.get())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("indeterminate");
     }
 
     @Test

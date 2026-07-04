@@ -45,7 +45,10 @@ import java.util.stream.Collectors;
  * <p>Returns a violation reason string, or {@code null} when the URL is
  * allowed. Unresolvable hosts are treated as violations when CIDR ranges
  * are configured (fail-closed, mirroring admin): without resolution the
- * ranges cannot be checked.
+ * ranges cannot be checked. A config read/parse failure propagates as
+ * {@link IllegalStateException} from the repository — an INDETERMINATE
+ * policy is deliberately not converted into either an allow or a block;
+ * the caller retries the delivery once the config is readable.
  */
 @Component
 public class WebhookUrlGuard {
