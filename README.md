@@ -2,14 +2,19 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Coverage](https://img.shields.io/badge/coverage-95%25+-brightgreen)](https://github.com/runcycles/cycles-server-events/actions)
 
-# Runcycles Event Server
+# Cycles Event Server — Event Delivery and Evidence Signing
 
-The asynchronous tier of the Cycles ecosystem. It runs two independent Redis-fed workers:
+Cycles Event Server is the asynchronous processing tier for the Cycles stack. It consumes Redis-backed work streams produced by `cycles-server`, persists operational records, and performs the out-of-band work that should not block the runtime reservation path: webhook fan-out and CyclesEvidence signing.
 
-1. **Webhook delivery** — consumes events and delivers them to subscriber endpoints with HMAC-SHA256 signing, exponential backoff retry, auto-disable on consecutive failures, and AES-256-GCM secret encryption at rest.
-2. **CyclesEvidence signing** — consumes evidence source records emitted by `cycles-server`, builds a `cycles-evidence/v0.1` envelope, **Ed25519-signs** it, and stores it content-addressed for `cycles-server` to serve at `GET /v1/evidence/{id}`. This is where the evidence **private signing key** lives. See [CyclesEvidence signing](#cyclesevidence-signing) and the [identity enablement runbook](docs/evidence-identity-enablement.md).
+It currently runs two independent workers:
 
-**Specs:** [complete-budget-governance-v0.1.25.yaml](https://github.com/runcycles/cycles-server-admin/blob/main/complete-budget-governance-v0.1.25.yaml) (webhooks/events) · [cycles-evidence-v0.1.yaml](https://github.com/runcycles/cycles-protocol/blob/main/drafts/cycles-evidence-v0.1.yaml) (evidence envelope)
+1. **Webhook delivery** — consumes Cycles events and delivers them to subscriber endpoints using signed, at-least-once HTTP delivery. Deliveries include HMAC-SHA256 signatures, retry with exponential backoff, delivery-attempt tracking, automatic subscription disablement after repeated failures, and encrypted storage for webhook secrets and custom headers.
+
+2. **CyclesEvidence signing** — consumes evidence source records emitted by `cycles-server`, builds a `cycles-evidence/v0.1` envelope, signs it with Ed25519, and stores the signed envelope by content address. `cycles-server` then serves the signed evidence at `GET /v1/evidence/{id}`. The evidence private signing key is isolated in this service; `cycles-server` does not need access to it. See [CyclesEvidence signing](#cyclesevidence-signing) and the [identity enablement runbook](docs/evidence-identity-enablement.md).
+
+The event server is not the runtime budget authority. It does not reserve, commit, release, or enforce budget. Its role is to turn Cycles state changes into durable, auditable delivery and identity artifacts: webhook deliveries, replayable event history, delivery diagnostics, trace-correlated records, and signed evidence envelopes.
+
+**Specs:** [`cycles-governance-admin-v0.1.25.yaml`](https://github.com/runcycles/cycles-protocol/blob/main/cycles-governance-admin-v0.1.25.yaml) for events, webhooks, delivery records, and replay · [`cycles-evidence-v0.1.yaml`](https://github.com/runcycles/cycles-protocol/blob/main/drafts/cycles-evidence-v0.1.yaml) for the evidence envelope.
 
 ## Architecture
 
