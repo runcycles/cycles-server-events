@@ -9,6 +9,7 @@ import io.runcycles.events.repository.EventRepository;
 import io.runcycles.events.repository.SubscriptionRepository;
 import io.runcycles.events.transport.Transport;
 import io.runcycles.events.transport.TransportResult;
+import io.runcycles.events.transport.webhook.WebhookUrlGuard;
 import io.runcycles.events.validation.EventPayloadValidator;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -33,6 +34,7 @@ class DeliveryHandlerTest {
     @Mock private SubscriptionRepository subscriptionRepository;
     @Mock private DeliveryQueueRepository queueRepository;
     @Mock private Transport transport;
+    @Mock private WebhookUrlGuard urlGuard;
 
     private SimpleMeterRegistry registry;
     private CyclesMetrics metrics;
@@ -45,10 +47,13 @@ class DeliveryHandlerTest {
         metrics = new CyclesMetrics(registry, true); // tenant tag enabled
         validator = new EventPayloadValidator(metrics);
         handler = new DeliveryHandler(deliveryRepository, eventRepository,
-                subscriptionRepository, queueRepository, transport, metrics, validator, 86400000L);
+                subscriptionRepository, queueRepository, transport, metrics, validator,
+                urlGuard, 86400000L);
         lenient().when(subscriptionRepository.updateDeliveryState(
                 anyString(), anyInt(), any(), any(), any(), any()))
                 .thenReturn(true);
+        // Mockito's default null return = "URL allowed"; individual tests
+        // stub a violation reason to exercise the blocked path.
     }
 
     private double counter(String name, String... tags) {
@@ -932,6 +937,53 @@ class DeliveryHandlerTest {
         verify(eventRepository, times(2)).save(captor.capture());
         assertThat(captor.getAllValues())
                 .allSatisfy(e -> assertThat(e.getRequestId()).isEqualTo("req_abc123"));
+    }
+
+    // --- delivery-time SSRF guard ---
+
+    @Test
+    void ssrfBlocked_permanentFail_noTransport_noConsecutiveFailureIncrement() {
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(urlGuard.check("https://example.com/webhook"))
+                .thenReturn("Resolves to blocked IP: 10.0.0.5");
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+        assertThat(delivery.getErrorMessage())
+                .isEqualTo("Delivery blocked by webhook security policy: Resolves to blocked IP: 10.0.0.5");
+        verify(deliveryRepository).update(delivery);
+        // Never contacted the endpoint, never scheduled a retry
+        verify(transport, never()).deliver(any(), any(), any(), any());
+        verify(queueRepository, never()).scheduleRetry(anyString(), anyLong());
+        // Policy block says nothing about endpoint health — no consecutive-failure
+        // increment, no auto-disable side effect from a config tightening.
+        verify(subscriptionRepository, never()).updateDeliveryState(
+                anyString(), anyInt(), any(), any(), any(), any());
+        assertThat(counter(CyclesMetrics.DELIVERY_FAILED,
+                "tenant", "t-1", "event_type", "tenant.created", "reason", "ssrf_blocked"))
+                .isEqualTo(1.0);
+    }
+
+    @Test
+    void ssrfAllowed_deliveryProceeds() {
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(urlGuard.check("https://example.com/webhook")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
+        verify(transport).deliver(any(), any(), any(), any());
     }
 
     @Test
