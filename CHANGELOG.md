@@ -37,20 +37,31 @@ breaking.
   at ENQUEUE, but the actual HTTP send happens here and never re-passes the
   enqueue gate — so **deliveries queued before this version deployed**, and
   **every retry/redelivery**, previously bypassed the boundary. Enforcing it
-  at send time makes the leak impossible regardless of what is already
-  queued or stored.
+  at send time closes that hole regardless of what is already queued or
+  stored. **Rolling-deploy note:** this is a per-worker guarantee — it takes
+  effect only once **all** delivery workers are upgraded to this version (or
+  any remaining `0.1.25.22`-or-earlier workers are stopped/drained). During a
+  mixed-version rollout an old worker can still claim and send a violating
+  queued delivery; the boundary is airtight only after the fleet is fully
+  upgraded.
 
   Classification is **fail-closed** and self-contained (implemented against
   this service's own `Event`/`EventType`/`EventCategory`/`Subscription`
-  models, matching admin's semantics exactly): a concrete-tenant delivery is
-  dropped if the event **type** is admin-only, **or** the (independent,
-  cross-plane) **category** is admin-only, **or** the record is
-  unclassifiable (neither dimension resolves to a tenant-accessible value).
-  Admin-only categories are `api_key` / `policy` / `webhook` / `system`;
-  tenant-accessible are `budget` / `reservation` / `tenant`. `__system__`-owned
-  (operator) subscriptions still receive admin-only events, and
-  concrete-tenant subscriptions still receive their tenant-accessible events
-  — the decision is **per event**.
+  models, matching admin's semantics exactly), and uses a **raw-string
+  allowlist** rather than an enum lookup so it stays correct under version
+  skew (a future admin event type this worker's enum has not learned is still
+  blocked). A concrete-tenant delivery is **allowed only if** every supplied
+  selector dimension is positively tenant-accessible by raw string: the
+  **type** must start with a tenant namespace (`budget.` / `reservation.` /
+  `tenant.`) and the **category** must be exactly one of `budget` /
+  `reservation` / `tenant`. It is **blocked** if a supplied type is not in a
+  tenant namespace, or a supplied category is not in the tenant set, or
+  neither dimension positively classifies (a blank / unknown / typeless
+  record). Admin-only namespaces/categories are `api_key` / `policy` /
+  `webhook` / `system`. `__system__`-owned (operator) subscriptions still
+  receive admin-only events, and concrete-tenant subscriptions still receive
+  their tenant-accessible events — the decision is **per event**, made on the
+  freshly reloaded `Event` (never a stale `Delivery.event_type` snapshot).
 
   A blocked delivery is dropped as **terminal** (`FAILED`, distinct
   `ownership boundary (#209)` error message; same terminal-not-retryable

@@ -1286,4 +1286,52 @@ class DeliveryHandlerTest {
 
         verify(urlGuard, never()).check(anyString());
     }
+
+    @Test
+    void ownershipBoundary_classifiesOnReloadedEvent_notDeliverySnapshot() {
+        // The Delivery row carries a STALE tenant-accessible event_type snapshot,
+        // but the reloaded Event is admin-only. Classification MUST use the
+        // authoritative reloaded Event → blocked. Guards against regressing to a
+        // Delivery.event_type-based check.
+        Delivery delivery = pendingDelivery();
+        delivery.setEventType("tenant.created"); // stale, tenant-accessible snapshot
+        Event reloaded = adminOnlyEvent();        // api_key.revoked / api_key (admin)
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(reloaded);
+        when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+        assertThat(delivery.getErrorMessage()).contains("ownership boundary");
+        verify(transport, never()).deliver(any(), any(), any(), any());
+        // Reported signal reflects the reloaded (authoritative) event type.
+        assertThat(counter(CyclesMetrics.DELIVERY_BOUNDARY_SKIPPED,
+                "tenant", "t-1", "event_type", "api_key.revoked", "category", "api_key"))
+                .isEqualTo(1.0);
+    }
+
+    @Test
+    void ownershipBoundary_versionSkew_futureAdminTypeWithTenantCategory_blocked() {
+        // A future admin event type this worker's enum has NOT learned, carrying a
+        // tenant-accessible category. The raw-namespace allowlist blocks it even
+        // though the enum can't resolve the type (fail-closed under version skew).
+        Event event = Event.builder()
+                .eventId("evt-1")
+                .eventType("system.brand_new_event") // admin namespace, unknown to enum
+                .category("tenant")                  // tenant-accessible category
+                .timestamp(Instant.now())
+                .tenantId("t-1")
+                .source("admin")
+                .build();
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(event);
+        when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+        verify(transport, never()).deliver(any(), any(), any(), any());
+    }
 }

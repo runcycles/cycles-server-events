@@ -27,23 +27,44 @@ pending/retry, and recovery just re-queues into pending for the same loop —
 so enforcing the boundary once inside `handle()`, immediately before the
 `transport.deliver(...)` call, covers initial + retry + recovered by
 construction and is evaluated at SEND time (so pre-upgrade queued
-deliveries are caught).
+deliveries are caught). ROLLING-DEPLOY caveat: this is a per-worker
+guarantee — airtight only once ALL delivery workers run this version (or
+remaining `0.1.25.22`-or-earlier workers are stopped/drained). During a
+mixed-version rollout an old worker can still claim and send a violating
+queued delivery; called out plainly in the CHANGELOG for operators.
 
 Classification (`WebhookOwnershipBoundary`, new, self-contained, I/O-free):
-mirrors admin's semantics EXACTLY but against THIS service's own models
+mirrors admin's fail-closed intent but against THIS service's own models
 (no dependency on admin classes). Owner: `isSystemOwner(tenantId)` =
 `tenantId == null || "__system__".equals(tenantId)` — a blank/whitespace
 owner is CONCRETE (matches admin `WebhookSubscription.isSystemOwner`).
-Admin-only is FAIL-CLOSED across BOTH dimensions because `Event.category`
-is an independent cross-plane field, not always derived from the type:
-block a concrete-tenant delivery if the type is admin-only, OR the category
-is admin-only, OR the record is unclassifiable (neither the type nor the
-category resolves to a known tenant-accessible value — a typeless/unknown
-record must not reach a tenant endpoint). This matches admin's
-`typeAdmin || categoryAdmin || unclassifiable`. Added
-`EventType.fromValueOrNull` (non-throwing) and
-`EventCategory.isTenantAccessible()` to express it; the tenant-accessible
-set is the single source both dimensions and both planes share.
+
+Codex-review correction (REVISE-MAJOR round): the first cut classified via
+the `EventCategory`/`EventType` ENUMS and treated a record as unclassifiable
+only when BOTH dimensions were unknown (`type == null && category == null`).
+That FAILS OPEN on a single dimension and is dangerous under VERSION SKEW:
+this worker deliberately preserves unknown event strings byte-for-byte, so a
+newly-introduced admin event type (a future `system.*` / `api_key.*`)
+reaches an old worker before its enum knows the value, resolves to `null`,
+and — with the other dimension happening to be tenant-accessible — slipped
+through. The predicate now classifies by RAW STRING allowlist, fail-closed
+per SUPPLIED dimension: a concrete-tenant delivery is ALLOWED only if every
+supplied (non-null) dimension positively classifies AND at least one does —
+the `event_type` must start with a tenant NAMESPACE prefix (`budget.` /
+`reservation.` / `tenant.`) and the `category` must be exactly one of
+`{budget, reservation, tenant}`. BLOCKED if a supplied type is not in a
+tenant namespace, OR a supplied category is not in the tenant set, OR neither
+dimension positively classifies (blank / unknown / typeless). A future
+`budget.new_thing` is correctly allowed (positive namespace match); a
+future/unknown `system.*` / `api_key.*` is blocked even though the enum
+cannot resolve it. `null` = absent (not a violation by itself);
+present-but-blank/whitespace = supplied violation = blocked. The tenant
+category set and type-namespace prefixes are DERIVED from
+`EventCategory.isTenantAccessible()` (single source of truth, to which
+`EventType.isTenantAccessible()` now delegates), relying on the governance
+alignment that a tenant type namespace is the tenant category value + `.`.
+The block decision AND its emitted metric/log signal use the freshly
+RELOADED `Event`, never the possibly-stale `Delivery.event_type` snapshot.
 
 Terminal handling: a blocked delivery is DROPPED as terminal via the
 existing `markFailed` (status `FAILED`, distinct error message
@@ -81,11 +102,21 @@ Coordinated with cycles-server-admin #209 (write-path + enqueue-path +
 reconciler) / #210 and governance INVARIANT 2 revisions
 (v0.1.25.38–.41, `cycles-protocol` main). Tests: unit coverage for the
 predicate (`WebhookOwnershipBoundaryTest`) across every classification
-branch, plus `DeliveryHandlerTest` cases for the queued-before-upgrade
-drop, the retry path, the type/category-inconsistent fail-closed block, a
-concrete-tenant sub still receiving tenant-accessible events, `__system__`
-and null-owner subs still receiving admin events, and the
-SSRF-guard-not-reached short-circuit. Jacoco gate ≥95% retained.
+branch — including the version-skew fail-closed cases (future
+admin-namespace type + tenant category → blocked; unknown/future category +
+tenant type → blocked; blank supplied type/category → blocked; future
+tenant-namespaced `budget.new_thing` → allowed) and the raw-string helper
+semantics. `DeliveryHandlerTest` cases for the queued-before-upgrade drop,
+the retry path, the type/category-inconsistent fail-closed block, the
+version-skew future-admin-type block, classification on the RELOADED event
+(stale `Delivery.event_type` snapshot must not be used), a concrete-tenant
+sub still receiving tenant-accessible events, `__system__` and null-owner
+subs still receiving admin events, and the SSRF-guard-not-reached
+short-circuit. `RecoveredDeliveryBoundaryTest` composes
+`DispatchRecovery → DispatchLoop → DeliveryHandler.handle()` end-to-end to
+pin the load-bearing recovered-processing call graph (recovered admin
+delivery to a concrete tenant is dropped terminal, not sent, not retried,
+still acked). Jacoco gate ≥95% retained.
 
 ### 2026-07-04 — v0.1.25.22: delivery-time SSRF guard + management-port posture
 

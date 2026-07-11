@@ -59,7 +59,7 @@ class WebhookOwnershipBoundaryTest {
         assertThat(WebhookOwnershipBoundary.isBlocked("api_key.revoked", "budget", "t-1")).isTrue();
     }
 
-    // --- Fail-closed: unclassifiable ---
+    // --- Fail-closed: unclassifiable / unknown / blank (raw-string allowlist) ---
 
     @Test
     void concreteOwner_bothNull_unclassifiable_blocked() {
@@ -72,14 +72,69 @@ class WebhookOwnershipBoundaryTest {
     }
 
     @Test
-    void concreteOwner_unknownTypeButTenantAccessibleCategory_notBlocked() {
-        // A future/unknown tenant event still carrying a tenant-accessible
-        // category is positively classifiable — must NOT be over-blocked.
-        assertThat(WebhookOwnershipBoundary.isBlocked("budget.brand_new", "budget", "t-1")).isFalse();
+    void concreteOwner_versionSkew_futureAdminLookingType_withTenantCategory_blocked() {
+        // The DEFECT the raw-string allowlist fixes: a future admin event type
+        // the enum has not learned yet ("system.*"/"api_key.*") reaches an old
+        // worker; the type is unknown-to-the-enum but its NAMESPACE is admin, so
+        // it must be BLOCKED even though the category happens to be tenant-accessible.
+        assertThat(WebhookOwnershipBoundary.isBlocked("system.new_event", "tenant", "t-1")).isTrue();
+        assertThat(WebhookOwnershipBoundary.isBlocked("api_key.future_event", "budget", "t-1")).isTrue();
+    }
+
+    @Test
+    void concreteOwner_tenantTypeButFutureUnknownCategory_blocked() {
+        // A tenant-namespace type but an unknown/future category (not in the
+        // tenant set) is a supplied-dimension violation → BLOCKED (fail-closed).
+        assertThat(WebhookOwnershipBoundary.isBlocked("tenant.created", "future_admin_category", "t-1")).isTrue();
+    }
+
+    @Test
+    void concreteOwner_blankSuppliedType_withTenantCategory_blocked() {
+        // A present-but-blank type is a supplied dimension that fails the tenant
+        // namespace → BLOCKED even though the category is tenant-accessible.
+        assertThat(WebhookOwnershipBoundary.isBlocked("   ", "tenant", "t-1")).isTrue();
+    }
+
+    @Test
+    void concreteOwner_blankSuppliedCategory_withTenantType_blocked() {
+        assertThat(WebhookOwnershipBoundary.isBlocked("budget.created", "   ", "t-1")).isTrue();
+    }
+
+    @Test
+    void concreteOwner_categoryLikePrefixOnly_notInSet_blocked() {
+        // "budget" is tenant, but a mere prefix-looking category value that is
+        // not EXACTLY in the set is blocked (categories are an exact-match set,
+        // not a namespace).
+        assertThat(WebhookOwnershipBoundary.isBlocked("tenant.created", "budgetary", "t-1")).isTrue();
+    }
+
+    @Test
+    void concreteOwner_futureButTenantNamespacedType_allowed() {
+        // Positive namespace match: a genuinely future tenant type is ALLOWED
+        // (with a tenant category, or with no category at all).
+        assertThat(WebhookOwnershipBoundary.isBlocked("budget.new_thing", "budget", "t-1")).isFalse();
+        assertThat(WebhookOwnershipBoundary.isBlocked("budget.new_thing", null, "t-1")).isFalse();
     }
 
     @Test
     void concreteOwner_tenantAccessibleTypeButNullCategory_notBlocked() {
         assertThat(WebhookOwnershipBoundary.isBlocked("budget.created", null, "t-1")).isFalse();
+    }
+
+    @Test
+    void concreteOwner_nullTypeButTenantCategory_notBlocked() {
+        // A null (absent) type with a positively tenant-accessible category is
+        // deliverable — null is "absent", not a supplied violation.
+        assertThat(WebhookOwnershipBoundary.isBlocked(null, "reservation", "t-1")).isFalse();
+    }
+
+    @Test
+    void tenantAccessibleHelpers_rawStringSemantics() {
+        assertThat(WebhookOwnershipBoundary.isTenantAccessibleType("reservation.expired")).isTrue();
+        assertThat(WebhookOwnershipBoundary.isTenantAccessibleType("policy.created")).isFalse();
+        assertThat(WebhookOwnershipBoundary.isTenantAccessibleType(null)).isFalse();
+        assertThat(WebhookOwnershipBoundary.isTenantAccessibleCategory("budget")).isTrue();
+        assertThat(WebhookOwnershipBoundary.isTenantAccessibleCategory("system")).isFalse();
+        assertThat(WebhookOwnershipBoundary.isTenantAccessibleCategory(null)).isFalse();
     }
 }

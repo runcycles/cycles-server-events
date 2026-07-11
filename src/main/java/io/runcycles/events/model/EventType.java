@@ -75,10 +75,17 @@ public enum EventType {
 
     public EventCategory getCategory() { return category; }
 
+    /**
+     * Delegates to {@link EventCategory#isTenantAccessible()} so the
+     * type-level and category-level tenant-accessibility definitions share ONE
+     * source of truth (matching cycles-server-admin's structure). NOTE: this
+     * KNOWN-enum helper is not the delivery-side guard — the fail-closed
+     * boundary in {@link io.runcycles.events.service.WebhookOwnershipBoundary}
+     * classifies by RAW string so future/unknown admin types are blocked under
+     * version skew; an enum-only path must not undercut it.
+     */
     public boolean isTenantAccessible() {
-        return category == EventCategory.BUDGET ||
-               category == EventCategory.RESERVATION ||
-               category == EventCategory.TENANT;
+        return category != null && category.isTenantAccessible();
     }
 
     public static EventType fromValue(String value) {
@@ -86,20 +93,5 @@ public enum EventType {
             if (t.value.equals(value)) return t;
         }
         throw new IllegalArgumentException("Unknown event type: " + value);
-    }
-
-    /**
-     * Non-throwing resolution used by the fail-closed webhook ownership
-     * boundary ({@link io.runcycles.events.service.WebhookOwnershipBoundary}).
-     * Returns {@code null} for an unknown-to-us type instead of throwing, so
-     * the boundary can treat an unresolvable type as "not positively
-     * tenant-accessible" and fall through to its unclassifiable check.
-     */
-    public static EventType fromValueOrNull(String value) {
-        if (value == null) return null;
-        for (EventType t : values()) {
-            if (t.value.equals(value)) return t;
-        }
-        return null;
     }
 }

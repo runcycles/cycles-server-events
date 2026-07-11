@@ -152,10 +152,13 @@ public class DeliveryHandler {
         // policy-ineligible for this endpoint and re-sending will never make it
         // eligible). Per-event: a mixed subscription still receives its
         // tenant-accessible events; only the admin-only ones are skipped.
+        // Classify on the RELOADED Event (authoritative), never the possibly
+        // stale Delivery.event_type snapshot — the boundary decision AND its
+        // reported signal use event.getEventType()/getCategory().
         if (WebhookOwnershipBoundary.isBlocked(event.getEventType(), event.getCategory(), sub.getTenantId())) {
-            metrics.recordDeliveryBoundarySkipped(sub.getTenantId(), delivery.getEventType(), event.getCategory());
+            metrics.recordDeliveryBoundarySkipped(sub.getTenantId(), event.getEventType(), event.getCategory());
             LOG.warn("Webhook delivery blocked by ownership boundary (#209): delivery_id={} event_id={} event_type={} category={} subscription_id={} tenant_id={} trace_id={} — a concrete-tenant subscription cannot receive admin-only or unclassifiable events",
-                    safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(delivery.getEventType()),
+                    safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(event.getEventType()),
                     safe(event.getCategory()), safe(sub.getSubscriptionId()), safe(sub.getTenantId()),
                     safe(effectiveTraceId(delivery, event)));
             markFailed(delivery, "Delivery blocked by webhook ownership boundary (#209): "
