@@ -87,4 +87,19 @@ public enum EventType {
         }
         throw new IllegalArgumentException("Unknown event type: " + value);
     }
+
+    /**
+     * Non-throwing resolution used by the fail-closed webhook ownership
+     * boundary ({@link io.runcycles.events.service.WebhookOwnershipBoundary}).
+     * Returns {@code null} for an unknown-to-us type instead of throwing, so
+     * the boundary can treat an unresolvable type as "not positively
+     * tenant-accessible" and fall through to its unclassifiable check.
+     */
+    public static EventType fromValueOrNull(String value) {
+        if (value == null) return null;
+        for (EventType t : values()) {
+            if (t.value.equals(value)) return t;
+        }
+        return null;
+    }
 }

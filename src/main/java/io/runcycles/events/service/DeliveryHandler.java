@@ -45,6 +45,7 @@ public class DeliveryHandler {
     static final String REASON_TRANSPORT_ERROR = "transport_error";
     static final String REASON_CONSECUTIVE_FAILURES = "consecutive_failures";
     static final String REASON_SSRF_BLOCKED = "ssrf_blocked";
+    static final String REASON_OWNERSHIP_BOUNDARY = "ownership_boundary";
 
     private final DeliveryRepository deliveryRepository;
     private final EventRepository eventRepository;
@@ -133,6 +134,32 @@ public class DeliveryHandler {
                     safe(sub.getSubscriptionId()), safe(sub.getTenantId()), sub.getStatus(),
                     safe(effectiveTraceId(delivery, event)));
             markFailed(delivery, "Subscription not active: " + sub.getStatus());
+            return;
+        }
+
+        // Last-mile webhook ownership boundary (governance WEBHOOK SUBSCRIPTION
+        // INVARIANT 2; issue runcycles/cycles-server-admin#209). The admin plane
+        // blocks admin-only events onto concrete-tenant subscriptions at
+        // subscription-write and at ENQUEUE, but the actual HTTP send, retries,
+        // and recovered-processing redeliveries all happen HERE and never re-pass
+        // the enqueue gate. Re-evaluate the boundary against the CURRENT event +
+        // subscription immediately before the send so it also covers deliveries
+        // queued BEFORE this version deployed. A concrete-tenant-owned
+        // subscription (owner present and != "__system__") receiving an admin-only
+        // or unclassifiable event (fail-closed: type OR category admin-only, or
+        // neither classifiable) is a confidentiality leak — DROP as terminal
+        // (distinct boundary-skipped reason, NOT a retryable failure: the event is
+        // policy-ineligible for this endpoint and re-sending will never make it
+        // eligible). Per-event: a mixed subscription still receives its
+        // tenant-accessible events; only the admin-only ones are skipped.
+        if (WebhookOwnershipBoundary.isBlocked(event.getEventType(), event.getCategory(), sub.getTenantId())) {
+            metrics.recordDeliveryBoundarySkipped(sub.getTenantId(), delivery.getEventType(), event.getCategory());
+            LOG.warn("Webhook delivery blocked by ownership boundary (#209): delivery_id={} event_id={} event_type={} category={} subscription_id={} tenant_id={} trace_id={} — a concrete-tenant subscription cannot receive admin-only or unclassifiable events",
+                    safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(delivery.getEventType()),
+                    safe(event.getCategory()), safe(sub.getSubscriptionId()), safe(sub.getTenantId()),
+                    safe(effectiveTraceId(delivery, event)));
+            markFailed(delivery, "Delivery blocked by webhook ownership boundary (#209): "
+                    + "concrete-tenant subscription cannot receive admin-only event");
             return;
         }
 

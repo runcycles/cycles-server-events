@@ -23,6 +23,19 @@ public enum EventCategory {
     }
 
     /**
+     * Tenant-accessible categories per governance WEBHOOK SUBSCRIPTION
+     * INVARIANT 2 (cycles-governance-admin-v0.1.25): a CONCRETE-tenant-owned
+     * subscription may only carry budget / reservation / tenant selectors.
+     * The complement (api_key, policy, webhook, system) is admin-only.
+     * Mirrors cycles-server-admin's {@code EventCategory.isTenantAccessible()}
+     * so the delivery-side boundary stays in lockstep with the admin write
+     * path and dispatch gate.
+     */
+    public boolean isTenantAccessible() {
+        return this == BUDGET || this == RESERVATION || this == TENANT;
+    }
+
+    /**
      * Local-vocabulary resolution helper — NOT a Jackson creator.
      * {@code Event.category} is an open string on the wire (spec enum
      * EXTENSIBILITY: categories are additive, and the dispatcher re-serializes

@@ -20,6 +20,54 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.23] — 2026-07-11
+
+### Security
+
+- **Last-mile webhook ownership boundary (issue
+  runcycles/cycles-server-admin#209).** The dispatcher now re-evaluates
+  governance **WEBHOOK SUBSCRIPTION INVARIANT 2**
+  (`cycles-governance-admin-v0.1.25`) against the current event +
+  subscription **immediately before every outbound POST** — initial
+  delivery, retries, and recovered/orphaned-processing redeliveries all
+  funnel through the single `DeliveryHandler.handle()` send path. A
+  subscription owned by a **concrete tenant** (`tenant_id` present and
+  `!= "__system__"`) MUST NOT be delivered an **admin-only** event. The
+  admin plane already blocks admin-only selectors at subscription-write and
+  at ENQUEUE, but the actual HTTP send happens here and never re-passes the
+  enqueue gate — so **deliveries queued before this version deployed**, and
+  **every retry/redelivery**, previously bypassed the boundary. Enforcing it
+  at send time makes the leak impossible regardless of what is already
+  queued or stored.
+
+  Classification is **fail-closed** and self-contained (implemented against
+  this service's own `Event`/`EventType`/`EventCategory`/`Subscription`
+  models, matching admin's semantics exactly): a concrete-tenant delivery is
+  dropped if the event **type** is admin-only, **or** the (independent,
+  cross-plane) **category** is admin-only, **or** the record is
+  unclassifiable (neither dimension resolves to a tenant-accessible value).
+  Admin-only categories are `api_key` / `policy` / `webhook` / `system`;
+  tenant-accessible are `budget` / `reservation` / `tenant`. `__system__`-owned
+  (operator) subscriptions still receive admin-only events, and
+  concrete-tenant subscriptions still receive their tenant-accessible events
+  — the decision is **per event**.
+
+  A blocked delivery is dropped as **terminal** (`FAILED`, distinct
+  `ownership boundary (#209)` error message; same terminal-not-retryable
+  treatment as the SSRF policy block — re-sending can never make an
+  ineligible event eligible), logged at WARN with
+  `subscription_id`/`tenant_id`/`event_type`/`category`, and counted on the
+  new `cycles_webhook_delivery_boundary_skipped_total` metric
+  (`event_type`, `category` tags). It never contacts the endpoint, never
+  schedules a retry, and never touches the subscription's consecutive-failure
+  health. Coordinated with cycles-server-admin #209/#210 and the governance
+  INVARIANT 2 spec revisions (v0.1.25.38–.41).
+
+- **Delivery-time subscription-status re-check (already enforced, retained).**
+  A non-`ACTIVE` (PAUSED/DISABLED) subscription at send time is dropped as
+  terminal, closing the concurrent-disable TOCTOU where a subscription is
+  disabled after enqueue.
+
 ## [0.1.25.22] — 2026-07-04
 
 ### Added

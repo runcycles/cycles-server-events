@@ -1124,4 +1124,166 @@ class DeliveryHandlerTest {
 
         assertThat(delivery.getTraceId()).isNull();
     }
+
+    // --- Last-mile webhook ownership boundary (#209, WEBHOOK SUBSCRIPTION INVARIANT 2) ---
+
+    private Event adminOnlyEvent() {
+        // api_key.* — an admin-only event (type AND category admin).
+        return Event.builder()
+                .eventId("evt-1")
+                .eventType("api_key.revoked")
+                .category("api_key")
+                .timestamp(Instant.now())
+                .tenantId("t-1")
+                .source("admin")
+                .build();
+    }
+
+    private Delivery adminOnlyDelivery() {
+        Delivery d = pendingDelivery();
+        d.setEventType("api_key.revoked");
+        return d;
+    }
+
+    @Test
+    void ownershipBoundary_concreteTenantSub_adminOnlyEvent_droppedTerminal_notSent_notRetried() {
+        // A delivery already sitting in the queue (queued BEFORE this version)
+        // for a concrete-tenant subscription carrying an admin-only event must
+        // be dropped at SEND time — terminal, never sent, never retried.
+        Delivery delivery = adminOnlyDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(adminOnlyEvent());
+        Subscription sub = activeSubscription(); // tenant_id = "t-1" (concrete)
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+        assertThat(delivery.getErrorMessage()).contains("ownership boundary");
+        verify(deliveryRepository).update(delivery);
+        // Never contacted the endpoint, never scheduled a retry, never touched
+        // subscription health (a policy skip says nothing about endpoint health).
+        verify(transport, never()).deliver(any(), any(), any(), any());
+        verify(queueRepository, never()).scheduleRetry(anyString(), anyLong());
+        verify(subscriptionRepository, never()).updateDeliveryState(
+                anyString(), anyInt(), any(), any(), any(), any());
+        // Signing secret is never even fetched — no I/O before the drop.
+        verify(subscriptionRepository, never()).getSigningSecret(anyString());
+        assertThat(counter(CyclesMetrics.DELIVERY_BOUNDARY_SKIPPED,
+                "tenant", "t-1", "event_type", "api_key.revoked", "category", "api_key"))
+                .isEqualTo(1.0);
+    }
+
+    @Test
+    void ownershipBoundary_enforcedOnRetryPath() {
+        // RETRYING deliveries flow through the same handle() funnel — the
+        // boundary must catch a retry of an admin-only event too.
+        Delivery delivery = adminOnlyDelivery();
+        delivery.setStatus(DeliveryStatus.RETRYING);
+        delivery.setAttempts(2);
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(adminOnlyEvent());
+        when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+        verify(transport, never()).deliver(any(), any(), any(), any());
+        verify(queueRepository, never()).scheduleRetry(anyString(), anyLong());
+    }
+
+    @Test
+    void ownershipBoundary_typeCategoryInconsistent_failClosed_blocked() {
+        // Tenant-accessible TYPE but admin-only CATEGORY (category is an
+        // independent cross-plane field). Fail-closed: block on either dimension.
+        Event event = Event.builder()
+                .eventId("evt-1")
+                .eventType("tenant.created")   // tenant-accessible type
+                .category("webhook")           // admin-only category
+                .timestamp(Instant.now())
+                .tenantId("t-1")
+                .source("admin")
+                .build();
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(event);
+        when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+        assertThat(delivery.getErrorMessage()).contains("ownership boundary");
+        verify(transport, never()).deliver(any(), any(), any(), any());
+    }
+
+    @Test
+    void ownershipBoundary_concreteTenantSub_tenantAccessibleEvent_delivered() {
+        // Do NOT over-block: a concrete-tenant sub still receives its
+        // tenant-accessible (budget/reservation/tenant) events.
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent()); // tenant.created
+        when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
+        verify(transport).deliver(any(), any(), any(), any());
+        assertThat(counter(CyclesMetrics.DELIVERY_BOUNDARY_SKIPPED,
+                "tenant", "t-1", "event_type", "tenant.created", "category", "tenant"))
+                .isZero();
+    }
+
+    @Test
+    void ownershipBoundary_systemOwnedSub_receivesAdminEvent() {
+        // __system__-owned (operator) subscriptions legitimately receive
+        // admin-only events — the boundary must NOT block them.
+        Delivery delivery = adminOnlyDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(adminOnlyEvent());
+        Subscription sub = activeSubscription();
+        sub.setTenantId("__system__");
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
+        verify(transport).deliver(any(), any(), any(), any());
+    }
+
+    @Test
+    void ownershipBoundary_nullOwnerSub_treatedAsSystem_receivesAdminEvent() {
+        // A null owning tenant_id is system-owned per isSystemOwner semantics.
+        Delivery delivery = adminOnlyDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(adminOnlyEvent());
+        Subscription sub = activeSubscription();
+        sub.setTenantId(null);
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
+        verify(transport).deliver(any(), any(), any(), any());
+    }
+
+    @Test
+    void ownershipBoundary_checkedBeforeSsrfGuard_noUrlCheck() {
+        // The boundary short-circuits before the SSRF guard — a blocked event
+        // never triggers a URL check (no wasted I/O / DNS).
+        Delivery delivery = adminOnlyDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(adminOnlyEvent());
+        when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
+
+        handler.handle("del-1");
+
+        verify(urlGuard, never()).check(anyString());
+    }
 }
