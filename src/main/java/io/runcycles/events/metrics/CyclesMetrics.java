@@ -44,6 +44,14 @@ public class CyclesMetrics {
     public static final String DELIVERY_FAILED = "cycles.webhook.delivery.failed";
     public static final String DELIVERY_RETRIED = "cycles.webhook.delivery.retried";
     public static final String DELIVERY_STALE = "cycles.webhook.delivery.stale";
+    /**
+     * Delivery dropped by the last-mile webhook ownership boundary
+     * (governance WEBHOOK SUBSCRIPTION INVARIANT 2, issue #209): a
+     * concrete-tenant-owned subscription was about to receive an admin-only
+     * (or unclassifiable) event and the send was skipped as terminal. Parallels
+     * cycles-server-admin's {@code cycles_admin_webhook_dispatched_total{result="boundary_skipped"}}.
+     */
+    public static final String DELIVERY_BOUNDARY_SKIPPED = "cycles.webhook.delivery.boundary_skipped";
     public static final String SUBSCRIPTION_AUTO_DISABLED = "cycles.webhook.subscription.auto_disabled";
     public static final String DELIVERY_LATENCY = "cycles.webhook.delivery.latency";
 
@@ -106,6 +114,18 @@ public class CyclesMetrics {
     public void recordDeliveryStale(String tenant) {
         registry.counter(DELIVERY_STALE,
                 tags(tenant))
+                .increment();
+    }
+
+    /**
+     * Record a delivery dropped by the last-mile ownership boundary (#209).
+     * {@code event_type}/{@code category} tags carry the admin-only selector
+     * that was blocked so operators can see WHICH events were withheld from a
+     * tenant endpoint.
+     */
+    public void recordDeliveryBoundarySkipped(String tenant, String eventType, String category) {
+        registry.counter(DELIVERY_BOUNDARY_SKIPPED,
+                tags(tenant, "event_type", eventType, "category", category))
                 .increment();
     }
 

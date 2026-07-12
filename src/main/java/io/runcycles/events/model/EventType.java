@@ -75,10 +75,17 @@ public enum EventType {
 
     public EventCategory getCategory() { return category; }
 
+    /**
+     * Delegates to {@link EventCategory#isTenantAccessible()} so the
+     * type-level and category-level tenant-accessibility definitions share ONE
+     * source of truth (matching cycles-server-admin's structure). NOTE: this
+     * KNOWN-enum helper is not the delivery-side guard — the fail-closed
+     * boundary in {@link io.runcycles.events.service.WebhookOwnershipBoundary}
+     * classifies by RAW string so future/unknown admin types are blocked under
+     * version skew; an enum-only path must not undercut it.
+     */
     public boolean isTenantAccessible() {
-        return category == EventCategory.BUDGET ||
-               category == EventCategory.RESERVATION ||
-               category == EventCategory.TENANT;
+        return category != null && category.isTenantAccessible();
     }
 
     public static EventType fromValue(String value) {
