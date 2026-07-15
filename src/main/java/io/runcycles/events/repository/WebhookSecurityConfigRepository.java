@@ -15,12 +15,12 @@ import redis.clients.jedis.JedisPool;
  *
  * <p>Failure posture (review-hardened): an ABSENT/blank key is a legitimate
  * state ("no config ever stored") and returns the built-in restrictive
- * defaults — the same absent-key baseline admin validates new subscriptions
- * against, so the two ends agree. A read or parse FAILURE, however, is
- * INDETERMINATE and throws: silently substituting the restrictive defaults
- * here would let a transient Redis blip or a corrupt value permanently fail
- * valid deliveries (the SSRF guard treats a violation as a no-retry policy
- * block). The caller leaves the delivery un-acked instead, and the
+ * defaults. The delivery boundary deliberately uses a hardened superset of the
+ * historical admin fallback so an absent key cannot weaken egress filtering.
+ * A read or parse FAILURE, however, is INDETERMINATE and throws: silently
+ * substituting defaults here would let a transient Redis blip or corrupt value
+ * permanently fail valid deliveries (the SSRF guard treats a violation as a
+ * no-retry policy block). The caller leaves the delivery un-acked instead, and
  * stale-processing recovery retries it once the config is readable again.
  */
 @Repository

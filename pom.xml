@@ -18,23 +18,11 @@
     <description>Event delivery service for the Cycles ecosystem</description>
 
     <properties>
-        <revision>0.1.25.23</revision>
+        <revision>0.1.25.24</revision>
         <java.version>21</java.version>
         <jedis.version>7.5.2</jedis.version>
+        <json-schema-validator.version>2.0.0</json-schema-validator.version>
         <testcontainers.version>1.20.4</testcontainers.version>
-        <!-- Override Spring Boot 3.5.14's managed tomcat-embed-core 10.1.54 to
-             pick up the fix in 10.1.55 for 3 CRITICAL + 3 HIGH + 1 LOW Apache
-             Tomcat CVEs (all in the 10.1.0-M1..10.1.54 range; fixed in 10.1.55):
-               CVE-2026-43515 CRITICAL — Improper Authorization (method constraints)
-               CVE-2026-43512 CRITICAL — Authentication Bypass (digest auth)
-               CVE-2026-41293 CRITICAL — Improper Input Validation
-               CVE-2026-43513 HIGH     — Case-sensitivity in LockOutRealm
-               CVE-2026-42498 HIGH     — HTTP Auth header leak in WebSocket
-               CVE-2026-41284 HIGH     — Resource allocation DoS
-               CVE-2026-43514 LOW      — Observable timing in AJP secret compare
-             Same pin shape as v0.1.25.10's 10.1.54 override (dropped at v0.1.25.12
-             when SB 3.5.14's BOM caught up). Remove once SB ships with 10.1.55+. -->
-        <tomcat.version>10.1.55</tomcat.version>
     </properties>
 
     <dependencies>
@@ -58,6 +46,15 @@
         <dependency>
             <groupId>com.fasterxml.jackson.datatype</groupId>
             <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.dataformat</groupId>
+            <artifactId>jackson-dataformat-yaml</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>json-schema-validator</artifactId>
+            <version>${json-schema-validator.version}</version>
         </dependency>
         <!-- RFC 8785 JSON Canonicalization Scheme (JCS) — the cycles-evidence-v0.1
              content-hash + signing-input recipe. erdtman is the reference impl
@@ -157,6 +154,11 @@
                                     <limits>
                                         <limit>
                                             <counter>LINE</counter>
+                                            <value>COVEREDRATIO</value>
+                                            <minimum>0.95</minimum>
+                                        </limit>
+                                        <limit>
+                                            <counter>BRANCH</counter>
                                             <value>COVEREDRATIO</value>
                                             <minimum>0.95</minimum>
                                         </limit>

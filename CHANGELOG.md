@@ -20,6 +20,92 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.24] — 2026-07-15
+
+### Fixed
+
+- Periodic, age-gated webhook and evidence recovery prevents quick-restart
+  orphans while avoiding active work owned by another replica.
+- Subscription failure increments and ACTIVE/PAUSED auto-disable transitions are
+  atomic and follow the spec's "exceeds threshold" rule. Required disable events
+  are staged once per transition and published idempotently under concurrency.
+- Evidence store outages now retain work for retry instead of dead-lettering
+  transient failures. Poison-record DLQ movement is atomic.
+- Producer/worker evidence identity drift retains the source in-flight and
+  briefly pauses new claims instead of draining recoverable records into the DLQ.
+- Evidence payloads and completed envelopes are validated against the bundled
+  authoritative `cycles-evidence-v0.2` OpenAPI 3.1 / JSON Schema 2020-12
+  components before storage, including nested mirror and cross-field rules.
+- Persisted evidence is RFC 8785 JCS-canonical, matching the bytes expected at
+  the evidence fetch endpoint.
+- Terminal delivery state records the final attempt and clears obsolete retry
+  and error fields.
+- Missing webhook signing secrets created by a subscription/secret write race
+  are retained for recovery instead of being permanently failed. Missing or
+  undecryptable secrets fail closed before HTTP and are never sent unsigned.
+- Delivery acknowledgements carry an owner token, closing the stale-worker
+  window where a recovered predecessor could remove its successor's in-flight
+  entry. The same generation now fences success/failure writes, subscription
+  counters, retry enqueue, and retry-schedule restoration. Startup also rejects
+  recovery thresholds at or below the global lease or worst-case send duration.
+- Evidence processing entries use unique claim IDs with owner-checked ack and
+  DLQ transitions, so stale workers and byte-identical source records cannot
+  collide in processing metadata or remove a successor's work. For the
+  0.1.25.24 rollout, drain `evidence:processing` and stop older evidence
+  consumers before starting upgraded workers; pending records are unchanged.
+- Fractional evidence numbers are parsed as arbitrary-precision decimals before
+  binary64 safety validation, so excess precision is rejected rather than
+  silently rounded and signed.
+- Dispatcher outbox acknowledgement is owner-aware and counted once. Repeatedly
+  unpublishable tasks now exhaust a bounded retry budget and move to a bounded
+  operator DLQ instead of retrying forever.
+- Recovered `RETRYING` deliveries restore their Redis retry schedule when the
+  backoff has not elapsed, closing the persist-before-ZSET crash window without
+  sending early.
+- Corrupt or foreign delivery JSON/status values now move once to the bounded,
+  owner-fenced `dispatch:failed` quarantine instead of cycling through recovery
+  forever. The original `delivery:{id}` value is retained for operator repair.
+- A claimant resuming after stale recovery can no longer overwrite its
+  successor's owner token. CAS-exhaustion errors retain their precise diagnostic
+  instead of being rewrapped with a generic transaction message.
+- Expected missing-secret wait states no longer emit a dispatch-loop ERROR on
+  every recovery cycle, and dead-lettered dispatcher tasks no longer also count
+  as retained/deferred.
+
+### Changed
+
+- Cross-replica claim/send and retention-maintenance leases prevent simultaneous
+  sends and duplicate cleanup work. Retry backoff retains at-least-once semantics
+  and can still complete an earlier event after a later event.
+- Retry promotion is a single bounded Redis Lua operation.
+- Redis supports ACL usernames, TLS, and validated connection timeouts.
+- Blocking Redis claims now have a finite socket timeout; ordering-lease
+  contention uses randomized backoff rather than tight scheduler polling.
+- Terminal delivery state and both required dispatcher meta-events are staged in
+  one Redis transaction. A leased durable outbox publishes deterministic event
+  IDs and retries safely after crashes or Redis failures.
+- RFC 8785 canonicalization rejects numbers that binary64 would round, preventing
+  silent mathematical changes in signed evidence.
+- Webhook CIDR configuration uses a strict literal-only parser and rejects
+  malformed prefixes, extra path segments, hostnames, and IPv6 zone identifiers.
+- The absent-config webhook egress fallback now also blocks `0.0.0.0/8`,
+  `::/128`, `100.64.0.0/10`, and `fe80::/10`; unspecified destinations are also
+  rejected semantically. Indeterminate security configuration emits
+  a dedicated alertable metric while deliveries remain recoverable.
+- Evidence lifecycle metrics now constrain `artifact_type` to the five-value
+  protocol vocabulary, and malformed source JSON is logged without payload
+  excerpts.
+- Evidence claim scheduling now backs off on Redis, identity, signing, and store
+  failures, preventing tight reconnect/log loops and rapid in-flight growth.
+- CI now makes the real-Redis profile and 95% line / 95% branch gates blocking.
+- Expanded failure-path and boundary tests to raise measured branch coverage
+  above 95%, including Redis CAS outcomes, terminal delivery transactions,
+  evidence source validation, webhook transport failures, CIDR parsing, and
+  retention error handling.
+- Real-Redis tests now execute delivery owner acknowledgement, dispatcher outbox
+  ownership/DLQ scripts, evidence ack/DLQ scripts, and the production terminal
+  failure transaction under contention.
+
 ## [0.1.25.23] — 2026-07-11
 
 ### Security

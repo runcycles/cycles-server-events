@@ -7,6 +7,7 @@ import io.runcycles.events.model.Actor;
 import io.runcycles.events.model.ActorType;
 import io.runcycles.events.model.Delivery;
 import io.runcycles.events.model.DeliveryStatus;
+import io.runcycles.events.model.DispatcherEventTask;
 import io.runcycles.events.model.Event;
 import io.runcycles.events.model.EventCategory;
 import io.runcycles.events.model.EventType;
@@ -14,9 +15,12 @@ import io.runcycles.events.model.RetryPolicy;
 import io.runcycles.events.model.Subscription;
 import io.runcycles.events.model.WebhookStatus;
 import io.runcycles.events.repository.DeliveryQueueRepository;
+import io.runcycles.events.repository.DeliveryQueueRepository.ClaimedDelivery;
 import io.runcycles.events.repository.DeliveryRepository;
 import io.runcycles.events.repository.EventRepository;
 import io.runcycles.events.repository.SubscriptionRepository;
+import io.runcycles.events.repository.SubscriptionRepository.DeliverySuccessUpdate;
+import io.runcycles.events.repository.SubscriptionRepository.TerminalFailureUpdate;
 import io.runcycles.events.transport.Transport;
 import io.runcycles.events.transport.TransportResult;
 import io.runcycles.events.transport.webhook.WebhookUrlGuard;
@@ -45,7 +49,7 @@ public class DeliveryHandler {
     static final String REASON_TRANSPORT_ERROR = "transport_error";
     static final String REASON_CONSECUTIVE_FAILURES = "consecutive_failures";
     static final String REASON_SSRF_BLOCKED = "ssrf_blocked";
-    static final String REASON_OWNERSHIP_BOUNDARY = "ownership_boundary";
+    static final String REASON_MISSING_SIGNING_SECRET = "missing_signing_secret";
 
     private final DeliveryRepository deliveryRepository;
     private final EventRepository eventRepository;
@@ -72,10 +76,15 @@ public class DeliveryHandler {
         this.metrics = metrics;
         this.validator = validator;
         this.urlGuard = urlGuard;
+        if (maxDeliveryAgeMs <= 0) {
+            throw new IllegalArgumentException("dispatch max delivery age must be positive");
+        }
         this.maxDeliveryAgeMs = maxDeliveryAgeMs;
     }
 
-    public void handle(String deliveryId) {
+    public void handle(ClaimedDelivery claim) {
+        java.util.Objects.requireNonNull(claim, "delivery claim is required");
+        String deliveryId = claim.deliveryId();
         Delivery delivery = deliveryRepository.findById(deliveryId);
         if (delivery == null) {
             LOG.warn("Webhook delivery not found: delivery_id={}", safe(deliveryId));
@@ -100,19 +109,40 @@ public class DeliveryHandler {
         }
         long ageMs = System.currentTimeMillis() - attemptedAt.toEpochMilli();
         if (ageMs > maxDeliveryAgeMs) {
-            metrics.recordDeliveryStale(null); // tenant unknown — subscription not yet loaded
-            markFailed(delivery, "Delivery expired: " + (ageMs / 3600000) + "h old (max " + (maxDeliveryAgeMs / 3600000) + "h)");
+            markFailed(claim, delivery, "Delivery expired: " + (ageMs / 3600000)
+                            + "h old (max " + (maxDeliveryAgeMs / 3600000) + "h)",
+                    () -> metrics.recordDeliveryStale(null)); // tenant unknown
+            return;
+        }
+
+        // A crash after persisting RETRYING but before adding/acking the retry
+        // queue leaves the record in processing. Recovery may requeue it before
+        // its backoff expires; restore the ZSET schedule instead of sending early.
+        if (status == DeliveryStatus.RETRYING && delivery.getNextRetryAt() != null
+                && delivery.getNextRetryAt().isAfter(Instant.now())) {
+            if (queueRepository.scheduleRetryOwned(claim, delivery.getNextRetryAt().toEpochMilli())) {
+                LOG.debug("Webhook retry schedule restored without early delivery: delivery_id={} event_id={} subscription_id={} next_retry_at={} trace_id={}",
+                        safe(deliveryId), safe(delivery.getEventId()), safe(delivery.getSubscriptionId()),
+                        delivery.getNextRetryAt(), safe(delivery.getTraceId()));
+            }
             return;
         }
 
         Event event = eventRepository.findById(delivery.getEventId());
         if (event == null) {
-            metrics.recordDeliveryFailure(null, delivery.getEventType(), REASON_EVENT_NOT_FOUND, 0);
             LOG.warn("Webhook delivery cannot load event: delivery_id={} event_id={} event_type={} subscription_id={} trace_id={}",
                     safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(delivery.getEventType()),
                     safe(delivery.getSubscriptionId()), safe(delivery.getTraceId()));
-            markFailed(delivery, "Event not found: " + delivery.getEventId());
+            markFailed(claim, delivery, "Event not found: " + delivery.getEventId(),
+                    () -> metrics.recordDeliveryFailure(
+                            null, delivery.getEventType(), REASON_EVENT_NOT_FOUND, 0));
             return;
+        }
+
+        // Persist correlation on every terminal path that has an authoritative
+        // source event, including config/security failures before transport.
+        if (delivery.getTraceId() == null && event.getTraceId() != null) {
+            delivery.setTraceId(event.getTraceId());
         }
 
         // Non-fatal shape check (warn + metric, never blocks delivery)
@@ -120,20 +150,22 @@ public class DeliveryHandler {
 
         Subscription sub = subscriptionRepository.findById(delivery.getSubscriptionId());
         if (sub == null) {
-            metrics.recordDeliveryFailure(null, delivery.getEventType(), REASON_SUBSCRIPTION_NOT_FOUND, 0);
             LOG.warn("Webhook delivery cannot load subscription: delivery_id={} event_id={} event_type={} subscription_id={} tenant_id={} trace_id={}",
                     safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(delivery.getEventType()),
                     safe(delivery.getSubscriptionId()), safe(event.getTenantId()), safe(effectiveTraceId(delivery, event)));
-            markFailed(delivery, "Subscription not found");
+            markFailed(claim, delivery, "Subscription not found",
+                    () -> metrics.recordDeliveryFailure(null, delivery.getEventType(),
+                            REASON_SUBSCRIPTION_NOT_FOUND, 0));
             return;
         }
         if (sub.getStatus() != WebhookStatus.ACTIVE) {
-            metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(), REASON_SUBSCRIPTION_INACTIVE, 0);
             LOG.warn("Webhook delivery skipped because subscription is inactive: delivery_id={} event_id={} event_type={} subscription_id={} tenant_id={} status={} trace_id={}",
                     safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(delivery.getEventType()),
                     safe(sub.getSubscriptionId()), safe(sub.getTenantId()), sub.getStatus(),
                     safe(effectiveTraceId(delivery, event)));
-            markFailed(delivery, "Subscription not active: " + sub.getStatus());
+            markFailed(claim, delivery, "Subscription not active: " + sub.getStatus(),
+                    () -> metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(),
+                            REASON_SUBSCRIPTION_INACTIVE, 0));
             return;
         }
 
@@ -156,13 +188,14 @@ public class DeliveryHandler {
         // stale Delivery.event_type snapshot — the boundary decision AND its
         // reported signal use event.getEventType()/getCategory().
         if (WebhookOwnershipBoundary.isBlocked(event.getEventType(), event.getCategory(), sub.getTenantId())) {
-            metrics.recordDeliveryBoundarySkipped(sub.getTenantId(), event.getEventType(), event.getCategory());
             LOG.warn("Webhook delivery blocked by ownership boundary (#209): delivery_id={} event_id={} event_type={} category={} subscription_id={} tenant_id={} trace_id={} — a concrete-tenant subscription cannot receive admin-only or unclassifiable events",
                     safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(event.getEventType()),
                     safe(event.getCategory()), safe(sub.getSubscriptionId()), safe(sub.getTenantId()),
                     safe(effectiveTraceId(delivery, event)));
-            markFailed(delivery, "Delivery blocked by webhook ownership boundary (#209): "
-                    + "concrete-tenant subscription cannot receive admin-only event");
+            markFailed(claim, delivery, "Delivery blocked by webhook ownership boundary (#209): "
+                            + "concrete-tenant subscription cannot receive admin-only event",
+                    () -> metrics.recordDeliveryBoundarySkipped(sub.getTenantId(),
+                            event.getEventType(), event.getCategory()));
             return;
         }
 
@@ -181,6 +214,7 @@ public class DeliveryHandler {
         try {
             violation = urlGuard.check(sub.getUrl());
         } catch (RuntimeException configIndeterminate) {
+            metrics.recordSecurityConfigIndeterminate();
             LOG.warn("Webhook security config indeterminate; leaving delivery for retry: delivery_id={} event_id={} subscription_id={} tenant_id={} trace_id={}",
                     safe(delivery.getDeliveryId()), safe(delivery.getEventId()),
                     safe(sub.getSubscriptionId()), safe(sub.getTenantId()),
@@ -188,49 +222,74 @@ public class DeliveryHandler {
             throw configIndeterminate;
         }
         if (violation != null) {
-            metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(), REASON_SSRF_BLOCKED, 0);
             LOG.warn("Webhook delivery blocked by security policy: delivery_id={} event_id={} event_type={} subscription_id={} tenant_id={} reason={} trace_id={}",
                     safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(delivery.getEventType()),
                     safe(sub.getSubscriptionId()), safe(sub.getTenantId()), safe(violation),
                     safe(effectiveTraceId(delivery, event)));
-            markFailed(delivery, "Delivery blocked by webhook security policy: " + violation);
+            markFailed(claim, delivery,
+                    "Delivery blocked by webhook security policy: " + violation,
+                    () -> metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(),
+                            REASON_SSRF_BLOCKED, 0));
             return;
         }
 
         String secret = subscriptionRepository.getSigningSecret(delivery.getSubscriptionId());
+        if (secret == null || secret.isBlank()) {
+            metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(),
+                    REASON_MISSING_SIGNING_SECRET, 0);
+            LOG.warn("Webhook delivery deferred because signing secret is not yet available: delivery_id={} event_id={} subscription_id={} tenant_id={} trace_id={}",
+                    safe(delivery.getDeliveryId()), safe(delivery.getEventId()),
+                    safe(sub.getSubscriptionId()), safe(sub.getTenantId()),
+                    safe(effectiveTraceId(delivery, event)));
+            throw new RecoverableDeliveryException(
+                    "missing_signing_secret", "Webhook signing secret is not yet available");
+        }
 
         delivery.setAttempts(delivery.getAttempts() != null ? delivery.getAttempts() + 1 : 1);
-        // Proactive trace_id stamping on the Delivery record (spec
-        // v0.1.25.28). Fills the gap while admin hasn't yet populated
-        // trace_id on delivery creation — the persisted Delivery
-        // becomes self-correlated for admin's readback without a
-        // cross-service round trip. Only write when the event actually
-        // carries a trace_id; otherwise leave the field null (OPTIONAL
-        // on the spec wire). Never overwrite a value admin has already
-        // set: admin-authored stamps remain authoritative.
-        if (delivery.getTraceId() == null && event.getTraceId() != null) {
-            delivery.setTraceId(event.getTraceId());
-        }
         metrics.recordDeliveryAttempt(sub.getTenantId(), delivery.getEventType());
         TransportResult result = transport.deliver(event, sub, secret, delivery);
 
         if (result.isSuccess()) {
-            handleSuccess(delivery, sub, result);
+            handleSuccess(claim, delivery, sub, result);
         } else {
-            handleFailure(delivery, sub, event, result);
+            handleFailure(claim, delivery, sub, event, result);
         }
     }
 
-    private void handleSuccess(Delivery delivery, Subscription sub, TransportResult result) {
+    private void handleSuccess(ClaimedDelivery claim, Delivery delivery, Subscription sub,
+                               TransportResult result) {
         Instant now = Instant.now();
-        subscriptionRepository.updateDeliveryState(
-                sub.getSubscriptionId(), 0, now, now, null, null);
-
+        DeliveryStatus originalStatus = delivery.getStatus();
+        Integer originalResponseStatus = delivery.getResponseStatus();
+        Integer originalResponseTimeMs = delivery.getResponseTimeMs();
+        Instant originalCompletedAt = delivery.getCompletedAt();
+        String originalErrorMessage = delivery.getErrorMessage();
+        Instant originalNextRetryAt = delivery.getNextRetryAt();
         delivery.setStatus(DeliveryStatus.SUCCESS);
         delivery.setResponseStatus(result.getStatusCode());
         delivery.setResponseTimeMs(result.getLatencyMs());
-        delivery.setCompletedAt(Instant.now());
-        deliveryRepository.update(delivery);
+        delivery.setCompletedAt(now);
+        delivery.setErrorMessage(null);
+        delivery.setNextRetryAt(null);
+        DeliverySuccessUpdate update;
+        try {
+            update = subscriptionRepository.finalizeDeliverySuccess(
+                    sub.getSubscriptionId(), claim, delivery, now);
+        } catch (RuntimeException transactionFailure) {
+            delivery.setStatus(originalStatus);
+            delivery.setResponseStatus(originalResponseStatus);
+            delivery.setResponseTimeMs(originalResponseTimeMs);
+            delivery.setCompletedAt(originalCompletedAt);
+            delivery.setErrorMessage(originalErrorMessage);
+            delivery.setNextRetryAt(originalNextRetryAt);
+            throw transactionFailure;
+        }
+        if (!update.applied()) {
+            LOG.warn("Webhook delivery success discarded because its processing claim was superseded or state was already terminal: delivery_id={} event_id={} subscription_id={} claim_token={}",
+                    safe(delivery.getDeliveryId()), safe(delivery.getEventId()),
+                    safe(sub.getSubscriptionId()), safe(claim.claimToken()));
+            return;
+        }
 
         metrics.recordDeliverySuccess(sub.getTenantId(), delivery.getEventType(),
                 result.getStatusCode(), result.getLatencyMs());
@@ -241,18 +300,62 @@ public class DeliveryHandler {
                 result.getLatencyMs(), delivery.getAttempts(), safe(delivery.getTraceId()));
     }
 
-    private void handleFailure(Delivery delivery, Subscription sub, Event event, TransportResult result) {
+    private void handleFailure(ClaimedDelivery claim, Delivery delivery, Subscription sub,
+                               Event event, TransportResult result) {
         RetryPolicy policy = sub.getRetryPolicy() != null ? sub.getRetryPolicy() : RetryPolicy.builder().build();
         int maxRetries = policy.getMaxRetries() != null ? policy.getMaxRetries() : 5;
 
         String reason = failureReason(result.getStatusCode());
-        metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(), reason, result.getLatencyMs());
-
         if (delivery.getAttempts() > maxRetries) {
-            String requestId = event != null ? event.getRequestId() : null;
-            incrementConsecutiveFailures(sub, delivery, requestId);
-            markFailed(delivery, result.getErrorMessage());
-            emitDeliveryFailed(sub, delivery, result, requestId);
+            String requestId = event.getRequestId();
+            DeliveryStatus originalStatus = delivery.getStatus();
+            Integer originalResponseStatus = delivery.getResponseStatus();
+            Integer originalResponseTimeMs = delivery.getResponseTimeMs();
+            String originalErrorMessage = delivery.getErrorMessage();
+            Instant originalCompletedAt = delivery.getCompletedAt();
+            Instant originalNextRetryAt = delivery.getNextRetryAt();
+            Instant failedAt = Instant.now();
+            delivery.setResponseStatus(result.getStatusCode() > 0 ? result.getStatusCode() : null);
+            delivery.setResponseTimeMs(result.getLatencyMs() >= 0 ? result.getLatencyMs() : null);
+            delivery.setStatus(DeliveryStatus.FAILED);
+            delivery.setErrorMessage(result.getErrorMessage());
+            delivery.setCompletedAt(failedAt);
+            delivery.setNextRetryAt(null);
+            DispatcherEventTask failureTask = buildDeliveryFailedTask(sub, delivery, result, requestId);
+            DispatcherEventTask disableTask = buildWebhookDisabledTask(sub, delivery, requestId);
+            int defaultDisableAfter = sub.getDisableAfterFailures() != null ? sub.getDisableAfterFailures() : 10;
+            TerminalFailureUpdate update;
+            try {
+                update = subscriptionRepository.finalizeDeliveryFailure(
+                        sub.getSubscriptionId(), claim, delivery, failedAt, defaultDisableAfter,
+                        disableTask, failureTask);
+            } catch (RuntimeException transactionFailure) {
+                // The Redis transaction did not commit; keep the in-memory object
+                // aligned with the still-recoverable persisted state.
+                delivery.setStatus(originalStatus);
+                delivery.setResponseStatus(originalResponseStatus);
+                delivery.setResponseTimeMs(originalResponseTimeMs);
+                delivery.setErrorMessage(originalErrorMessage);
+                delivery.setCompletedAt(originalCompletedAt);
+                delivery.setNextRetryAt(originalNextRetryAt);
+                throw transactionFailure;
+            }
+            if (!update.applied()) return;
+            metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(), reason,
+                    result.getLatencyMs());
+            if (update.disabledNow()) {
+                if (update.previousStatus() != null) {
+                    disableTask.event().getData().put("previous_status", update.previousStatus().name());
+                }
+                metrics.recordSubscriptionAutoDisabled(sub.getTenantId(), REASON_CONSECUTIVE_FAILURES);
+                LOG.warn("Webhook subscription auto-disabled: subscription_id={} tenant_id={} failures={} disable_after={} delivery_id={} event_id={} trace_id={}",
+                        safe(sub.getSubscriptionId()), safe(sub.getTenantId()), update.consecutiveFailures(),
+                        defaultDisableAfter, safe(delivery.getDeliveryId()), safe(delivery.getEventId()),
+                        safe(delivery.getTraceId()));
+                publishOutboxed(disableTask);
+            }
+            logPermanentFailure(delivery, result.getErrorMessage());
+            publishOutboxed(failureTask);
             return;
         }
 
@@ -268,9 +371,12 @@ public class DeliveryHandler {
         delivery.setResponseTimeMs(result.getLatencyMs());
         delivery.setErrorMessage(result.getErrorMessage());
         delivery.setNextRetryAt(Instant.ofEpochMilli(nextRetryAt));
-        deliveryRepository.update(delivery);
-        queueRepository.scheduleRetry(delivery.getDeliveryId(), nextRetryAt);
+        if (!deliveryRepository.updateOwnedAndScheduleRetry(delivery, claim, nextRetryAt)) {
+            return;
+        }
 
+        metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(), reason,
+                result.getLatencyMs());
         metrics.recordDeliveryRetried(sub.getTenantId(), delivery.getEventType());
 
         LOG.info("Webhook delivery scheduled for retry: delivery_id={} event_id={} event_type={} subscription_id={} tenant_id={} status={} attempts={} max_retries={} next_retry_at={} latency_ms={} trace_id={} reason={}",
@@ -279,149 +385,107 @@ public class DeliveryHandler {
                 delivery.getNextRetryAt(), result.getLatencyMs(), safe(delivery.getTraceId()), safe(reason));
     }
 
-    private void markFailed(Delivery delivery, String errorMessage) {
+    private void markFailed(ClaimedDelivery claim, Delivery delivery, String errorMessage,
+                            Runnable onApplied) {
         delivery.setStatus(DeliveryStatus.FAILED);
         delivery.setErrorMessage(errorMessage);
         delivery.setCompletedAt(Instant.now());
-        deliveryRepository.update(delivery);
+        delivery.setNextRetryAt(null);
+        boolean updated = deliveryRepository.updateOwned(delivery, claim);
+        if (updated) {
+            logPermanentFailure(delivery, errorMessage);
+            onApplied.run();
+        }
+    }
+
+    private void logPermanentFailure(Delivery delivery, String errorMessage) {
         LOG.warn("Webhook delivery permanently failed: delivery_id={} event_id={} event_type={} subscription_id={} attempts={} response_status={} trace_id={} error={}",
                 safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(delivery.getEventType()),
                 safe(delivery.getSubscriptionId()), delivery.getAttempts(), delivery.getResponseStatus(),
                 safe(delivery.getTraceId()), safe(errorMessage));
     }
 
-    private void incrementConsecutiveFailures(Subscription sub, Delivery delivery, String requestId) {
-        int failures = (sub.getConsecutiveFailures() != null ? sub.getConsecutiveFailures() : 0) + 1;
-        int disableAfter = sub.getDisableAfterFailures() != null ? sub.getDisableAfterFailures() : 10;
-        // Read from the snapshot loaded in handle(); admin could have flipped
-        // status to PAUSED between that load and now, in which case the emitted
-        // previous_status is one flip behind. The final persisted status is
-        // authoritative (updateDeliveryState below writes DISABLED), so this
-        // only affects the audit-trail Event's previous_status — acceptable.
-        WebhookStatus previousStatus = sub.getStatus();
-        WebhookStatus newStatus = null;
-        if (failures >= disableAfter) {
-            newStatus = WebhookStatus.DISABLED;
-        }
+    /** Build the webhook.disabled Event staged atomically with auto-disable. */
+    private DispatcherEventTask buildWebhookDisabledTask(Subscription sub, Delivery delivery,
+                                                         String requestId) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("subscription_id", sub.getSubscriptionId());
+        data.put("tenant_id", sub.getTenantId());
+        data.put("new_status", WebhookStatus.DISABLED.name());
+        data.put("changed_fields", List.of());
+        data.put("disable_reason", "consecutive_failures_exceeded_threshold");
 
-        Instant now = Instant.now();
-        boolean updated = subscriptionRepository.updateDeliveryState(
-                sub.getSubscriptionId(), failures, now, null, now, newStatus);
-
-        if (updated && newStatus == WebhookStatus.DISABLED) {
-            // Safe-once: handle() gates on status == ACTIVE before this path, so once
-            // updateDeliveryState persists DISABLED, subsequent deliveries short-circuit.
-            metrics.recordSubscriptionAutoDisabled(sub.getTenantId(), REASON_CONSECUTIVE_FAILURES);
-            LOG.warn("Webhook subscription auto-disabled: subscription_id={} tenant_id={} failures={} disable_after={} delivery_id={} event_id={} trace_id={}",
-                    safe(sub.getSubscriptionId()), safe(sub.getTenantId()), failures, disableAfter,
-                    safe(delivery.getDeliveryId()), safe(delivery.getEventId()), safe(delivery.getTraceId()));
-            emitWebhookDisabled(sub, delivery, previousStatus, requestId);
-        }
+        String correlationId = "webhook_auto_disable:" + sub.getSubscriptionId()
+                + ":" + delivery.getDeliveryId();
+        Event event = Event.builder()
+                .eventType(EventType.WEBHOOK_DISABLED.getValue())
+                .category(EventCategory.WEBHOOK.getValue())
+                .tenantId(sub.getTenantId())
+                .actor(Actor.builder().type(ActorType.SYSTEM.getValue()).build())
+                .source("cycles-events")
+                .data(data)
+                .correlationId(correlationId)
+                .requestId(requestId)
+                .traceId(delivery.getTraceId())
+                .build();
+        return DispatcherEventTask.create("webhook-disabled:" + sub.getSubscriptionId()
+                + ":" + delivery.getDeliveryId(), event);
     }
 
-    /**
-     * Emit webhook.disabled Event per spec v0.1.25.33 WebhookSubscription.
-     * FAILURE HANDLING. Swallows any emit failure — the subscription status
-     * flip is the source of truth and must not be blocked by the audit
-     * trail write. Logged at WARN for observability.
-     */
-    private void emitWebhookDisabled(Subscription sub, Delivery delivery, WebhookStatus previousStatus,
-                                     String requestId) {
-        try {
-            Map<String, Object> data = new LinkedHashMap<>();
-            data.put("subscription_id", sub.getSubscriptionId());
-            data.put("tenant_id", sub.getTenantId());
-            if (previousStatus != null) {
-                data.put("previous_status", previousStatus.name());
-            }
-            data.put("new_status", WebhookStatus.DISABLED.name());
-            data.put("changed_fields", List.of());
-            data.put("disable_reason", "consecutive_failures_exceeded_threshold");
-
-            // scope=null to match admin's WebhookAdminController.emitWebhookLifecycleEvent
-            // convention on all webhook.* lifecycle emits — keeps operator
-            // scope-filter queries returning a consistent set regardless of
-            // which plane wrote the Event.
-            Event event = Event.builder()
-                    .eventType(EventType.WEBHOOK_DISABLED.getValue())
-                    .category(EventCategory.WEBHOOK.getValue())
-                    .tenantId(sub.getTenantId())
-                    .actor(Actor.builder().type(ActorType.SYSTEM.getValue()).build())
-                    .source("cycles-events")
-                    .data(data)
-                    .correlationId("webhook_auto_disable:" + sub.getSubscriptionId()
-                            + ":" + delivery.getDeliveryId())
-                    // Spec (cycles-protocol-v0 CORRELATION AND TRACING): request_id MUST be
-                    // populated on every event causally downstream of an HTTP request,
-                    // including queued/deferred work — this emit is downstream of the
-                    // request that produced the originating event.
-                    .requestId(requestId)
-                    .traceId(delivery.getTraceId())
-                    .build();
-            eventRepository.save(event);
-        } catch (Exception e) {
-            LOG.warn("Failed to emit webhook.disabled Event after subscription status flip: subscription_id={} tenant_id={} delivery_id={} event_id={} correlation_id={} trace_id={}",
-                    safe(sub.getSubscriptionId()), safe(sub.getTenantId()), safe(delivery.getDeliveryId()),
-                    safe(delivery.getEventId()),
-                    safe("webhook_auto_disable:" + sub.getSubscriptionId() + ":" + delivery.getDeliveryId()),
-                    safe(delivery.getTraceId()), e);
+    /** Build the terminal meta-event staged atomically with delivery FAILED. */
+    private DispatcherEventTask buildDeliveryFailedTask(Subscription sub, Delivery delivery,
+                                                         TransportResult result, String requestId) {
+        Map<String, Object> details = new LinkedHashMap<>();
+        details.put("subscription_id", sub.getSubscriptionId());
+        details.put("tenant_id", sub.getTenantId());
+        details.put("delivery_id", delivery.getDeliveryId());
+        details.put("event_id", delivery.getEventId());
+        if (delivery.getEventType() != null) {
+            details.put("event_type", delivery.getEventType());
         }
+        details.put("attempts", delivery.getAttempts());
+        if (result.getStatusCode() > 0) {
+            details.put("last_response_status", result.getStatusCode());
+        }
+        if (result.getErrorMessage() != null) {
+            details.put("error", result.getErrorMessage());
+        }
+
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("component", "webhook_dispatcher");
+        data.put("message", "Webhook delivery failed after " + delivery.getAttempts()
+                + " attempts: subscription " + sub.getSubscriptionId());
+        data.put("severity", "warning");
+        data.put("details", details);
+
+        Event event = Event.builder()
+                .eventType(EventType.SYSTEM_WEBHOOK_DELIVERY_FAILED.getValue())
+                .category(EventCategory.SYSTEM.getValue())
+                .tenantId("__system__")
+                .actor(Actor.builder().type(ActorType.SYSTEM.getValue()).build())
+                .source("cycles-events")
+                .data(data)
+                .correlationId("webhook_delivery_failed:" + sub.getSubscriptionId()
+                        + ":" + delivery.getDeliveryId())
+                .requestId(requestId)
+                .traceId(delivery.getTraceId())
+                .build();
+        return DispatcherEventTask.create("delivery-failed:" + sub.getSubscriptionId()
+                + ":" + delivery.getDeliveryId(), event);
     }
 
-    /**
-     * Emit system.webhook_delivery_failed after all retries are exhausted, per the
-     * protocol spec's retry contract ("After all retries exhausted: delivery marked
-     * FAILED, system.webhook_delivery_failed event emitted"). Payload follows the
-     * admin spec's EventDataSystem shape; tenant_id is the "__system__" sentinel per
-     * the standard event payload schema ("System events use __system__"). The
-     * subscription/tenant context lives in data.details. Save-only (no delivery is
-     * fanned out by this service), so a failing meta-event cannot loop. Swallows any
-     * emit failure — the FAILED delivery status is the source of truth and must not
-     * be blocked by the meta-alert write.
-     */
-    private void emitDeliveryFailed(Subscription sub, Delivery delivery, TransportResult result,
-                                    String requestId) {
+    /** Best-effort inline publish; the atomic outbox remains on any failure. */
+    private void publishOutboxed(DispatcherEventTask task) {
         try {
-            Map<String, Object> details = new LinkedHashMap<>();
-            details.put("subscription_id", sub.getSubscriptionId());
-            details.put("tenant_id", sub.getTenantId());
-            details.put("delivery_id", delivery.getDeliveryId());
-            details.put("event_id", delivery.getEventId());
-            if (delivery.getEventType() != null) {
-                details.put("event_type", delivery.getEventType());
+            eventRepository.save(task.event());
+            if (eventRepository.ackDispatcherEvent(task.taskId())) {
+                metrics.recordDispatcherEventPublished(task.event().getEventType());
             }
-            details.put("attempts", delivery.getAttempts());
-            if (result.getStatusCode() > 0) {
-                details.put("last_response_status", result.getStatusCode());
-            }
-            if (result.getErrorMessage() != null) {
-                details.put("error", result.getErrorMessage());
-            }
-
-            Map<String, Object> data = new LinkedHashMap<>();
-            data.put("component", "webhook_dispatcher");
-            data.put("message", "Webhook delivery failed after " + delivery.getAttempts()
-                    + " attempts: subscription " + sub.getSubscriptionId());
-            data.put("severity", "warning");
-            data.put("details", details);
-
-            Event event = Event.builder()
-                    .eventType(EventType.SYSTEM_WEBHOOK_DELIVERY_FAILED.getValue())
-                    .category(EventCategory.SYSTEM.getValue())
-                    .tenantId("__system__")
-                    .actor(Actor.builder().type(ActorType.SYSTEM.getValue()).build())
-                    .source("cycles-events")
-                    .data(data)
-                    .correlationId("webhook_delivery_failed:" + sub.getSubscriptionId()
-                            + ":" + delivery.getDeliveryId())
-                    .requestId(requestId)
-                    .traceId(delivery.getTraceId())
-                    .build();
-            eventRepository.save(event);
         } catch (Exception e) {
-            LOG.warn("Failed to emit system.webhook_delivery_failed Event: subscription_id={} tenant_id={} delivery_id={} event_id={} trace_id={}",
-                    safe(sub.getSubscriptionId()), safe(sub.getTenantId()), safe(delivery.getDeliveryId()),
-                    safe(delivery.getEventId()), safe(delivery.getTraceId()), e);
+            metrics.recordDispatcherEventDeferred(task.event().getEventType(), "inline_publish_failure");
+            LOG.warn("Dispatcher Event inline publish failed; durable outbox will retry: task_id={} event_id={} event_type={} correlation_id={} trace_id={}",
+                    safe(task.taskId()), safe(task.event().getEventId()), safe(task.event().getEventType()),
+                    safe(task.event().getCorrelationId()), safe(task.event().getTraceId()), e);
         }
     }
 
@@ -429,12 +493,26 @@ public class DeliveryHandler {
         if (delivery.getTraceId() != null) {
             return delivery.getTraceId();
         }
-        return event != null ? event.getTraceId() : null;
+        return event.getTraceId();
     }
 
     private static String failureReason(int statusCode) {
         if (statusCode >= 400 && statusCode < 500) return REASON_HTTP_4XX;
         if (statusCode >= 500 && statusCode < 600) return REASON_HTTP_5XX;
         return REASON_TRANSPORT_ERROR;
+    }
+
+    /** Expected fail-closed wait state that must retain the processing claim without ERROR noise. */
+    public static final class RecoverableDeliveryException extends IllegalStateException {
+        private final String reason;
+
+        RecoverableDeliveryException(String reason, String message) {
+            super(message);
+            this.reason = reason;
+        }
+
+        public String reason() {
+            return reason;
+        }
     }
 }

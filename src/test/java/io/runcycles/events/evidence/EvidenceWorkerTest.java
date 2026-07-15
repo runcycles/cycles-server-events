@@ -4,12 +4,18 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.runcycles.events.evidence.CyclesEvidenceEnvelopeBuilder.BuiltEvidenceEnvelope;
+import io.runcycles.events.evidence.EvidenceQueueConsumer.ClaimedEvidence;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.runcycles.events.metrics.CyclesMetrics;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Locale;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyString;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -25,6 +31,9 @@ class EvidenceWorkerTest {
     private final CyclesEvidenceCanonicalizer canonicalizer = new CyclesEvidenceCanonicalizer();
     private final EvidenceSigningKey key = new LocalEvidenceSigningKey(signer, "", "", true); // ephemeral dev key
     private final CyclesEvidenceEnvelopeBuilder builder = new CyclesEvidenceEnvelopeBuilder(canonicalizer, key);
+    private final CyclesEvidenceSchemaValidator schemaValidator = new CyclesEvidenceSchemaValidator();
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+    private final CyclesMetrics metrics = new CyclesMetrics(meterRegistry, false);
 
     /** Captures the last envelope handed to the sink. */
     private static final class CapturingSink implements EvidenceSink {
@@ -41,7 +50,9 @@ class EvidenceWorkerTest {
     }
 
     private EvidenceWorker worker(EvidenceQueueConsumer consumer, EvidenceSink sink, String serverId) {
-        return new EvidenceWorker(consumer, builder, sink, mapper, 1, serverId);
+        return new EvidenceWorker(
+                consumer, builder, schemaValidator, sink, mapper, metrics,
+                1, serverId, 1_000, 30_000);
     }
 
     @Test
@@ -49,12 +60,13 @@ class EvidenceWorkerTest {
         CapturingSink sink = new CapturingSink();
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
         String record = sourceRecord("reserve", "ALLOW");
-        when(consumer.claim(1)).thenReturn(record);
+        when(consumer.claim(1)).thenReturn(claimed(record));
+        when(consumer.ack(claimed(record))).thenReturn(true);
 
         worker(consumer, sink).processNext();
 
         assertThat(sink.count).isEqualTo(1);
-        verify(consumer).ack(record); // stored → acked off the processing list
+        verify(consumer).ack(claimed(record)); // stored → acked off the processing list
         ObjectNode env = sink.last.envelope();
         assertThat(env.get("artifact_type").asText()).isEqualTo("reserve");
         assertThat(env.get("server_id").asText()).isEqualTo(SERVER_ID);
@@ -81,18 +93,37 @@ class EvidenceWorkerTest {
         assertThat(sink.count).isZero();
     }
 
+    private static ClaimedEvidence claimed(String record) {
+        return new ClaimedEvidence(record, "claim-token");
+    }
+
+    @Test
+    void queueConnectionFailureDoesNotEscapeScheduledWorker() {
+        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
+        when(consumer.claim(1)).thenThrow(new redis.clients.jedis.exceptions.JedisConnectionException("down"));
+
+        EvidenceWorker worker = worker(consumer, envelope -> { });
+        org.assertj.core.api.Assertions.assertThatCode(worker::processNext).doesNotThrowAnyException();
+        worker.processNext();
+
+        verify(consumer).claim(1);
+        assertThat(meterRegistry.find(CyclesMetrics.EVIDENCE_RETRY_DEFERRED)
+                .tags("artifact_type", CyclesMetrics.TAG_UNKNOWN, "reason", "queue_unavailable")
+                .counter().count()).isEqualTo(1.0);
+    }
+
     @Test
     void deadLettersMalformedRecordWithoutThrowingOrSinking() {
         CapturingSink sink = new CapturingSink();
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
         String bad = "{ not valid json";
-        when(consumer.claim(1)).thenReturn(bad);
+        when(consumer.claim(1)).thenReturn(claimed(bad));
+        when(consumer.deadLetterAndAck(claimed(bad))).thenReturn(true);
 
         worker(consumer, sink).processNext(); // must not throw
 
         assertThat(sink.count).isZero();
-        verify(consumer).deadLetter(bad);
-        verify(consumer).ack(bad); // dead-lettered → cleared from processing
+        verify(consumer).deadLetterAndAck(claimed(bad));
     }
 
     @Test
@@ -100,27 +131,20 @@ class EvidenceWorkerTest {
         CapturingSink sink = new CapturingSink();
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
         String noPayload = "{\"artifact_type\":\"reserve\",\"issued_at_ms\":1}";
-        when(consumer.claim(1)).thenReturn(noPayload);
+        when(consumer.claim(1)).thenReturn(claimed(noPayload));
+        when(consumer.deadLetterAndAck(claimed(noPayload))).thenReturn(true);
 
         worker(consumer, sink).processNext();
 
         assertThat(sink.count).isZero(); // must NOT sign an empty/garbage envelope
-        verify(consumer).deadLetter(noPayload);
-        verify(consumer).ack(noPayload);
+        verify(consumer).deadLetterAndAck(claimed(noPayload));
     }
 
     @Test
-    void deadLettersWhenDirectWorkerHasBlankServerId() {
-        CapturingSink sink = new CapturingSink();
-        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
-        String record = sourceRecord("reserve", "ALLOW");
-        when(consumer.claim(1)).thenReturn(record);
-
-        worker(consumer, sink, "").processNext(); // blank server_id
-
-        assertThat(sink.count).isZero(); // must NOT sign an envelope with blank server_id
-        verify(consumer).deadLetter(record);
-        verify(consumer).ack(record);
+    void constructorRejectsBlankServerIdBeforeAnyRecordCanBeClaimed() {
+        assertThatThrownBy(() -> worker(mock(EvidenceQueueConsumer.class), envelope -> { }, ""))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("server-id");
     }
 
     @Test
@@ -130,29 +154,36 @@ class EvidenceWorkerTest {
         // compute the id this worker's builder will produce, then stamp it on the record
         String expectedId = builtEvidenceIdFor("reserve", "ALLOW");
         String record = sourceRecord("reserve", "ALLOW", expectedId);
-        when(consumer.claim(1)).thenReturn(record);
+        when(consumer.claim(1)).thenReturn(claimed(record));
+        when(consumer.ack(claimed(record))).thenReturn(true);
 
         worker(consumer, sink).processNext();
 
         assertThat(sink.count).isEqualTo(1);
         assertThat(sink.last.evidenceId()).isEqualTo(expectedId);
-        verify(consumer).ack(record);
-        verify(consumer, never()).deadLetter(anyString());
+        verify(consumer).ack(claimed(record));
+        verify(consumer, never()).deadLetterAndAck(any(ClaimedEvidence.class));
     }
 
     @Test
-    void deadLettersWhenProducerStampedEvidenceIdMismatches() {
+    void identityMismatchRemainsInFlightInsteadOfDrainingValidRecordsIntoDlq() {
         CapturingSink sink = new CapturingSink();
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
         // a wrong id (e.g. producer/worker server-id or signer-did config drift)
         String record = sourceRecord("reserve", "ALLOW", "f".repeat(64));
-        when(consumer.claim(1)).thenReturn(record);
+        when(consumer.claim(1)).thenReturn(claimed(record));
 
-        worker(consumer, sink).processNext();
+        EvidenceWorker worker = worker(consumer, sink);
+        worker.processNext();
+        worker.processNext();
 
         assertThat(sink.count).isZero(); // must NOT store an unbindable envelope
-        verify(consumer).deadLetter(record);
-        verify(consumer).ack(record);
+        verify(consumer, never()).deadLetterAndAck(claimed(record));
+        verify(consumer, never()).ack(claimed(record));
+        verify(consumer).claim(1);
+        assertThat(meterRegistry.find(CyclesMetrics.EVIDENCE_RETRY_DEFERRED)
+                .tags("artifact_type", "reserve", "reason", "identity_mismatch")
+                .counter().count()).isEqualTo(1.0);
     }
 
     @Test
@@ -162,13 +193,283 @@ class EvidenceWorkerTest {
         CapturingSink sink = new CapturingSink();
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
         String record = sourceRecord("reserve", "ALLOW");
-        when(consumer.claim(1)).thenReturn(record);
-        doThrow(new RuntimeException("redis blip on ack")).when(consumer).ack(record);
+        when(consumer.claim(1)).thenReturn(claimed(record));
+        doThrow(new RuntimeException("redis blip on ack")).when(consumer).ack(claimed(record));
 
         worker(consumer, sink).processNext(); // must not throw
 
         assertThat(sink.count).isEqualTo(1); // it WAS stored
-        verify(consumer, never()).deadLetter(anyString()); // and must NOT be dead-lettered
+        verify(consumer, never()).deadLetterAndAck(any(ClaimedEvidence.class)); // and must NOT be dead-lettered
+    }
+
+    @Test
+    void storedEnvelopeWithSupersededAckIsRetainedForIdempotentRecovery() {
+        CapturingSink sink = new CapturingSink();
+        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
+        String record = sourceRecord("reserve", "ALLOW");
+        when(consumer.claim(1)).thenReturn(claimed(record));
+        when(consumer.ack(claimed(record))).thenReturn(false);
+
+        worker(consumer, sink).processNext();
+
+        assertThat(sink.count).isEqualTo(1);
+        verify(consumer, never()).deadLetterAndAck(any(ClaimedEvidence.class));
+        assertThat(meterRegistry.find(CyclesMetrics.EVIDENCE_RETRY_DEFERRED)
+                .tags("artifact_type", "reserve", "reason", "ack_conflict")
+                .counter().count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void transientStoreFailureRemainsInFlightForRetry() {
+        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
+        EvidenceSink unavailable = mock(EvidenceSink.class);
+        String record = sourceRecord("reserve", "ALLOW");
+        when(consumer.claim(1)).thenReturn(claimed(record));
+        doThrow(new IllegalStateException("store unavailable")).when(unavailable)
+                .accept(org.mockito.ArgumentMatchers.any());
+
+        EvidenceWorker worker = worker(consumer, unavailable);
+        worker.processNext();
+        worker.processNext();
+
+        verify(consumer).claim(1);
+        verify(consumer, never()).deadLetterAndAck(any(ClaimedEvidence.class));
+        verify(consumer, never()).ack(any(ClaimedEvidence.class));
+        assertThat(meterRegistry.find(CyclesMetrics.EVIDENCE_RETRY_DEFERRED)
+                .tags("artifact_type", "reserve", "reason", "store_failure")
+                .counter().count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void rejectsFractionalOrNegativeIssuedAtBeforeSigning() throws Exception {
+        CapturingSink sink = new CapturingSink();
+        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
+        ObjectNode invalid = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        invalid.put("issued_at_ms", -1.5);
+        String record = mapper.writeValueAsString(invalid);
+        when(consumer.claim(1)).thenReturn(claimed(record));
+        when(consumer.deadLetterAndAck(claimed(record))).thenReturn(true);
+
+        worker(consumer, sink).processNext();
+
+        assertThat(sink.count).isZero();
+        verify(consumer).deadLetterAndAck(claimed(record));
+    }
+
+    @Test
+    void rejectsInvalidTraceIdAndArtifactPayloadBeforeSigning() throws Exception {
+        CapturingSink sink = new CapturingSink();
+        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
+        ObjectNode invalid = (ObjectNode) mapper.readTree(sourceRecord("commit", "ALLOW"));
+        invalid.put("trace_id", "NOT-A-TRACE");
+        String record = mapper.writeValueAsString(invalid);
+        when(consumer.claim(1)).thenReturn(claimed(record));
+        when(consumer.deadLetterAndAck(claimed(record))).thenReturn(true);
+
+        worker(consumer, sink).processNext();
+
+        assertThat(sink.count).isZero();
+        verify(consumer).deadLetterAndAck(claimed(record));
+    }
+
+    @Test
+    void rejectsMissingOrOutOfRangeIssuedAtAndNonTextTraceAndEvidenceIds() throws Exception {
+        EvidenceWorker worker = worker(mock(EvidenceQueueConsumer.class), envelope -> { });
+
+        ObjectNode missingIssued = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        missingIssued.remove("issued_at_ms");
+        assertThatThrownBy(() -> worker.build(mapper.writeValueAsString(missingIssued)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("issued_at_ms");
+
+        ObjectNode outOfRangeIssued = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        outOfRangeIssued.put("issued_at_ms", new java.math.BigInteger("9223372036854775808"));
+        assertThatThrownBy(() -> worker.build(mapper.writeValueAsString(outOfRangeIssued)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("issued_at_ms");
+
+        ObjectNode numericTrace = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        numericTrace.put("trace_id", 7);
+        assertThatThrownBy(() -> worker.build(mapper.writeValueAsString(numericTrace)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("trace_id");
+
+        ObjectNode numericEvidenceId = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        numericEvidenceId.put("evidence_id", 7);
+        assertThatThrownBy(() -> worker.build(mapper.writeValueAsString(numericEvidenceId)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("evidence_id");
+
+        ObjectNode malformedEvidenceId = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        malformedEvidenceId.put("evidence_id", "not-a-sha256");
+        assertThatThrownBy(() -> worker.build(mapper.writeValueAsString(malformedEvidenceId)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("evidence_id");
+    }
+
+    @Test
+    void parseablePoisonRecordWithoutIssuedAtRetainsSafeLogContext() throws Exception {
+        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
+        ObjectNode missingIssued = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        missingIssued.remove("issued_at_ms");
+        missingIssued.remove("evidence_id");
+        missingIssued.remove("trace_id");
+        String record = mapper.writeValueAsString(missingIssued);
+        when(consumer.claim(1)).thenReturn(claimed(record));
+        when(consumer.deadLetterAndAck(claimed(record))).thenReturn(true);
+
+        worker(consumer, envelope -> { }).processNext();
+
+        verify(consumer).deadLetterAndAck(claimed(record));
+    }
+
+    @Test
+    void poisonRecordMovedByRecoveryIsNotCountedAsDeadLettered() {
+        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
+        String bad = "{ not valid json";
+        when(consumer.claim(1)).thenReturn(claimed(bad));
+        when(consumer.deadLetterAndAck(claimed(bad))).thenReturn(false);
+
+        worker(consumer, envelope -> { }).processNext();
+
+        assertThat(meterRegistry.find(CyclesMetrics.EVIDENCE_RETRY_DEFERRED)
+                .tags("artifact_type", CyclesMetrics.TAG_UNKNOWN, "reason", "dlq_move_conflict")
+                .counter().count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void deadLetterMoveFailureLeavesPoisonRecordInFlight() {
+        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
+        String bad = "{ not valid json";
+        when(consumer.claim(1)).thenReturn(claimed(bad));
+        when(consumer.deadLetterAndAck(claimed(bad))).thenThrow(new IllegalStateException("redis unavailable"));
+
+        worker(consumer, envelope -> { }).processNext();
+
+        assertThat(meterRegistry.find(CyclesMetrics.EVIDENCE_RETRY_DEFERRED)
+                .tags("artifact_type", CyclesMetrics.TAG_UNKNOWN, "reason", "dlq_move_failure")
+                .counter().count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void signingInfrastructureFailureRemainsInFlight() {
+        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
+        CyclesEvidenceEnvelopeBuilder unavailableBuilder = mock(CyclesEvidenceEnvelopeBuilder.class);
+        String record = sourceRecord("reserve", "ALLOW");
+        when(consumer.claim(1)).thenReturn(claimed(record));
+        when(unavailableBuilder.build(
+                org.mockito.ArgumentMatchers.eq(EvidenceArtifactType.RESERVE),
+                org.mockito.ArgumentMatchers.eq(SERVER_ID),
+                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.nullable(String.class),
+                org.mockito.ArgumentMatchers.any(JsonNode.class)))
+                .thenThrow(new IllegalStateException("signer unavailable"));
+        EvidenceWorker worker = new EvidenceWorker(
+                consumer, unavailableBuilder, schemaValidator, envelope -> { },
+                mapper, metrics, 1, SERVER_ID, 1_000, 30_000);
+
+        worker.processNext();
+
+        verify(consumer, never()).ack(any(ClaimedEvidence.class));
+        verify(consumer, never()).deadLetterAndAck(any(ClaimedEvidence.class));
+        assertThat(meterRegistry.find(CyclesMetrics.EVIDENCE_RETRY_DEFERRED)
+                .tags("artifact_type", "reserve", "reason", "build_failure")
+                .counter().count()).isEqualTo(1.0);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "null",
+            "[]",
+            "{}",
+            "{\"artifact_type\":1,\"issued_at_ms\":1,\"payload\":{}}",
+            "{\"artifact_type\":\"\",\"issued_at_ms\":1,\"payload\":{}}",
+            "{\"artifact_type\":\"reserve\",\"issued_at_ms\":-1,\"payload\":{\"request\":{},\"response\":{}}}",
+            "{\"artifact_type\":\"reserve\",\"issued_at_ms\":1,\"payload\":[],\"trace_id\":7}",
+            "{\"artifact_type\":\"reserve\",\"issued_at_ms\":1,\"payload\":{\"request\":{},\"response\":{},\"extra\":true}}",
+            "{\"artifact_type\":\"commit\",\"issued_at_ms\":1,\"payload\":{\"request\":{},\"response\":{}}}",
+            "{\"artifact_type\":\"error\",\"issued_at_ms\":1,\"payload\":{\"endpoint\":\"POST /v1/decide\",\"http_status\":399,\"response\":{}}}",
+            "{\"artifact_type\":\"error\",\"issued_at_ms\":1,\"payload\":{\"endpoint\":\"GET /unknown\",\"http_status\":500,\"response\":{}}}",
+            "{\"artifact_type\":\"reserve\",\"issued_at_ms\":1,\"payload\":{\"request\":{},\"response\":{}},\"evidence_id\":7}"
+    })
+    void rejectsNonConformingSourceShapes(String record) {
+        EvidenceWorker worker = worker(mock(EvidenceQueueConsumer.class), envelope -> { });
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> worker.build(record))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsRawFractionThatBinary64WouldRoundBeforeSigning() throws Exception {
+        ObjectNode record = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        record.withObject("payload").withObject("request").withObject("metadata")
+                .put("precise_fraction", "RAW_FRACTION");
+        String raw = mapper.writeValueAsString(record)
+                .replace("\"RAW_FRACTION\"", "0.10000000000000001");
+
+        assertThatThrownBy(() -> worker(mock(EvidenceQueueConsumer.class), envelope -> { }).build(raw))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot be represented losslessly")
+                .hasMessageContaining("precise_fraction");
+    }
+
+    @Test
+    void acceptsRawFractionThatBinary64RepresentsExactly() throws Exception {
+        ObjectNode record = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        record.withObject("payload").withObject("request").withObject("metadata")
+                .put("exact_fraction", "RAW_FRACTION");
+        String raw = mapper.writeValueAsString(record)
+                .replace("\"RAW_FRACTION\"", "0.5");
+
+        assertThat(worker(mock(EvidenceQueueConsumer.class), envelope -> { }).build(raw).envelope()
+                .path("payload").path("reserve").path("request").path("metadata")
+                .path("exact_fraction").decimalValue())
+                .isEqualByComparingTo("0.5");
+    }
+
+    @Test
+    void rejectsRelativeServerIdentityUri() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> worker(mock(EvidenceQueueConsumer.class), envelope -> { }, "relative/server"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("absolute URI");
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> worker(mock(EvidenceQueueConsumer.class), envelope -> { }, null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("server-id");
+    }
+
+    @Test
+    void constructorRejectsNonPositiveQueueTimeout() {
+        assertThatThrownBy(() -> new EvidenceWorker(
+                mock(EvidenceQueueConsumer.class), builder, schemaValidator, envelope -> { },
+                mapper, metrics, 0, SERVER_ID, 1_000, 30_000))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("timeout");
+    }
+
+    @Test
+    void constructorRejectsInvalidClaimBackoffs() {
+        assertThatThrownBy(() -> new EvidenceWorker(
+                mock(EvidenceQueueConsumer.class), builder, schemaValidator, envelope -> { },
+                mapper, metrics, 1, SERVER_ID, 0, 30_000))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("backoff");
+        assertThatThrownBy(() -> new EvidenceWorker(
+                mock(EvidenceQueueConsumer.class), builder, schemaValidator, envelope -> { },
+                mapper, metrics, 1, SERVER_ID, 60_001, 30_000))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("backoff");
+        assertThatThrownBy(() -> new EvidenceWorker(
+                mock(EvidenceQueueConsumer.class), builder, schemaValidator, envelope -> { },
+                mapper, metrics, 1, SERVER_ID, 1_000, 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("backoff");
+        assertThatThrownBy(() -> new EvidenceWorker(
+                mock(EvidenceQueueConsumer.class), builder, schemaValidator, envelope -> { },
+                mapper, metrics, 1, SERVER_ID, 1_000, 3_600_001))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("backoff");
     }
 
     @Test
@@ -182,13 +483,14 @@ class EvidenceWorkerTest {
             CapturingSink sink = new CapturingSink();
             EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
             String record = sourceRecord("decide", "ALLOW");
-            when(consumer.claim(1)).thenReturn(record);
+            when(consumer.claim(1)).thenReturn(claimed(record));
+            when(consumer.ack(claimed(record))).thenReturn(true);
 
             worker(consumer, sink).processNext();
 
             assertThat(sink.count).isEqualTo(1); // built, not dead-lettered
-            verify(consumer).ack(record);
-            verify(consumer, never()).deadLetter(anyString());
+            verify(consumer).ack(claimed(record));
+            verify(consumer, never()).deadLetterAndAck(any(ClaimedEvidence.class));
         } finally {
             Locale.setDefault(previous);
         }
@@ -222,12 +524,66 @@ class EvidenceWorkerTest {
         rec.put("issued_at_ms", 1810000000100L);
         rec.put("trace_id", "0af7651916cd43dd8448eb211c80319c");
         ObjectNode payload = rec.putObject("payload");
-        payload.putObject("request").put("idempotency_key", "k1");
-        payload.putObject("response").put("decision", decision);
+        switch (artifactType) {
+            case "decide" -> {
+                putDecisionRequest(payload.putObject("request"), "k1");
+                payload.putObject("response").put("decision", decision);
+            }
+            case "reserve" -> {
+                putDecisionRequest(payload.putObject("request"), "k1");
+                ObjectNode response = payload.putObject("response");
+                response.put("decision", decision);
+                response.putArray("affected_scopes").add("tenant:acme");
+                if (!"DENY".equals(decision)) {
+                    response.put("reservation_id", "res_1");
+                }
+            }
+            case "commit" -> {
+                payload.put("reservation_id", "res_1");
+                ObjectNode request = payload.putObject("request");
+                request.put("idempotency_key", "k1");
+                putAmount(request.putObject("actual"), 750);
+                ObjectNode response = payload.putObject("response");
+                response.put("status", "COMMITTED");
+                putAmount(response.putObject("charged"), 750);
+            }
+            case "release" -> {
+                payload.put("reservation_id", "res_1");
+                payload.putObject("request").put("idempotency_key", "k1");
+                ObjectNode response = payload.putObject("response");
+                response.put("status", "RELEASED");
+                putAmount(response.putObject("released"), 1000);
+            }
+            case "error" -> {
+                payload.put("endpoint", "POST /v1/reservations");
+                payload.put("http_status", 409);
+                ObjectNode response = payload.putObject("response");
+                response.put("error", "BUDGET_EXCEEDED");
+                response.put("message", "Budget exceeded");
+                response.put("request_id", "req_1");
+            }
+            default -> {
+                // Unknown artifact types are rejected before their payload is inspected.
+            }
+        }
         try {
             return mapper.writeValueAsString(rec);
         } catch (Exception e) {
             throw new IllegalStateException(e);
         }
+    }
+
+    private static void putDecisionRequest(ObjectNode request, String idempotencyKey) {
+        request.put("idempotency_key", idempotencyKey);
+        request.putObject("subject").put("tenant", "acme");
+        ObjectNode action = request.putObject("action");
+        action.put("kind", "model.call");
+        action.put("name", "test-model");
+        putAmount(request.putObject("estimate"), 1000);
+    }
+
+    private static void putAmount(ObjectNode amount, long value) {
+        amount.put("unit", "USD_MICROCENTS");
+        amount.put("amount", value);
     }
 }

@@ -10,6 +10,8 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 /**
  * Centralised Micrometer instrumentation for webhook dispatch operations.
@@ -44,6 +46,7 @@ public class CyclesMetrics {
     public static final String DELIVERY_FAILED = "cycles.webhook.delivery.failed";
     public static final String DELIVERY_RETRIED = "cycles.webhook.delivery.retried";
     public static final String DELIVERY_STALE = "cycles.webhook.delivery.stale";
+    public static final String DELIVERY_DEAD_LETTERED = "cycles.webhook.delivery.dead_lettered";
     /**
      * Delivery dropped by the last-mile webhook ownership boundary
      * (governance WEBHOOK SUBSCRIPTION INVARIANT 2, issue #209): a
@@ -62,7 +65,20 @@ public class CyclesMetrics {
      */
     public static final String EVENTS_PAYLOAD_INVALID = "cycles.webhook.events.payload.invalid";
 
+    public static final String EVIDENCE_CLAIMED = "cycles.evidence.claimed";
+    public static final String EVIDENCE_STORED = "cycles.evidence.stored";
+    public static final String EVIDENCE_DEAD_LETTERED = "cycles.evidence.dead_lettered";
+    public static final String EVIDENCE_RETRY_DEFERRED = "cycles.evidence.retry_deferred";
+    public static final String DISPATCHER_EVENT_PUBLISHED = "cycles.webhook.dispatcher_event.published";
+    public static final String DISPATCHER_EVENT_DEFERRED = "cycles.webhook.dispatcher_event.deferred";
+    public static final String DISPATCHER_EVENT_DEAD_LETTERED = "cycles.webhook.dispatcher_event.dead_lettered";
+    public static final String SECURITY_CONFIG_INDETERMINATE = "cycles.webhook.security_config.indeterminate";
+
     public static final String TAG_UNKNOWN = "UNKNOWN";
+    private static final Set<String> EVIDENCE_ARTIFACT_TYPES =
+            Set.of("decide", "reserve", "commit", "release", "error");
+    private static final Set<String> DISPATCHER_EVENT_TYPES =
+            Set.of("webhook.disabled", "system.webhook_delivery_failed");
     public static final String OUTCOME_SUCCESS = "success";
     public static final String OUTCOME_FAILURE = "failure";
 
@@ -117,6 +133,12 @@ public class CyclesMetrics {
                 .increment();
     }
 
+    public void recordDeliveryDeadLettered(String reason) {
+        registry.counter(DELIVERY_DEAD_LETTERED,
+                Tags.of("reason", normalise(reason)))
+                .increment();
+    }
+
     /**
      * Record a delivery dropped by the last-mile ownership boundary (#209).
      * {@code event_type}/{@code category} tags carry the admin-only selector
@@ -153,6 +175,47 @@ public class CyclesMetrics {
                 .increment();
     }
 
+    // ---- Evidence lifecycle ----
+
+    public void recordEvidenceClaimed(String artifactType) {
+        registry.counter(EVIDENCE_CLAIMED,
+                Tags.of("artifact_type", evidenceArtifactType(artifactType))).increment();
+    }
+
+    public void recordEvidenceStored(String artifactType) {
+        registry.counter(EVIDENCE_STORED,
+                Tags.of("artifact_type", evidenceArtifactType(artifactType))).increment();
+    }
+
+    public void recordEvidenceDeadLettered(String artifactType, String reason) {
+        registry.counter(EVIDENCE_DEAD_LETTERED,
+                Tags.of("artifact_type", evidenceArtifactType(artifactType), "reason", normalise(reason))).increment();
+    }
+
+    public void recordEvidenceRetryDeferred(String artifactType, String reason) {
+        registry.counter(EVIDENCE_RETRY_DEFERRED,
+                Tags.of("artifact_type", evidenceArtifactType(artifactType), "reason", normalise(reason))).increment();
+    }
+
+    public void recordDispatcherEventPublished(String eventType) {
+        registry.counter(DISPATCHER_EVENT_PUBLISHED,
+                Tags.of("event_type", dispatcherEventType(eventType))).increment();
+    }
+
+    public void recordDispatcherEventDeferred(String eventType, String reason) {
+        registry.counter(DISPATCHER_EVENT_DEFERRED,
+                Tags.of("event_type", dispatcherEventType(eventType), "reason", normalise(reason))).increment();
+    }
+
+    public void recordDispatcherEventDeadLettered(String eventType, String reason) {
+        registry.counter(DISPATCHER_EVENT_DEAD_LETTERED,
+                Tags.of("event_type", dispatcherEventType(eventType), "reason", normalise(reason))).increment();
+    }
+
+    public void recordSecurityConfigIndeterminate() {
+        registry.counter(SECURITY_CONFIG_INDETERMINATE).increment();
+    }
+
     // ---- Internals ----
 
     private void recordLatency(String tenant, String eventType, String outcome, long latencyMs) {
@@ -180,6 +243,16 @@ public class CyclesMetrics {
 
     private static String normalise(String s) {
         return (s == null || s.isBlank()) ? TAG_UNKNOWN : s;
+    }
+
+    private static String evidenceArtifactType(String value) {
+        if (value == null || value.isBlank()) return TAG_UNKNOWN;
+        String normalized = value.toLowerCase(Locale.ROOT);
+        return EVIDENCE_ARTIFACT_TYPES.contains(normalized) ? normalized : TAG_UNKNOWN;
+    }
+
+    private static String dispatcherEventType(String value) {
+        return value != null && DISPATCHER_EVENT_TYPES.contains(value) ? value : TAG_UNKNOWN;
     }
 
     private static String statusFamily(int status) {

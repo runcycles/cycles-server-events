@@ -2,13 +2,23 @@ package io.runcycles.events.service;
 
 import static io.runcycles.events.logging.LogSanitizer.safe;
 
+import io.runcycles.events.metrics.CyclesMetrics;
 import io.runcycles.events.repository.DeliveryQueueRepository;
+import io.runcycles.events.repository.DeliveryQueueRepository.ClaimedDelivery;
+import io.runcycles.events.repository.DeliveryRepository.CorruptDeliveryRecordException;
+import io.runcycles.events.service.DeliveryHandler.RecoverableDeliveryException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import redis.clients.jedis.exceptions.JedisConnectionException;
+
+import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 @Service
 public class DispatchLoop {
@@ -17,29 +27,106 @@ public class DispatchLoop {
 
     private final DeliveryQueueRepository queueRepository;
     private final DeliveryHandler deliveryHandler;
+    private final CyclesMetrics metrics;
     private final int timeoutSeconds;
+    private final long orderingLeaseMs;
+    private final long contentionBackoffMs;
+    private final LongSupplier nanoTime;
+    private volatile long nextOrderingAttemptNanos;
 
+    @Autowired
     public DispatchLoop(DeliveryQueueRepository queueRepository, DeliveryHandler deliveryHandler,
-                        @Value("${dispatch.pending.timeout-seconds:5}") int timeoutSeconds) {
-        this.queueRepository = queueRepository;
-        this.deliveryHandler = deliveryHandler;
-        this.timeoutSeconds = timeoutSeconds;
+                        CyclesMetrics metrics,
+                        @Value("${dispatch.pending.timeout-seconds:5}") int timeoutSeconds,
+                        @Value("${dispatch.ordering.lease-ms:120000}") long orderingLeaseMs,
+                        @Value("${dispatch.http.timeout-seconds:30}") int httpTimeoutSeconds,
+                        @Value("${dispatch.ordering.contention-backoff-ms:500}") long contentionBackoffMs) {
+        this(queueRepository, deliveryHandler, metrics, timeoutSeconds, orderingLeaseMs,
+                httpTimeoutSeconds, contentionBackoffMs, System::nanoTime);
     }
 
-    @Scheduled(fixedDelay = 1)
+    DispatchLoop(DeliveryQueueRepository queueRepository, DeliveryHandler deliveryHandler,
+                 CyclesMetrics metrics,
+                 int timeoutSeconds, long orderingLeaseMs, int httpTimeoutSeconds,
+                 long contentionBackoffMs, LongSupplier nanoTime) {
+        this.queueRepository = queueRepository;
+        this.deliveryHandler = deliveryHandler;
+        this.metrics = java.util.Objects.requireNonNull(metrics, "delivery metrics are required");
+        this.nanoTime = java.util.Objects.requireNonNull(nanoTime, "monotonic clock is required");
+        if (timeoutSeconds <= 0) {
+            throw new IllegalArgumentException("dispatch pending timeout must be positive");
+        }
+        if (httpTimeoutSeconds <= 0) {
+            throw new IllegalArgumentException("dispatch HTTP timeout must be positive");
+        }
+        if (contentionBackoffMs <= 0 || contentionBackoffMs > 60_000) {
+            throw new IllegalArgumentException(
+                    "dispatch ordering contention backoff must be between 1 and 60000 ms");
+        }
+        long minimumLeaseMs = (timeoutSeconds + (long) httpTimeoutSeconds) * 1_000L;
+        if (orderingLeaseMs <= minimumLeaseMs) {
+            throw new IllegalArgumentException(
+                    "dispatch ordering lease must exceed pending plus HTTP timeouts");
+        }
+        this.timeoutSeconds = timeoutSeconds;
+        this.orderingLeaseMs = orderingLeaseMs;
+        this.contentionBackoffMs = contentionBackoffMs;
+    }
+
+    @Scheduled(fixedDelayString = "${dispatch.loop.delay-ms:25}")
     public void processNext() {
+        long retryAt = nextOrderingAttemptNanos;
+        if (retryAt != 0 && retryAt - nanoTime.getAsLong() > 0) return;
+        // A fresh token per invocation prevents an over-time invocation from
+        // deleting a newer lease acquired by the same replica after expiry.
+        String orderingOwner = UUID.randomUUID().toString();
         try {
-            String deliveryId = queueRepository.claimPending(timeoutSeconds);
-            if (deliveryId != null) {
-                deliveryHandler.handle(deliveryId);
-                queueRepository.ack(deliveryId);
+            if (!queueRepository.tryAcquireOrderingLock(orderingOwner, orderingLeaseMs)) {
+                deferOrderingAttempt();
+                return;
+            }
+            nextOrderingAttemptNanos = 0;
+            try {
+                ClaimedDelivery claim = queueRepository.claimPending(timeoutSeconds);
+                if (claim != null) {
+                    try {
+                        deliveryHandler.handle(claim);
+                        if (!queueRepository.ack(claim)) {
+                            LOG.warn("Webhook delivery ack rejected because ownership changed or the processing entry disappeared: delivery_id={} claim_token={}",
+                                    safe(claim.deliveryId()), safe(claim.claimToken()));
+                        }
+                    } catch (RecoverableDeliveryException recoverable) {
+                        LOG.debug("Webhook delivery retained for age-gated recovery: delivery_id={} reason={}",
+                                safe(claim.deliveryId()), safe(recoverable.reason()));
+                    } catch (CorruptDeliveryRecordException corruptRecord) {
+                        if (queueRepository.deadLetterCorruptOwned(claim, System.currentTimeMillis())) {
+                            metrics.recordDeliveryDeadLettered("corrupt_record");
+                            LOG.error("Corrupt webhook delivery quarantined: delivery_id={} failed_queue={} reason={}",
+                                    safe(corruptRecord.deliveryId()), DeliveryQueueRepository.FAILED_KEY,
+                                    safe(corruptRecord.getMessage()));
+                        } else {
+                            LOG.warn("Corrupt webhook delivery quarantine skipped because the claim was superseded or its processing entry disappeared: delivery_id={} claim_token={}",
+                                    safe(claim.deliveryId()), safe(claim.claimToken()));
+                        }
+                    }
+                }
+            } finally {
+                queueRepository.releaseOrderingLock(orderingOwner);
             }
         } catch (JedisConnectionException e) {
+            deferOrderingAttempt();
             LOG.warn("Dispatch loop Redis connection failure: queue=dispatch:pending processing_queue=dispatch:processing timeout_seconds={} error={}",
                     timeoutSeconds, safe(e.getMessage()));
         } catch (Exception e) {
-            LOG.error("Dispatch loop failed before ack: queue=dispatch:pending processing_queue=dispatch:processing timeout_seconds={}",
-                    timeoutSeconds, e);
+            deferOrderingAttempt();
+            LOG.error("Dispatch loop failed before ack: queue=dispatch:pending processing_queue=dispatch:processing timeout_seconds={} ordering_lease_ms={}",
+                    timeoutSeconds, orderingLeaseMs, e);
         }
+    }
+
+    private void deferOrderingAttempt() {
+        long minimum = Math.max(1L, contentionBackoffMs / 2L);
+        long delayMs = ThreadLocalRandom.current().nextLong(minimum, contentionBackoffMs + 1L);
+        nextOrderingAttemptNanos = nanoTime.getAsLong() + TimeUnit.MILLISECONDS.toNanos(delayMs);
     }
 }

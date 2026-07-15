@@ -9,6 +9,7 @@ import io.runcycles.events.model.RetryPolicy;
 import io.runcycles.events.model.Subscription;
 import io.runcycles.events.model.WebhookStatus;
 import io.runcycles.events.repository.DeliveryQueueRepository;
+import io.runcycles.events.repository.DeliveryQueueRepository.ClaimedDelivery;
 import io.runcycles.events.repository.DeliveryRepository;
 import io.runcycles.events.repository.EventRepository;
 import io.runcycles.events.repository.SubscriptionRepository;
@@ -70,8 +71,10 @@ class RecoveredDeliveryBoundaryTest {
         handler = new DeliveryHandler(deliveryRepository, eventRepository,
                 subscriptionRepository, queueRepository, transport, metrics, validator,
                 urlGuard, 86400000L);
-        dispatchLoop = new DispatchLoop(queueRepository, handler, 5);
-        recovery = new DispatchRecovery(queueRepository, 120000L);
+        dispatchLoop = new DispatchLoop(queueRepository, handler, metrics,
+                5, 120_000L, 30, 500, System::nanoTime);
+        when(queueRepository.tryAcquireOrderingLock(anyString(), anyLong())).thenReturn(true);
+        recovery = new DispatchRecovery(queueRepository, 180_000L, 120_000L, 5, 30);
     }
 
     private double counter(String name, String... tags) {
@@ -84,7 +87,11 @@ class RecoveredDeliveryBoundaryTest {
         // Recovery reports a stale delivery moved back to pending; the loop then
         // claims that same id from pending.
         when(queueRepository.recoverStaleProcessing(anyLong(), anyLong())).thenReturn(1L);
-        when(queueRepository.claimPending(5)).thenReturn("del-1");
+        ClaimedDelivery claim = new ClaimedDelivery("del-1", "claim-1");
+        when(queueRepository.claimPending(5)).thenReturn(claim);
+        when(queueRepository.ack(claim)).thenReturn(true);
+        when(deliveryRepository.updateOwned(any(Delivery.class),
+                org.mockito.ArgumentMatchers.eq(claim))).thenReturn(true);
 
         Delivery delivery = Delivery.builder()
                 .deliveryId("del-1")
@@ -123,12 +130,12 @@ class RecoveredDeliveryBoundaryTest {
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("ownership boundary");
         verify(transport, never()).deliver(any(), any(), any(), any());
-        verify(queueRepository, never()).scheduleRetry(anyString(), anyLong());
+        verify(deliveryRepository, never()).updateOwnedAndScheduleRetry(any(), any(), anyLong());
         // Terminal handling still acks the recovered delivery so it leaves the queue.
-        verify(queueRepository).ack("del-1");
+        verify(queueRepository).ack(claim);
         // Never contacts endpoint health machinery.
-        verify(subscriptionRepository, never()).updateDeliveryState(
-                anyString(), org.mockito.ArgumentMatchers.anyInt(), any(), any(), any(), any());
+        verify(subscriptionRepository, never()).finalizeDeliveryFailure(
+                anyString(), any(), any(), any(), org.mockito.ArgumentMatchers.anyInt(), any(), any());
         assertThat(counter(CyclesMetrics.DELIVERY_BOUNDARY_SKIPPED,
                 "tenant", "t-1", "event_type", "api_key.revoked", "category", "api_key"))
                 .isEqualTo(1.0);

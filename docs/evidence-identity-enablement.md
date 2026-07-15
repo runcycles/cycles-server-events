@@ -49,7 +49,8 @@ there is harmless but redundant.
 1. **`EVIDENCE_SERVER_ID` must be byte-identical on both services.** It is stamped
    into the envelope AND is the base of `cycles_evidence_url`. If the two services
    disagree, `cycles-server`'s precomputed `evidence_id` won't match what the worker
-   builds → the worker's id cross-check fails → the record **dead-letters** (`evidence:failed`).
+   builds → the worker's id cross-check fails → the record remains in-flight
+   and new claims pause briefly until the identities are reconciled.
 2. **`EVIDENCE_SIGNING_SIGNER_DID` must be byte-identical on both** — same reason
    (`signer_did` is part of the hashed envelope).
 3. **On the worker, `EVIDENCE_SIGNING_SIGNER_DID` must be the public half of
@@ -131,11 +132,11 @@ not queued and there is **no** `evidence_id` / `cycles_evidence` (fail-open, sil
 2. `GET` the `cycles_evidence_url` (it is `{server_id}/evidence/{evidence_id}`) — expect the
    signed envelope (`200`, `application/json`). A transient `404` immediately after is normal
    (async signing); retry.
-3. Confirm `evidence:failed` (dead-letter list) is **not** growing. A growing
-   list plus worker logs containing `evidence_id cross-check failed` means
-   `EVIDENCE_SERVER_ID`/`SIGNER_DID` differ between the two services (coherence
-   rule 1/2). The dead-letter entry itself is the source record; the reason is
-   in the worker log.
+3. Confirm `evidence:failed` (invalid-source dead-letter list) is **not** growing
+   and `evidence:processing` is not persistently occupied. Worker logs containing
+   `evidence_id cross-check failed` mean `EVIDENCE_SERVER_ID`/`SIGNER_DID` differ
+   between the two services (coherence rule 1/2); the record remains in-flight
+   for recovery after configuration is corrected.
 
 ## JWKS and rotation
 

@@ -38,7 +38,9 @@ class EvidenceWorkerIntegrationTest {
 
     @Container
     static final GenericContainer<?> redis =
-            new GenericContainer<>(DockerImageName.parse("redis:7-alpine")).withExposedPorts(6379);
+            new GenericContainer<>(DockerImageName.parse(
+                    "redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99"))
+                    .withExposedPorts(6379);
 
     private static final KeyHex KEY = freshKeyPair();
     private static final String SERVER_ID = "https://cycles.example.com/v1";
@@ -60,8 +62,11 @@ class EvidenceWorkerIntegrationTest {
     @Test
     void reserveSourceRecordIsBuiltSignedAndStored() throws Exception {
         ObjectNode payload = MAPPER.createObjectNode();
-        payload.putObject("request").put("idempotency_key", "k1");
-        payload.putObject("response").put("decision", "ALLOW");
+        putDecisionRequest(payload.putObject("request"), "k1");
+        ObjectNode response = payload.putObject("response");
+        response.put("decision", "ALLOW");
+        response.putArray("affected_scopes").add("tenant:acme");
+        response.put("reservation_id", "res_reserve_1");
 
         ObjectNode env = roundTrip("reserve", payload);
 
@@ -72,7 +77,7 @@ class EvidenceWorkerIntegrationTest {
     @Test
     void decideSourceRecordIsBuiltSignedAndStored() throws Exception {
         ObjectNode payload = MAPPER.createObjectNode();
-        payload.putObject("request").put("idempotency_key", "d1");
+        putDecisionRequest(payload.putObject("request"), "d1");
         payload.putObject("response").put("decision", "ALLOW");
 
         ObjectNode env = roundTrip("decide", payload);
@@ -85,8 +90,12 @@ class EvidenceWorkerIntegrationTest {
     void commitSourceRecordHoistsReservationIdAndIsSignedAndStored() throws Exception {
         ObjectNode payload = MAPPER.createObjectNode();
         payload.put("reservation_id", "res_commit_1");
-        payload.putObject("request").put("idempotency_key", "c1");
-        payload.putObject("response").put("status", "COMMITTED");
+        ObjectNode request = payload.putObject("request");
+        request.put("idempotency_key", "c1");
+        putAmount(request.putObject("actual"), 750);
+        ObjectNode response = payload.putObject("response");
+        response.put("status", "COMMITTED");
+        putAmount(response.putObject("charged"), 750);
 
         ObjectNode env = roundTrip("commit", payload);
 
@@ -100,7 +109,9 @@ class EvidenceWorkerIntegrationTest {
         ObjectNode payload = MAPPER.createObjectNode();
         payload.put("reservation_id", "res_release_1");
         payload.putObject("request").put("idempotency_key", "r1");
-        payload.putObject("response").put("status", "RELEASED");
+        ObjectNode response = payload.putObject("response");
+        response.put("status", "RELEASED");
+        putAmount(response.putObject("released"), 1000);
 
         ObjectNode env = roundTrip("release", payload);
 
@@ -149,6 +160,9 @@ class EvidenceWorkerIntegrationTest {
 
         String envJson = pollForStoredEnvelope(15_000);
         assertThat(envJson).as("%s envelope persisted to the store within 15s", artifactType).isNotNull();
+        assertThat(pollUntilProcessingQueueDrained(5_000))
+                .as("%s source record acknowledged from the real Redis processing queue", artifactType)
+                .isTrue();
 
         ObjectNode env = (ObjectNode) MAPPER.readTree(envJson);
         assertThat(env.get("artifact_type").asText()).isEqualTo(artifactType);
@@ -164,6 +178,9 @@ class EvidenceWorkerIntegrationTest {
         String evidenceId = env.get("evidence_id").asText();
         assertThat(evidenceId).as("evidence_id is 64-hex").matches("^[0-9a-f]{64}$");
         assertThat(canon.computeEvidenceId(env)).isEqualTo(evidenceId);
+        assertThat(envJson.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                .as("stored evidence bytes are RFC 8785 canonical")
+                .isEqualTo(canon.canonicalize(env));
         byte[] signingBytes = canon.signingBytes(env, evidenceId);
         assertThat(signer.verify(signingBytes, env.get("signature").asText(), KEY.pub())).isTrue();
         return env;
@@ -183,7 +200,35 @@ class EvidenceWorkerIntegrationTest {
         return null;
     }
 
+    private boolean pollUntilProcessingQueueDrained(long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try (Jedis jedis = jedisPool.getResource()) {
+                if (jedis.llen("evidence:processing") == 0
+                        && jedis.zcard("evidence:processing:claimed_at") == 0) {
+                    return true;
+                }
+            }
+            Thread.sleep(25);
+        }
+        return false;
+    }
+
     private record KeyHex(String priv, String pub) {
+    }
+
+    private static void putDecisionRequest(ObjectNode request, String idempotencyKey) {
+        request.put("idempotency_key", idempotencyKey);
+        request.putObject("subject").put("tenant", "acme");
+        ObjectNode action = request.putObject("action");
+        action.put("kind", "model.call");
+        action.put("name", "test-model");
+        putAmount(request.putObject("estimate"), 1000);
+    }
+
+    private static void putAmount(ObjectNode amount, long value) {
+        amount.put("unit", "USD_MICROCENTS");
+        amount.put("amount", value);
     }
 
     private static KeyHex freshKeyPair() {

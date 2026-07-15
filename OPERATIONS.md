@@ -45,8 +45,8 @@ alert rules carry over.
 
 ## Metrics inventory
 
-All domain metrics live under the `cycles_webhook_*` namespace (source names
-use the dotted `cycles.webhook.*` form; Micrometer's Prometheus registry
+Domain metrics live under the `cycles_webhook_*` and `cycles_evidence_*` namespaces (source names
+use dotted `cycles.webhook.*` / `cycles.evidence.*` forms; Micrometer's Prometheus registry
 normalises to underscored `_total`-suffixed names on scrape). Spring Boot
 auto-metrics (`http_server_requests_seconds` for the actuator endpoints,
 `jvm_*`, `process_*`, `logback_events_total`) are also emitted and worth
@@ -70,14 +70,28 @@ The `tenant` tag listed here is emitted only when
 | `cycles_webhook_delivery_failed_total` | `tenant`, `event_type`, `reason` | Delivery failed. `reason=http_4xx`/`http_5xx`/`transport_error` (HTTP or connection layer), or `event_not_found`/`subscription_not_found`/`subscription_inactive` (upstream resolution layer). |
 | `cycles_webhook_delivery_retried_total` | `tenant`, `event_type` | Delivery requeued onto `dispatch:retry` for exponential-backoff retry. Increments once per scheduled retry; the actual retry attempt will increment `cycles_webhook_delivery_attempts_total` again when it fires. |
 | `cycles_webhook_delivery_stale_total` | `tenant` | Delivery's `attempted_at` exceeded `MAX_DELIVERY_AGE_MS` (default 24h) and was auto-failed without a delivery attempt. Indicates the service was offline for longer than the stale threshold. `tenant` is `UNKNOWN` here because the subscription isn't loaded on the stale path. |
+| `cycles_webhook_delivery_dead_lettered_total` | `reason` | A deterministically corrupt delivery record moved to the bounded `dispatch:failed` quarantine. `reason=corrupt_record`; any increase requires inspection and repair. |
 | `cycles_webhook_subscription_auto_disabled_total` | `tenant`, `reason` | Subscription flipped to `DISABLED` after consecutive failures. `reason=consecutive_failures`. |
 | `cycles_webhook_delivery_latency_seconds` | `tenant`, `event_type`, `outcome` | End-to-end outbound HTTP latency. `outcome=success`/`failure`. Only recorded when a transport round-trip actually occurred (upstream failures like `event_not_found` have no meaningful latency and are skipped). |
+| `cycles_webhook_dispatcher_event_published_total` | `event_type` | Durable dispatcher meta-event task published and acknowledged. Event types are bounded to `webhook.disabled` and `system.webhook_delivery_failed`. |
+| `cycles_webhook_dispatcher_event_deferred_total` | `event_type`, `reason` | Meta-event publication retained for retry after `inline_publish_failure`, `publish_failure`, `scan_failure`, or `claim_failure`. |
+| `cycles_webhook_dispatcher_event_dead_lettered_total` | `event_type`, `reason` | A repeatedly unpublishable meta-event task exhausted its bounded retry budget and moved to `dispatcher:event-outbox:failed`. Any increase requires operator inspection. |
+| `cycles_webhook_security_config_indeterminate_total` | none | Delivery-time SSRF policy could not be parsed or loaded. The delivery is retained for recovery; a sustained increase can stop all webhook sends. |
 
 ### Event payload validation
 
 | Metric | Tags | What it tells you |
 |---|---|---|
 | `cycles_webhook_events_payload_invalid_total` | `type`, `rule` | Non-fatal event-payload shape discrepancy. Never blocks delivery; emits a WARN log at the same time. Tag schema parallels `cycles-server-admin`'s `cycles_admin_events_payload_invalid_total{type, expected_class}` so dashboards can pivot between the two services. `rule` values: `missing_required`, `unknown_event_type`, `category_mismatch`, `budget_data_shape`, `reset_spent_shape`. |
+
+### Evidence lifecycle
+
+| Metric | Tags | What it tells you |
+|---|---|---|
+| `cycles_evidence_claimed_total` | `artifact_type` | Evidence source records claimed from the reliable queue. |
+| `cycles_evidence_stored_total` | `artifact_type` | Canonical signed envelopes durably stored. |
+| `cycles_evidence_dead_lettered_total` | `artifact_type`, `reason` | Deterministically invalid source records atomically moved to the DLQ. |
+| `cycles_evidence_retry_deferred_total` | `artifact_type`, `reason` | Work retained for recovery (`identity_mismatch`, `build_failure`, `store_failure`, `ack_failure`, `ack_conflict`, `queue_unavailable`, `claim_failure`, `dlq_move_conflict`, or `dlq_move_failure`). Identity/signing/store failures also pause new claims for `EVIDENCE_INFRASTRUCTURE_BACKOFF_MS` (30 seconds by default) to limit in-flight growth. |
 
 ### Reason codes
 
@@ -89,7 +103,11 @@ Tag values on the `reason` label of `cycles_webhook_delivery_failed_total`:
 - **Upstream-layer** (failures before the HTTP call happens):
   `event_not_found` (Redis `event:{id}` is missing/expired),
   `subscription_not_found` (Redis `webhook:{id}` is missing),
-  `subscription_inactive` (subscription status is `PAUSED` or `DISABLED`).
+  `subscription_inactive` (subscription status is `PAUSED` or `DISABLED`),
+  `ssrf_blocked` (the current delivery target violates webhook egress policy),
+  or `missing_signing_secret` (delivery was retained for recovery rather than
+  sent unsigned; a persistent secret/configuration gap eventually reaches the
+  normal stale-delivery age gate).
 
 Stale deliveries (age > `MAX_DELIVERY_AGE_MS`) increment only
 `cycles_webhook_delivery_stale_total` — they do **not** double-count into
@@ -241,6 +259,39 @@ producer.
                   File against the producer (cycles-server-admin or cycles-server), not this service."
 ```
 
+### Security configuration and durable-outbox integrity
+
+A malformed `blocked_cidr_ranges` entry intentionally fails closed. Because the
+same configuration is evaluated for every target, one bad entry can pause the
+fleet until corrected. A poison dispatcher meta-event is bounded and moved to a
+DLQ instead of warning every five seconds forever.
+
+```yaml
+- alert: CyclesWebhookSecurityConfigIndeterminate
+  expr: increase(cycles_webhook_security_config_indeterminate_total[5m]) > 0
+  for: 1m
+  labels: {severity: page}
+  annotations:
+    summary: "webhook egress security configuration is unreadable"
+    description: "Inspect config:webhook-security, especially every blocked_cidr_ranges entry. Deliveries are retained, not sent."
+
+- alert: CyclesWebhookDispatcherEventDeadLettered
+  expr: increase(cycles_webhook_dispatcher_event_dead_lettered_total[15m]) > 0
+  for: 1m
+  labels: {severity: ticket}
+  annotations:
+    summary: "dispatcher meta-event moved to its dead-letter queue"
+    description: "Inspect LRANGE dispatcher:event-outbox:failed 0 10 and correct the malformed or persistently unpublishable task before replay."
+
+- alert: CyclesWebhookDeliveryDeadLettered
+  expr: increase(cycles_webhook_delivery_dead_lettered_total{reason="corrupt_record"}[15m]) > 0
+  for: 1m
+  labels: {severity: page}
+  annotations:
+    summary: "corrupt webhook delivery moved to quarantine"
+    description: "Inspect LRANGE dispatch:failed 0 10 and the retained delivery:{id}; repair the foreign/corrupt writer before replay."
+```
+
 ### Redis connectivity (infers from missing traffic)
 
 The dispatcher claims with BLMOVE; when Redis is unavailable, attempts go to
@@ -354,6 +405,8 @@ sum by (type, rule) (rate(cycles_webhook_events_payload_invalid_total[5m]))
 redis_list_length{key="dispatch:pending"}
 redis_list_length{key="dispatch:processing"}
 redis_zset_length{key="dispatch:retry"}
+redis_zset_length{key="dispatcher:event-outbox:pending"}
+redis_list_length{key="dispatcher:event-outbox:failed"}
 ```
 
 A `redis_exporter` instance scraping the same Redis your dispatcher talks
@@ -422,10 +475,58 @@ climb in `cycles_webhook_delivery_attempts_total`.
    `cycles_webhook_delivery_latency_seconds_sum` rate. A tenant with a
    slow endpoint can hold a dispatcher thread for the full HTTP timeout
    (default 30s).
-4. Remediation: scale dispatcher instances horizontally (BLMOVE claim + ack
-   is atomic; N instances safely parallelise), or lower
-   `dispatch.http.timeout-seconds` so one slow subscriber doesn't block
-   the queue.
+4. The global `dispatch:ordering:lock` deliberately permits only one claim/send
+   section fleet-wide. At the 30-second HTTP timeout the worst-case ceiling is
+   roughly two webhook deliveries per minute, and adding replicas improves
+   failover only. Lower `dispatch.http.timeout-seconds`, repair the slow target,
+   or raise `MAX_DELIVERY_AGE_MS` while draining an accepted backlog. Parallel
+   delivery requires a future per-subscription/tenant ordering design; do not
+   remove the global lock ad hoc.
+
+### Symptom: security policy is indeterminate
+
+`cycles_webhook_security_config_indeterminate_total` is increasing and delivery
+attempts have stopped.
+
+1. Read `GET config:webhook-security` and validate every
+   `blocked_cidr_ranges` value as a literal IPv4/IPv6 CIDR. Blank values,
+   hostnames, zone identifiers, and malformed prefixes are rejected.
+2. Correct the config through the admin plane. Do not delete the key merely to
+   bypass validation unless accepting the documented hardened fallback is an
+   explicit incident decision.
+   The events-side absent-key fallback intentionally blocks `0.0.0.0/8`,
+   `100.64.0.0/10`, `fe80::/10`, and `::/128` in addition to the current admin
+   fallback. Until the admin service aligns those defaults, a URL accepted by
+   admin without a stored config can still fail closed here at delivery.
+3. No delivery replay is normally needed: affected records remain in
+   `dispatch:processing` and return to pending after the recovery idle window.
+
+### Symptom: corrupt delivery in the quarantine
+
+`cycles_webhook_delivery_dead_lettered_total{reason="corrupt_record"}` increased.
+
+1. Inspect `LRANGE dispatch:failed 0 10`. Each wrapper contains
+   `delivery_id`, `quarantined_at_ms`, `reason`, and the raw stored `payload`.
+2. Read the retained `GET delivery:{delivery_id}` and identify the foreign or
+   incompatible writer. Valid statuses are `PENDING`, `RETRYING`, `SUCCESS`,
+   and `FAILED`; normal delivery JSON must deserialize to the current model.
+3. Repair the source value first. To replay, `LPUSH dispatch:pending
+   {delivery_id}` and remove the matching quarantine wrapper only after the
+   delivery reaches a terminal state. Never replay the raw wrapper itself.
+4. The quarantine keeps the newest `DISPATCH_FAILED_MAX_LEN` entries (10000 by
+   default), so alerting is required before older evidence is trimmed.
+
+### Symptom: dispatcher meta-event in the DLQ
+
+1. Inspect `LRANGE dispatcher:event-outbox:failed 0 10`. Each entry is a JSON
+   wrapper containing `task_id` and the original serialized `payload` (empty if
+   the payload had already disappeared).
+2. Fix the serialization or Redis event-save failure. The default retry budget
+   is 100 attempts and the DLQ retains the newest 10000 entries.
+3. Replay a repaired task by restoring
+   `dispatcher:event-outbox:task:{task_id}` and `ZADD`ing its ID to
+   `dispatcher:event-outbox:pending`; deterministic event IDs make replay
+   idempotent. Remove the DLQ copy only after the published counter increments.
 
 ### Symptom: a specific subscription was auto-disabled
 
@@ -494,26 +595,45 @@ don't fit.
 
 | Property / Env Var | Default | When to change |
 |---|---|---|
-| `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` | `localhost`, `6379`, (empty) | Always set for production. |
+| `REDIS_HOST`, `REDIS_PORT`, `REDIS_USERNAME`, `REDIS_PASSWORD` | `localhost`, `6379`, (empty), (empty) | Always set for production; use a least-privilege ACL identity. Jedis sets client name `cycles-server-events`, so the ACL must include `+client|setname`. |
+| `REDIS_TLS_ENABLED` | `false` | Enable for off-host production Redis. JVM trust configuration must trust the Redis certificate. |
+| `REDIS_CONNECT_TIMEOUT_MS` / `REDIS_SOCKET_TIMEOUT_MS` / `REDIS_BLOCKING_SOCKET_TIMEOUT_MS` | `2000` / `5000` / `10000` | Connection, ordinary-command, and blocking-command socket bounds. The blocking timeout must exceed every BLMOVE command timeout so an unavailable peer cannot pin a scheduler thread forever. |
 | `WEBHOOK_SECRET_ENCRYPTION_KEY` | (empty) | Set to a base64-encoded 32-byte key to enable AES-256-GCM for webhook signing secrets at rest. Must match the key configured in `cycles-server-admin`. If empty, secrets are stored/read as plaintext (backward-compatible, not recommended for production). |
 | `dispatch.http.timeout-seconds` | `30` | Lower if one slow subscriber is blocking the queue and you can tolerate more retries. Raise if you have legitimately slow subscribers that need more time. |
 | `dispatch.http.connect-timeout-seconds` | `5` | Rarely needs tuning. Lower if your egress is fast and you want to fail faster on unreachable DNS. |
-| `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | `120000` | Minimum age before an in-flight delivery in `dispatch:processing` is considered stale and requeued. Keep above the max expected webhook HTTP timeout plus Redis write time. |
+| `DISPATCH_LOOP_DELAY_MS` | `25` | Pause after each dispatch invocation. This is not the empty-queue wait; BLMOVE can block for `dispatch.pending.timeout-seconds`. |
+| `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | `180000` | Minimum age before an in-flight delivery is requeued. It must exceed both `DISPATCH_ORDERING_LEASE_MS` and the configured pending-plus-HTTP timeout duration; startup rejects unsafe combinations. |
+| `DISPATCH_PROCESSING_RECOVERY_INTERVAL_MS` | `30000` | How often replicas recheck for stale in-flight deliveries. |
+| `DISPATCH_FAILED_MAX_LEN` | `10000` | Number of newest corrupt-delivery wrappers retained in `dispatch:failed`. Raise only with a Redis memory budget and alerting in place. |
+| `DISPATCH_ORDERING_LEASE_MS` | `120000` | Global claim/send critical-section TTL. It preserves initial-claim order but caps fleet throughput at one in-flight send; replicas are standby/failover. It must exceed BLMOVE plus HTTP and Redis state-write time. |
+| `DISPATCH_ORDERING_CONTENTION_BACKOFF_MS` | `500` | Randomized half-to-full backoff after a global ordering-lease miss or Redis error. Raise if idle replicas create noticeable lease traffic. |
+| `DISPATCH_EVENT_OUTBOX_POLL_INTERVAL_MS` / `DISPATCH_EVENT_OUTBOX_BATCH_SIZE` | `1000` / `25` | Poll cadence and maximum durable dispatcher meta-event tasks considered per pass. |
+| `DISPATCH_EVENT_OUTBOX_CLAIM_LEASE_MS` / `DISPATCH_EVENT_OUTBOX_RETRY_DELAY_MS` | `30000` / `5000` | Per-task owner lease and next-attempt delay. Keep the lease above normal Redis event-save latency. |
+| `DISPATCH_EVENT_OUTBOX_MAX_ATTEMPTS` / `DISPATCH_EVENT_OUTBOX_FAILED_MAX_LEN` | `100` / `10000` | Attempts before an unpublishable task moves to the bounded DLQ, and the number of newest DLQ payloads retained. |
 | `MAX_DELIVERY_AGE_MS` | `86400000` (24h) | Raise if you legitimately replay multi-day-old events. Lower (with caution) if you'd rather drop old deliveries than burden subscribers with stale data. |
 | `EVENT_TTL_DAYS` | `90` | Matches spec "90 days hot" recommendation. Lower only if Redis memory is tight. |
 | `DELIVERY_TTL_DAYS` | `14` | Two weeks of delivery history. Lower if Redis memory is tight; raise if compliance review needs a longer window. |
 | `RETRY_BATCH_SIZE` | `100` | Max retries requeued per poll cycle. Raise on spiky workloads where retries cluster. |
 | `dispatch.retry.poll-interval-ms` | `5000` | How often `RetryScheduler` drains `dispatch:retry`. Lower for tighter retry latency at the cost of slightly more Redis load. |
 | `RETENTION_CLEANUP_INTERVAL_MS` | `3600000` (1h) | How often `RetentionCleanupService` trims expired ZSET entries. Rarely needs tuning. |
+| `RETENTION_LOCK_LEASE_MS` | `300000` (5m) | Cross-replica cleanup lease. Keep above the expected cleanup duration. An owner-token release cannot delete a successor's lease. |
 | `CYCLES_METRICS_TENANT_TAG_ENABLED` | `false` | Set `true` only if per-tenant Prometheus drill-down is worth the added cardinality. Flip sibling services together for dashboard consistency. |
 | `JAVA_OPTS` | (empty) | Extra JVM options appended after the Docker image defaults, for example heap sizing or GC logging flags. |
 | `spring.task.scheduling.pool.size` (`SCHEDULING_POOL_SIZE`) | `5` | Size of the scheduled-task executor. `DispatchLoop` always runs a continuous webhook BLMOVE claim loop; `EvidenceWorker` adds a second BLMOVE loop only when `EVIDENCE_SERVER_ID` is set. **Don't lower below 5** when evidence is enabled or webhook retries/cleanup can starve behind the blocking loops (see "Scheduler pool" under the runbook below). |
 | `management.endpoints.web.exposure.include` | `health,info,prometheus` | Add more actuator endpoints if needed, but `prometheus` is the one ops cares about. |
 | `MANAGEMENT_PORT` | `9980` | Separate port actuators bind to — keep this on an internal-only network. This worker has no public HTTP API; do not publish 7980 on an ingress. |
-| `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. Blank disables the evidence signer. When set, it **must be byte-identical to `cycles-server`'s** value (incl. the `/v1` base) or the worker's id cross-check fails and records dead-letter. See the enablement runbook below. |
+| `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. Blank disables the evidence signer. When set, it must be an absolute URI and **byte-identical to `cycles-server`'s** value (incl. the `/v1` base), or mismatched work remains in-flight while new claims pause briefly. See the enablement runbook below. |
 | `EVIDENCE_SIGNING_SIGNER_DID` | (empty) | Public Ed25519 key (64 hex) stamped as `signer_did`. Must be the public half of `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` **and** identical to `cycles-server`'s value. |
 | `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | (empty) | **Secret** — Ed25519 seed (64 hex) this worker signs with. Lives **only** here, never on `cycles-server`. Required when evidence is enabled unless `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY=true`. Setting only one of the signing pair fails startup. |
 | `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY` | `false` | Development-only escape hatch. When `true`, evidence can start without a configured signing pair and will generate a per-process ephemeral signer. Keep `false` in production. |
+| `EVIDENCE_PENDING_KEY` / `EVIDENCE_PROCESSING_KEY` / `EVIDENCE_FAILED_KEY` | `evidence:pending` / `evidence:processing` / `evidence:failed` | Source, in-flight, and bounded poison-record queue keys. Change only for coordinated migrations or isolated environments. |
+| `EVIDENCE_POP_TIMEOUT_SECONDS` | `5` | Evidence BLMOVE timeout. It must remain below `REDIS_BLOCKING_SOCKET_TIMEOUT_MS`. |
+| `EVIDENCE_RECOVERY_IDLE_MS` / `EVIDENCE_RECOVERY_INTERVAL_MS` | `120000` / `30000` | Minimum age and polling interval for returning stale evidence work from processing to pending. Keep the idle threshold above normal schema-validation, signing, and store latency. |
+| `EVIDENCE_RECOVERY_BATCH_SIZE` | `100` | Bounded number of in-flight evidence records inspected per recovery pass. |
+| `EVIDENCE_FAILED_MAX_LEN` | `10000` | Positive DLQ bound; poison records beyond the bound evict the oldest entries. |
+| `EVIDENCE_LOOP_DELAY_MS` / `EVIDENCE_QUEUE_FAILURE_BACKOFF_MS` | `25` / `1000` | Scheduler cadence and claim pause after Redis queue/ack failures. Raise the backoff if a Redis outage still produces excessive connection logs. |
+| `EVIDENCE_INFRASTRUCTURE_BACKOFF_MS` | `30000` | Claim pause after identity, signing, or store failures. This bounds how quickly a systemic outage can move pending records into processing. |
+| `EVIDENCE_STORE_BACKEND` / `EVIDENCE_STORE_KEY_PREFIX` / `EVIDENCE_STORE_TTL_SECONDS` | `redis` / `evidence:envelope:` / `0` | Content-addressed envelope backend, Redis key namespace, and TTL. Keep `0` for archival evidence unless a separate durable archive exists. |
 
 Turning CyclesEvidence **on** (the shared identity across `cycles-server` + this
 worker, key generation, coherence rules, and end-to-end verification) is documented
@@ -586,7 +706,7 @@ patch around (see the v0.1.25.10 consolidation note in `CHANGELOG.md`).
   PR will either add a CHANGELOG entry at the new version or roll the
   pom back, not silently ship under the new number.
 
-## CyclesEvidence emitter (WIP)
+## CyclesEvidence signing worker
 
 The `EvidenceWorker` consumes source records cycles-server pushes to
 `evidence:pending`, signs a `cycles-evidence/v0.1` envelope for each, and hands
@@ -607,18 +727,36 @@ it to the sink. Operational notes:
   restart and multiple un-configured replicas would each sign with a different
   `signer_did`. Provision the key once and set it identically on every replica.
 - **Reliable queue.** The worker claims records with `BLMOVE evidence:pending →
-  evidence:processing` and only `LREM`s them from `evidence:processing` after the
-  envelope is stored (or dead-lettered). On startup, orphaned in-flight records
-  (left by a crash between claim and store) are moved back to `evidence:pending`
-  and reprocessed (safe — envelopes are content-addressed/idempotent). A non-empty
+  evidence:processing`, replaces the raw list member with a unique claim ID, and
+  retains the raw payload in `evidence:processing:payload`. Ack and DLQ scripts
+  remove only the owned claim ID after the envelope is stored (or atomically
+  dead-lettered). This keeps byte-identical source records independent and fences
+  workers that resume after recovery. Idle in-flight records are
+  periodically moved back to `evidence:pending` and reprocessed (safe — envelopes
+  are content-addressed/idempotent). A non-empty
   `evidence:processing` on a healthy steady-state service is a smell (stuck
-  worker); a brief spike right after a restart is normal recovery. Multi-replica
-  note: a shared processing list means a restart can re-queue another replica's
-  in-flight record — harmless (idempotent), some churn.
-- **Dead-letter queue.** A source record that fails to build/sign is LPUSH'd to
-  `evidence:failed` (not dropped). Monitor `LLEN evidence:failed`; a non-zero,
-  growing value means records are failing to sign (bad key, malformed producer
-  output). Inspect with `LRANGE evidence:failed 0 10` and replay after fixing.
+  worker); a brief spike after a crash is normal recovery. Claim timestamps prevent
+  a starting replica from requeueing another healthy replica's active work.
+- **Rolling upgrade into 0.1.25.24.** The processing-list member changed from raw
+  JSON to an internal claim ID. Drain `evidence:processing` and stop or disable
+  evidence signing on every older replica before starting 0.1.25.24 workers;
+  do not run old and new evidence consumers concurrently. Pending raw records are
+  unchanged and can remain queued during the rollout.
+- **Identity drift is recoverable.** If the producer-stamped `evidence_id` does
+  not match the worker's result, the record stays in `evidence:processing` and
+  new claims pause for 30 seconds. Reconcile `EVIDENCE_SERVER_ID` and
+  `EVIDENCE_SIGNING_SIGNER_DID`; stale recovery will then replay the record.
+- **Dead-letter queue.** Only deterministically invalid source JSON/schema data
+  is LPUSH'd to `evidence:failed` (not dropped). Monitor `LLEN evidence:failed`;
+  a growing value means producer output violates the evidence contract. Inspect
+  with `LRANGE evidence:failed 0 10` and replay after fixing.
+- **Dispatcher meta-event outbox.** Final webhook retry exhaustion atomically
+  stages `system.webhook_delivery_failed` and, on the qualifying transition,
+  `webhook.disabled`. Monitor `ZCARD dispatcher:event-outbox:pending` and the
+  three `cycles_webhook_dispatcher_event_*` metrics. Tasks use deterministic
+  event IDs and are safe to replay. Publish failures retry up to
+  `DISPATCH_EVENT_OUTBOX_MAX_ATTEMPTS`, then move to the bounded
+  `dispatcher:event-outbox:failed` list for operator action.
 - **Scheduler pool.** `SCHEDULING_POOL_SIZE` (default 5) must stay >= the number
   of continuous blocking loops (`DispatchLoop`, plus `EvidenceWorker` when
   evidence is enabled) plus headroom for periodic tasks, or webhook retries and

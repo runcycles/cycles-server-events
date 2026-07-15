@@ -108,6 +108,26 @@ class EventPayloadValidatorTest {
     }
 
     @Test
+    void missingEventTypeSkipsVocabularyResolutionAndEmitsRequiredWarning() {
+        Event event = Event.builder()
+                .eventId("evt-1")
+                .eventType(" ")
+                .category("tenant")
+                .timestamp(Instant.now())
+                .tenantId("t-1")
+                .source("admin")
+                .build();
+
+        validator.validate(event);
+
+        assertThat(warningCount(CyclesMetrics.TAG_UNKNOWN,
+                EventPayloadValidator.RULE_MISSING_REQUIRED)).isEqualTo(1.0);
+        assertThat(registry.find(CyclesMetrics.EVENTS_PAYLOAD_INVALID)
+                .tags("type", " ", "rule", EventPayloadValidator.RULE_UNKNOWN_EVENT_TYPE)
+                .counter()).isNull();
+    }
+
+    @Test
     void blank_tenant_id_emitsWarning() {
         Event event = Event.builder()
                 .eventId("evt-1")
@@ -244,6 +264,27 @@ class EventPayloadValidatorTest {
         validator.validate(event);
         assertThat(warningCount("budget.funded",
                 EventPayloadValidator.RULE_BUDGET_DATA_SHAPE)).isGreaterThanOrEqualTo(1.0);
+    }
+
+    @Test
+    void budgetEventRejectsBlankLedgerAndNonStringOperation() {
+        Map<String, Object> data = new HashMap<>();
+        data.put("ledger_id", " ");
+        data.put("operation", 42);
+        Event event = Event.builder()
+                .eventId("evt-1")
+                .eventType("budget.updated")
+                .category("budget")
+                .timestamp(Instant.now())
+                .tenantId("t-1")
+                .source("admin")
+                .data(data)
+                .build();
+
+        validator.validate(event);
+
+        assertThat(warningCount("budget.updated", EventPayloadValidator.RULE_BUDGET_DATA_SHAPE))
+                .isEqualTo(2.0);
     }
 
     @Test

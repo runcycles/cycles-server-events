@@ -1,6 +1,8 @@
 package io.runcycles.events.evidence;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.runcycles.events.metrics.CyclesMetrics;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
@@ -13,11 +15,13 @@ class EvidenceConfigurationConditionTest {
             .withBean(ObjectMapper.class, ObjectMapper::new)
             .withBean(EvidenceQueueConsumer.class, () -> mock(EvidenceQueueConsumer.class))
             .withBean(EvidenceSink.class, () -> envelope -> { })
+            .withBean(CyclesMetrics.class, () -> new CyclesMetrics(new SimpleMeterRegistry(), false))
             .withUserConfiguration(
                     EnvelopeSigner.class,
                     CyclesEvidenceCanonicalizer.class,
                     LocalEvidenceSigningKey.class,
                     CyclesEvidenceEnvelopeBuilder.class,
+                    CyclesEvidenceSchemaValidator.class,
                     EvidenceWorker.class);
 
     @Test
@@ -26,6 +30,7 @@ class EvidenceConfigurationConditionTest {
             assertThat(context).hasNotFailed();
             assertThat(context).doesNotHaveBean(LocalEvidenceSigningKey.class);
             assertThat(context).doesNotHaveBean(CyclesEvidenceEnvelopeBuilder.class);
+            assertThat(context).doesNotHaveBean(CyclesEvidenceSchemaValidator.class);
             assertThat(context).doesNotHaveBean(EvidenceWorker.class);
         });
     }
@@ -53,7 +58,22 @@ class EvidenceConfigurationConditionTest {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(LocalEvidenceSigningKey.class);
                     assertThat(context).hasSingleBean(CyclesEvidenceEnvelopeBuilder.class);
+                    assertThat(context).hasSingleBean(CyclesEvidenceSchemaValidator.class);
                     assertThat(context).hasSingleBean(EvidenceWorker.class);
+                });
+    }
+
+    @Test
+    void evidenceWorkerFailsStartupForRelativeServerIdentity() {
+        contextRunner
+                .withPropertyValues(
+                        "cycles.evidence.server-id=relative/server",
+                        "cycles.evidence.signing.allow-ephemeral=true")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(rootCause(context.getStartupFailure()))
+                            .isInstanceOf(IllegalStateException.class)
+                            .hasMessageContaining("absolute URI");
                 });
     }
 

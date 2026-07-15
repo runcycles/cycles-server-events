@@ -59,7 +59,7 @@ public class WebhookTransport implements Transport {
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(connectTimeoutSeconds))
                 .build();
-        String version = buildProperties != null ? buildProperties.getVersion() : "0.1.25.22";
+        String version = buildProperties != null ? buildProperties.getVersion() : "dev";
         this.userAgent = "cycles-server-events/" + version;
     }
 
@@ -144,8 +144,8 @@ public class WebhookTransport implements Transport {
         headers.forEach((name, value) -> {
             if (isReservedHeader(name)) {
                 LOG.warn("Webhook custom header ignored because it is reserved: subscription_id={} tenant_id={} header_name={}",
-                        safe(subscription != null ? subscription.getSubscriptionId() : null),
-                        safe(subscription != null ? subscription.getTenantId() : null),
+                        safe(subscription.getSubscriptionId()),
+                        safe(subscription.getTenantId()),
                         safe(name));
                 return;
             }

@@ -1,10 +1,11 @@
 package io.runcycles.events.evidence;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.stereotype.Component;
+
+import java.nio.charset.StandardCharsets;
 
 /**
  * Assembles and signs a complete {@code cycles-evidence/v0.1} envelope.
@@ -65,15 +66,11 @@ public class CyclesEvidenceEnvelopeBuilder {
         envelope.put("evidence_id", evidenceId);
         envelope.put("signature", signature);
 
-        return new BuiltEvidenceEnvelope(evidenceId, envelope, serialize(envelope));
-    }
-
-    private String serialize(ObjectNode envelope) {
-        try {
-            return mapper.writeValueAsString(envelope);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("envelope serialization failed", e);
-        }
+        // The protocol requires GET /v1/evidence/{id} to return the canonical
+        // document bytes, not merely a document whose hash was computed from a
+        // separate canonical form.
+        String canonicalJson = new String(canonicalizer.canonicalize(envelope), StandardCharsets.UTF_8);
+        return new BuiltEvidenceEnvelope(evidenceId, envelope, canonicalJson);
     }
 
     /**

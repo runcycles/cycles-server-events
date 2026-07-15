@@ -8,10 +8,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * Default {@link EvidenceSink}: records that an envelope was built. A
- * placeholder until the persistence slice contributes the real sink (a
- * content-addressed object store), which will take precedence via
- * {@code @Primary} (or replace this class outright).
+ * Non-primary diagnostic {@link EvidenceSink} that records an envelope build.
+ * {@link StoringEvidenceSink} is the production default.
  */
 @Component
 public class LoggingEvidenceSink implements EvidenceSink {

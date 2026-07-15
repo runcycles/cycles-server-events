@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.runcycles.events.model.Delivery;
 import io.runcycles.events.model.DeliveryStatus;
+import io.runcycles.events.repository.DeliveryQueueRepository.ClaimedDelivery;
+import io.runcycles.events.repository.DeliveryRepository.CorruptDeliveryRecordException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -16,7 +18,6 @@ import redis.clients.jedis.JedisPool;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import redis.clients.jedis.params.SetParams;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
@@ -76,44 +77,74 @@ class DeliveryRepositoryTest {
         when(jedis.get("delivery:del-bad")).thenReturn("not-valid-json{{{");
 
         assertThatThrownBy(() -> repository.findById("del-bad"))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Failed to read webhook delivery");
+                .isInstanceOfSatisfying(CorruptDeliveryRecordException.class,
+                        exception -> {
+                            assertThat(exception).hasMessage("stored delivery JSON is invalid");
+                            assertThat(exception.deliveryId()).isEqualTo("del-bad");
+                        });
     }
 
     @Test
-    void update_noTtl_plainSet() throws Exception {
+    void findByIdRejectsMissingOrMismatchedRequiredIdentity() {
+        when(jedis.get("delivery:del-bad"))
+                .thenReturn("{\"delivery_id\":\"other\",\"event_id\":\"evt-1\","
+                        + "\"subscription_id\":\"sub-1\",\"status\":\"PENDING\"}",
+                        "{\"delivery_id\":\"del-bad\",\"event_id\":\"evt-1\","
+                                + "\"subscription_id\":\"sub-1\"}");
+
+        assertThatThrownBy(() -> repository.findById("del-bad"))
+                .isInstanceOf(CorruptDeliveryRecordException.class)
+                .hasMessage("stored delivery identity or status is invalid")
+                .hasNoCause();
+        assertThatThrownBy(() -> repository.findById("del-bad"))
+                .isInstanceOf(CorruptDeliveryRecordException.class)
+                .hasMessage("stored delivery identity or status is invalid");
+    }
+
+    @Test
+    void updateOwned_existingKeyPreservesTtlAtomically() throws Exception {
         Delivery delivery = Delivery.builder()
                 .deliveryId("del-1")
-                .status(DeliveryStatus.SUCCESS)
+                .status(DeliveryStatus.FAILED)
                 .completedAt(Instant.now())
                 .build();
-        when(jedis.ttl("delivery:del-1")).thenReturn(-1L); // no TTL
+        ClaimedDelivery claim = new ClaimedDelivery("del-1", "token");
+        when(jedis.eval(anyString(), eq(java.util.List.of("delivery:del-1",
+                "dispatch:processing:claim_owner")), anyList())).thenReturn(1L);
 
-        repository.update(delivery);
+        assertThat(repository.updateOwned(delivery, claim)).isTrue();
 
-        verify(jedis).set(eq("delivery:del-1"), anyString());
-        verify(jedis, never()).set(anyString(), anyString(), any(SetParams.class));
+        verify(jedis).eval(anyString(), eq(java.util.List.of("delivery:del-1",
+                "dispatch:processing:claim_owner")), anyList());
     }
 
     @Test
-    void update_withTtl_preservesTtlAtomically() throws Exception {
+    void updateOwned_rejectsSupersededMissingOrTerminalState() throws Exception {
         Delivery delivery = Delivery.builder()
                 .deliveryId("del-1")
-                .status(DeliveryStatus.SUCCESS)
+                .status(DeliveryStatus.FAILED)
                 .completedAt(Instant.now())
                 .build();
-        when(jedis.ttl("delivery:del-1")).thenReturn(86400L); // 1 day remaining
+        ClaimedDelivery claim = new ClaimedDelivery("del-1", "token");
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(-1L, -2L, -3L);
 
-        repository.update(delivery);
-
-        verify(jedis).set(eq("delivery:del-1"), anyString(), any(SetParams.class));
+        assertThat(repository.updateOwned(delivery, claim)).isFalse();
+        assertThat(repository.updateOwned(delivery, claim)).isFalse();
+        assertThat(repository.updateOwned(delivery, claim)).isFalse();
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(-4L);
+        assertThatThrownBy(() -> repository.updateOwned(delivery, claim))
+                .isInstanceOf(CorruptDeliveryRecordException.class)
+                .hasMessage("stored delivery status is invalid")
+                .hasNoCause();
+        verify(jedis, never()).set(anyString(), anyString());
     }
 
     @Test
-    void update_serializationError() {
+    void updateOwned_serializationError() {
         ObjectMapper brokenMapper = mock(ObjectMapper.class);
         DeliveryRepository brokenRepo = new DeliveryRepository(jedisPool, brokenMapper);
-        Delivery delivery = Delivery.builder().deliveryId("del-1").build();
+        Delivery delivery = Delivery.builder().deliveryId("del-1")
+                .status(DeliveryStatus.FAILED).build();
 
         try {
             when(brokenMapper.writeValueAsString(any())).thenThrow(new com.fasterxml.jackson.core.JsonProcessingException("fail") {});
@@ -121,10 +152,78 @@ class DeliveryRepositoryTest {
             // won't happen
         }
 
-        assertThatThrownBy(() -> brokenRepo.update(delivery))
+        assertThatThrownBy(() -> brokenRepo.updateOwned(
+                delivery, new ClaimedDelivery("del-1", "token")))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Failed to update webhook delivery");
-        verify(jedis, never()).set(anyString(), anyString());
-        verify(jedis, never()).set(anyString(), anyString(), any(SetParams.class));
+                .hasMessageContaining("Failed to update owned webhook delivery");
+        verify(jedis, never()).eval(anyString(), anyList(), anyList());
+    }
+
+    @Test
+    void updateOwnedRejectsInvalidOrMismatchedInputs() {
+        Delivery delivery = Delivery.builder().deliveryId("del-1")
+                .status(DeliveryStatus.FAILED).build();
+        assertThatThrownBy(() -> repository.updateOwned(null,
+                new ClaimedDelivery("del-1", "token")))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> repository.updateOwned(delivery, null))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> repository.updateOwned(delivery,
+                new ClaimedDelivery("different", "token")))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.updateOwned(
+                Delivery.builder().build(), new ClaimedDelivery("del-1", "token")))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.updateOwned(
+                Delivery.builder().deliveryId(" ").build(),
+                new ClaimedDelivery("del-1", "token")))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.updateOwned(
+                Delivery.builder().deliveryId("del-1").status(DeliveryStatus.SUCCESS).build(),
+                new ClaimedDelivery("del-1", "token")))
+                .isInstanceOf(IllegalArgumentException.class);
+        verify(jedis, never()).eval(anyString(), anyList(), anyList());
+    }
+
+    @Test
+    void updateOwnedAndScheduleRetryIsOneFencedRedisTransition() throws Exception {
+        Delivery delivery = Delivery.builder().deliveryId("del-1")
+                .status(DeliveryStatus.RETRYING).build();
+        ClaimedDelivery claim = new ClaimedDelivery("del-1", "token");
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(1L);
+
+        assertThat(repository.updateOwnedAndScheduleRetry(delivery, claim, 1234L)).isTrue();
+
+        verify(jedis).eval(anyString(), eq(java.util.List.of("delivery:del-1",
+                        "dispatch:processing:claim_owner", "dispatch:retry")),
+                eq(java.util.List.of(objectMapper.writeValueAsString(delivery),
+                        "del-1", "token", "1234")));
+        assertThatThrownBy(() -> repository.updateOwnedAndScheduleRetry(delivery, claim, -1))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.updateOwnedAndScheduleRetry(
+                Delivery.builder().deliveryId("del-1").status(DeliveryStatus.FAILED).build(),
+                claim, 1L)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void retryTransitionReportsSupersededOwnerAndWrapsSerializationFailure() throws Exception {
+        Delivery delivery = Delivery.builder().deliveryId("del-1")
+                .status(DeliveryStatus.RETRYING).build();
+        ClaimedDelivery claim = new ClaimedDelivery("del-1", "token");
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(-1L);
+        assertThat(repository.updateOwnedAndScheduleRetry(delivery, claim, 1L)).isFalse();
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(-4L);
+        assertThatThrownBy(() -> repository.updateOwnedAndScheduleRetry(delivery, claim, 1L))
+                .isInstanceOf(CorruptDeliveryRecordException.class)
+                .hasMessage("stored delivery status is invalid")
+                .hasNoCause();
+
+        ObjectMapper brokenMapper = mock(ObjectMapper.class);
+        DeliveryRepository brokenRepo = new DeliveryRepository(jedisPool, brokenMapper);
+        when(brokenMapper.writeValueAsString(delivery)).thenThrow(
+                new com.fasterxml.jackson.core.JsonProcessingException("fail") { });
+        assertThatThrownBy(() -> brokenRepo.updateOwnedAndScheduleRetry(delivery, claim, 1L))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to persist owned webhook retry");
     }
 }

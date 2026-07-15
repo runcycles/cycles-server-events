@@ -42,6 +42,17 @@ class LocalEvidenceSigningKeyTest {
     }
 
     @Test
+    void normalizesConfiguredHexToLowercaseWireIdentity() {
+        KeyHex kp = freshKeyPair();
+        LocalEvidenceSigningKey key = new LocalEvidenceSigningKey(
+                signer, kp.priv().toUpperCase(java.util.Locale.ROOT),
+                kp.pub().toUpperCase(java.util.Locale.ROOT), false);
+
+        assertThat(key.signerDid()).isEqualTo(kp.pub());
+        assertThat(key.signerDid()).matches("[0-9a-f]{64}");
+    }
+
+    @Test
     void rejectsMismatchedPair() {
         String priv = freshKeyPair().priv();
         String unrelatedDid = freshKeyPair().pub();
@@ -70,6 +81,31 @@ class LocalEvidenceSigningKeyTest {
     void rejectsMalformedHex() {
         String did = freshKeyPair().pub();
         assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, "not-hex", did, false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("64 hex characters");
+    }
+
+    @Test
+    void nullConfigurationValuesFollowTheSameMissingAndHalfConfiguredRules() {
+        String priv = freshKeyPair().priv();
+        String did = freshKeyPair().pub();
+        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, null, null, false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("required");
+        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, null, did, false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("half-configured");
+        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, priv, null, false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("half-configured");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"/", ":", "@", "G", "`", "g"})
+    void rejectsEveryNonHexCharacterClass(String invalidCharacter) {
+        String malformed = invalidCharacter.repeat(64);
+        assertThatThrownBy(() -> new LocalEvidenceSigningKey(
+                signer, malformed, freshKeyPair().pub(), false))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("64 hex characters");
     }

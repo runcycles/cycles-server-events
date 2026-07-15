@@ -21,9 +21,10 @@ import java.util.List;
  *
  * <p>Cross-plane read model: {@code ignoreUnknown = true} (like Event and
  * Delivery) so an admin-side config field added later never poisons
- * dispatch. Defaults mirror the admin model exactly — used when the key is
- * absent or unreadable, and they are the restrictive baseline (private
- * ranges blocked, HTTPS required).
+ * dispatch. When the key is absent, the delivery boundary uses a hardened
+ * superset of the historical admin defaults (special-use/private ranges
+ * blocked and HTTPS required). Stored values are consumed as authored by the
+ * admin plane. Read/parse failures remain indeterminate and are retried.
  */
 @Data
 @Builder
@@ -36,8 +37,9 @@ public class WebhookSecurityConfig {
     @JsonProperty("blocked_cidr_ranges")
     @Builder.Default
     private List<String> blockedCidrRanges = List.of(
-        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-        "127.0.0.0/8", "169.254.0.0/16", "::1/128", "fc00::/7"
+        "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "172.16.0.0/12",
+        "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16",
+        "::/128", "::1/128", "fe80::/10", "fc00::/7"
     );
 
     @JsonProperty("allowed_url_patterns")
