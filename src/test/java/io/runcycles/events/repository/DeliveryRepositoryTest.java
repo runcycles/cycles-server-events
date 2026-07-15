@@ -6,6 +6,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.runcycles.events.model.Delivery;
 import io.runcycles.events.model.DeliveryStatus;
 import io.runcycles.events.repository.DeliveryQueueRepository.ClaimedDelivery;
+import io.runcycles.events.repository.DeliveryRepository.CorruptDeliveryRecordException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -76,8 +77,28 @@ class DeliveryRepositoryTest {
         when(jedis.get("delivery:del-bad")).thenReturn("not-valid-json{{{");
 
         assertThatThrownBy(() -> repository.findById("del-bad"))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Failed to read webhook delivery");
+                .isInstanceOfSatisfying(CorruptDeliveryRecordException.class,
+                        exception -> {
+                            assertThat(exception).hasMessage("stored delivery JSON is invalid");
+                            assertThat(exception.deliveryId()).isEqualTo("del-bad");
+                        });
+    }
+
+    @Test
+    void findByIdRejectsMissingOrMismatchedRequiredIdentity() {
+        when(jedis.get("delivery:del-bad"))
+                .thenReturn("{\"delivery_id\":\"other\",\"event_id\":\"evt-1\","
+                        + "\"subscription_id\":\"sub-1\",\"status\":\"PENDING\"}",
+                        "{\"delivery_id\":\"del-bad\",\"event_id\":\"evt-1\","
+                                + "\"subscription_id\":\"sub-1\"}");
+
+        assertThatThrownBy(() -> repository.findById("del-bad"))
+                .isInstanceOf(CorruptDeliveryRecordException.class)
+                .hasMessage("stored delivery identity or status is invalid")
+                .hasNoCause();
+        assertThatThrownBy(() -> repository.findById("del-bad"))
+                .isInstanceOf(CorruptDeliveryRecordException.class)
+                .hasMessage("stored delivery identity or status is invalid");
     }
 
     @Test
@@ -112,8 +133,9 @@ class DeliveryRepositoryTest {
         assertThat(repository.updateOwned(delivery, claim)).isFalse();
         when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(-4L);
         assertThatThrownBy(() -> repository.updateOwned(delivery, claim))
-                .isInstanceOf(IllegalStateException.class)
-                .hasRootCauseMessage("stored webhook delivery has an invalid status");
+                .isInstanceOf(CorruptDeliveryRecordException.class)
+                .hasMessage("stored delivery status is invalid")
+                .hasNoCause();
         verify(jedis, never()).set(anyString(), anyString());
     }
 
@@ -192,8 +214,9 @@ class DeliveryRepositoryTest {
         assertThat(repository.updateOwnedAndScheduleRetry(delivery, claim, 1L)).isFalse();
         when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(-4L);
         assertThatThrownBy(() -> repository.updateOwnedAndScheduleRetry(delivery, claim, 1L))
-                .isInstanceOf(IllegalStateException.class)
-                .hasRootCauseMessage("stored webhook delivery has an invalid status");
+                .isInstanceOf(CorruptDeliveryRecordException.class)
+                .hasMessage("stored delivery status is invalid")
+                .hasNoCause();
 
         ObjectMapper brokenMapper = mock(ObjectMapper.class);
         DeliveryRepository brokenRepo = new DeliveryRepository(jedisPool, brokenMapper);

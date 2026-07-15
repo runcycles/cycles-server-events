@@ -62,6 +62,15 @@ breaking.
 - Recovered `RETRYING` deliveries restore their Redis retry schedule when the
   backoff has not elapsed, closing the persist-before-ZSET crash window without
   sending early.
+- Corrupt or foreign delivery JSON/status values now move once to the bounded,
+  owner-fenced `dispatch:failed` quarantine instead of cycling through recovery
+  forever. The original `delivery:{id}` value is retained for operator repair.
+- A claimant resuming after stale recovery can no longer overwrite its
+  successor's owner token. CAS-exhaustion errors retain their precise diagnostic
+  instead of being rewrapped with a generic transaction message.
+- Expected missing-secret wait states no longer emit a dispatch-loop ERROR on
+  every recovery cycle, and dead-lettered dispatcher tasks no longer also count
+  as retained/deferred.
 
 ### Changed
 

@@ -1,5 +1,7 @@
 package io.runcycles.events.repository;
 
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Repository;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
@@ -17,6 +19,7 @@ public class DeliveryQueueRepository {
     static final String PROCESSING_CLAIMED_AT_KEY = "dispatch:processing:claimed_at";
     static final String PROCESSING_CLAIM_OWNER_KEY = "dispatch:processing:claim_owner";
     static final String RETRY_KEY = "dispatch:retry";
+    public static final String FAILED_KEY = "dispatch:failed";
     static final String ORDERING_LOCK_KEY = "dispatch:ordering:lock";
     private static final int RECOVERY_SCAN_LIMIT = 1_000;
 
@@ -35,6 +38,8 @@ public class DeliveryQueueRepository {
 
     private static final String RECORD_PROCESSING_CLAIM_LUA = """
             if not redis.call('LPOS', KEYS[1], ARGV[1]) then return 0 end
+            local owner = redis.call('HGET', KEYS[3], ARGV[1])
+            if owner and owner ~= '__orphan__' then return -1 end
             redis.call('ZADD', KEYS[2], ARGV[2], ARGV[1])
             redis.call('HSET', KEYS[3], ARGV[1], ARGV[3])
             return 1
@@ -46,6 +51,27 @@ public class DeliveryQueueRepository {
             redis.call('ZREM', KEYS[2], ARGV[1])
             redis.call('HDEL', KEYS[3], ARGV[1])
             return removed
+            """;
+
+    private static final String DEAD_LETTER_CORRUPT_OWNED_LUA = """
+            if redis.call('HGET', KEYS[4], ARGV[1]) ~= ARGV[2] then return 0 end
+            if redis.call('LREM', KEYS[2], 1, ARGV[1]) == 0 then
+              redis.call('ZREM', KEYS[3], ARGV[1])
+              redis.call('HDEL', KEYS[4], ARGV[1])
+              return 0
+            end
+            local payload = redis.call('GET', KEYS[5])
+            local dead_letter = cjson.encode({
+              delivery_id=ARGV[1],
+              reason='corrupt_record',
+              quarantined_at_ms=tonumber(ARGV[3]),
+              payload=payload or ''
+            })
+            redis.call('LPUSH', KEYS[1], dead_letter)
+            redis.call('LTRIM', KEYS[1], 0, tonumber(ARGV[4]) - 1)
+            redis.call('ZREM', KEYS[3], ARGV[1])
+            redis.call('HDEL', KEYS[4], ARGV[1])
+            return 1
             """;
 
     private static final String SCHEDULE_RETRY_OWNED_LUA = """
@@ -86,9 +112,21 @@ public class DeliveryQueueRepository {
             """;
 
     private final JedisPool jedisPool;
+    private final int failedMaxLen;
 
-    public DeliveryQueueRepository(JedisPool jedisPool) {
+    @Autowired
+    public DeliveryQueueRepository(
+            JedisPool jedisPool,
+            @Value("${dispatch.failed.max-len:10000}") int failedMaxLen) {
+        if (failedMaxLen <= 0) {
+            throw new IllegalArgumentException("delivery failed queue bound must be positive");
+        }
         this.jedisPool = jedisPool;
+        this.failedMaxLen = failedMaxLen;
+    }
+
+    DeliveryQueueRepository(JedisPool jedisPool) {
+        this(jedisPool, 10_000);
     }
 
     /**
@@ -123,8 +161,9 @@ public class DeliveryQueueRepository {
      * Atomically move one delivery from pending to processing, then attach a
      * unique claim generation before returning it. Recovery can move the list
      * entry between those operations, so the claim-recording Lua verifies the
-     * entry is still in processing. A failed verification means the delivery is
-     * already recoverable elsewhere and this invocation owns no work.
+     * entry is still in processing and has no non-orphan successor owner. A
+     * failed verification means the delivery is already recoverable or owned
+     * elsewhere and this invocation owns no work.
      */
     public ClaimedDelivery claimPending(int timeoutSeconds) {
         String claimToken = UUID.randomUUID().toString();
@@ -153,6 +192,26 @@ public class DeliveryQueueRepository {
             Object result = jedis.eval(ACK_PROCESSING_LUA,
                     List.of(PROCESSING_KEY, PROCESSING_CLAIMED_AT_KEY, PROCESSING_CLAIM_OWNER_KEY),
                     List.of(claim.deliveryId(), claim.claimToken()));
+            return Long.valueOf(1L).equals(result);
+        }
+    }
+
+    /**
+     * Atomically quarantine a corrupt stored delivery and resolve only the
+     * caller's processing generation. The original delivery key is retained
+     * for operator inspection and repair.
+     */
+    public boolean deadLetterCorruptOwned(ClaimedDelivery claim, long nowMillis) {
+        requireClaim(claim);
+        if (nowMillis < 0) {
+            throw new IllegalArgumentException("quarantine time must be non-negative");
+        }
+        try (Jedis jedis = jedisPool.getResource()) {
+            Object result = jedis.eval(DEAD_LETTER_CORRUPT_OWNED_LUA,
+                    List.of(FAILED_KEY, PROCESSING_KEY, PROCESSING_CLAIMED_AT_KEY,
+                            PROCESSING_CLAIM_OWNER_KEY, "delivery:" + claim.deliveryId()),
+                    List.of(claim.deliveryId(), claim.claimToken(), Long.toString(nowMillis),
+                            Integer.toString(failedMaxLen)));
             return Long.valueOf(1L).equals(result);
         }
     }

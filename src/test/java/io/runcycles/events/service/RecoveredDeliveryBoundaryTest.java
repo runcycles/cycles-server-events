@@ -71,7 +71,8 @@ class RecoveredDeliveryBoundaryTest {
         handler = new DeliveryHandler(deliveryRepository, eventRepository,
                 subscriptionRepository, queueRepository, transport, metrics, validator,
                 urlGuard, 86400000L);
-        dispatchLoop = new DispatchLoop(queueRepository, handler, 5, 120_000L, 30, 500);
+        dispatchLoop = new DispatchLoop(queueRepository, handler, metrics,
+                5, 120_000L, 30, 500, System::nanoTime);
         when(queueRepository.tryAcquireOrderingLock(anyString(), anyLong())).thenReturn(true);
         recovery = new DispatchRecovery(queueRepository, 180_000L, 120_000L, 5, 30);
     }

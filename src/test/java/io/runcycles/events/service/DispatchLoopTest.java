@@ -1,7 +1,10 @@
 package io.runcycles.events.service;
 
+import io.runcycles.events.metrics.CyclesMetrics;
 import io.runcycles.events.repository.DeliveryQueueRepository;
 import io.runcycles.events.repository.DeliveryQueueRepository.ClaimedDelivery;
+import io.runcycles.events.repository.DeliveryRepository.CorruptDeliveryRecordException;
+import io.runcycles.events.service.DeliveryHandler.RecoverableDeliveryException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -20,13 +23,15 @@ class DispatchLoopTest {
 
     @Mock private DeliveryQueueRepository queueRepository;
     @Mock private DeliveryHandler deliveryHandler;
+    @Mock private CyclesMetrics metrics;
 
     private DispatchLoop dispatchLoop;
     private final AtomicLong nanoTime = new AtomicLong(1_000L);
 
     @BeforeEach
     void setUp() {
-        dispatchLoop = new DispatchLoop(queueRepository, deliveryHandler, 5, 120_000L, 30, 500,
+        dispatchLoop = new DispatchLoop(queueRepository, deliveryHandler, metrics,
+                5, 120_000L, 30, 500,
                 nanoTime::get);
         lenient().when(queueRepository.tryAcquireOrderingLock(anyString(), eq(120_000L))).thenReturn(true);
     }
@@ -77,6 +82,50 @@ class DispatchLoopTest {
         dispatchLoop.processNext();
 
         verify(queueRepository, never()).ack(any());
+    }
+
+    @Test
+    void recoverableWaitStateIsRetainedWithoutAckOrQuarantine() {
+        ClaimedDelivery claim = new ClaimedDelivery("del-wait", "claim-wait");
+        when(queueRepository.claimPending(5)).thenReturn(claim);
+        doThrow(new RecoverableDeliveryException("missing_signing_secret", "not ready"))
+                .when(deliveryHandler).handle(claim);
+
+        dispatchLoop.processNext();
+
+        verify(queueRepository, never()).ack(any());
+        verify(queueRepository, never()).deadLetterCorruptOwned(any(), anyLong());
+        verifyNoInteractions(metrics);
+    }
+
+    @Test
+    void corruptRecordIsOwnerFencedAndQuarantinedOnce() {
+        ClaimedDelivery claim = new ClaimedDelivery("del-corrupt", "claim-corrupt");
+        when(queueRepository.claimPending(5)).thenReturn(claim);
+        doThrow(new CorruptDeliveryRecordException(
+                "del-corrupt", "stored delivery JSON is invalid", null))
+                .when(deliveryHandler).handle(claim);
+        when(queueRepository.deadLetterCorruptOwned(eq(claim), anyLong())).thenReturn(true);
+
+        dispatchLoop.processNext();
+
+        verify(queueRepository).deadLetterCorruptOwned(eq(claim), anyLong());
+        verify(queueRepository, never()).ack(any());
+        verify(metrics).recordDeliveryDeadLettered("corrupt_record");
+    }
+
+    @Test
+    void supersededCorruptRecordIsNotCountedAsQuarantined() {
+        ClaimedDelivery claim = new ClaimedDelivery("del-corrupt", "claim-stale");
+        when(queueRepository.claimPending(5)).thenReturn(claim);
+        doThrow(new CorruptDeliveryRecordException(
+                "del-corrupt", "stored delivery status is invalid", null))
+                .when(deliveryHandler).handle(claim);
+        when(queueRepository.deadLetterCorruptOwned(eq(claim), anyLong())).thenReturn(false);
+
+        dispatchLoop.processNext();
+
+        verify(metrics, never()).recordDeliveryDeadLettered(anyString());
     }
 
     @Test
@@ -136,13 +185,20 @@ class DispatchLoopTest {
 
     @Test
     void constructorRejectsInvalidQueueTiming() {
-        assertThatThrownBy(() -> new DispatchLoop(queueRepository, deliveryHandler, 0, 120_000L, 30, 500))
+        assertThatThrownBy(() -> new DispatchLoop(queueRepository, deliveryHandler, metrics,
+                0, 120_000L, 30, 500, nanoTime::get))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new DispatchLoop(queueRepository, deliveryHandler, 5, 120_000L, 0, 500))
+        assertThatThrownBy(() -> new DispatchLoop(queueRepository, deliveryHandler, metrics,
+                5, 120_000L, 0, 500, nanoTime::get))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new DispatchLoop(queueRepository, deliveryHandler, 5, 35_000L, 30, 500))
+        assertThatThrownBy(() -> new DispatchLoop(queueRepository, deliveryHandler, metrics,
+                5, 35_000L, 30, 500, nanoTime::get))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new DispatchLoop(queueRepository, deliveryHandler, 5, 120_000L, 30, 0))
+        assertThatThrownBy(() -> new DispatchLoop(queueRepository, deliveryHandler, metrics,
+                5, 120_000L, 30, 0, nanoTime::get))
                 .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new DispatchLoop(queueRepository, deliveryHandler, null,
+                5, 120_000L, 30, 500, nanoTime::get))
+                .isInstanceOf(NullPointerException.class);
     }
 }

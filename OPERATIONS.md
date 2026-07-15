@@ -70,6 +70,7 @@ The `tenant` tag listed here is emitted only when
 | `cycles_webhook_delivery_failed_total` | `tenant`, `event_type`, `reason` | Delivery failed. `reason=http_4xx`/`http_5xx`/`transport_error` (HTTP or connection layer), or `event_not_found`/`subscription_not_found`/`subscription_inactive` (upstream resolution layer). |
 | `cycles_webhook_delivery_retried_total` | `tenant`, `event_type` | Delivery requeued onto `dispatch:retry` for exponential-backoff retry. Increments once per scheduled retry; the actual retry attempt will increment `cycles_webhook_delivery_attempts_total` again when it fires. |
 | `cycles_webhook_delivery_stale_total` | `tenant` | Delivery's `attempted_at` exceeded `MAX_DELIVERY_AGE_MS` (default 24h) and was auto-failed without a delivery attempt. Indicates the service was offline for longer than the stale threshold. `tenant` is `UNKNOWN` here because the subscription isn't loaded on the stale path. |
+| `cycles_webhook_delivery_dead_lettered_total` | `reason` | A deterministically corrupt delivery record moved to the bounded `dispatch:failed` quarantine. `reason=corrupt_record`; any increase requires inspection and repair. |
 | `cycles_webhook_subscription_auto_disabled_total` | `tenant`, `reason` | Subscription flipped to `DISABLED` after consecutive failures. `reason=consecutive_failures`. |
 | `cycles_webhook_delivery_latency_seconds` | `tenant`, `event_type`, `outcome` | End-to-end outbound HTTP latency. `outcome=success`/`failure`. Only recorded when a transport round-trip actually occurred (upstream failures like `event_not_found` have no meaningful latency and are skipped). |
 | `cycles_webhook_dispatcher_event_published_total` | `event_type` | Durable dispatcher meta-event task published and acknowledged. Event types are bounded to `webhook.disabled` and `system.webhook_delivery_failed`. |
@@ -281,6 +282,14 @@ DLQ instead of warning every five seconds forever.
   annotations:
     summary: "dispatcher meta-event moved to its dead-letter queue"
     description: "Inspect LRANGE dispatcher:event-outbox:failed 0 10 and correct the malformed or persistently unpublishable task before replay."
+
+- alert: CyclesWebhookDeliveryDeadLettered
+  expr: increase(cycles_webhook_delivery_dead_lettered_total{reason="corrupt_record"}[15m]) > 0
+  for: 1m
+  labels: {severity: page}
+  annotations:
+    summary: "corrupt webhook delivery moved to quarantine"
+    description: "Inspect LRANGE dispatch:failed 0 10 and the retained delivery:{id}; repair the foreign/corrupt writer before replay."
 ```
 
 ### Redis connectivity (infers from missing traffic)
@@ -485,8 +494,27 @@ attempts have stopped.
 2. Correct the config through the admin plane. Do not delete the key merely to
    bypass validation unless accepting the documented hardened fallback is an
    explicit incident decision.
+   The events-side absent-key fallback intentionally blocks `0.0.0.0/8`,
+   `100.64.0.0/10`, `fe80::/10`, and `::/128` in addition to the current admin
+   fallback. Until the admin service aligns those defaults, a URL accepted by
+   admin without a stored config can still fail closed here at delivery.
 3. No delivery replay is normally needed: affected records remain in
    `dispatch:processing` and return to pending after the recovery idle window.
+
+### Symptom: corrupt delivery in the quarantine
+
+`cycles_webhook_delivery_dead_lettered_total{reason="corrupt_record"}` increased.
+
+1. Inspect `LRANGE dispatch:failed 0 10`. Each wrapper contains
+   `delivery_id`, `quarantined_at_ms`, `reason`, and the raw stored `payload`.
+2. Read the retained `GET delivery:{delivery_id}` and identify the foreign or
+   incompatible writer. Valid statuses are `PENDING`, `RETRYING`, `SUCCESS`,
+   and `FAILED`; normal delivery JSON must deserialize to the current model.
+3. Repair the source value first. To replay, `LPUSH dispatch:pending
+   {delivery_id}` and remove the matching quarantine wrapper only after the
+   delivery reaches a terminal state. Never replay the raw wrapper itself.
+4. The quarantine keeps the newest `DISPATCH_FAILED_MAX_LEN` entries (10000 by
+   default), so alerting is required before older evidence is trimmed.
 
 ### Symptom: dispatcher meta-event in the DLQ
 
@@ -576,6 +604,7 @@ don't fit.
 | `DISPATCH_LOOP_DELAY_MS` | `25` | Pause after each dispatch invocation. This is not the empty-queue wait; BLMOVE can block for `dispatch.pending.timeout-seconds`. |
 | `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | `180000` | Minimum age before an in-flight delivery is requeued. It must exceed both `DISPATCH_ORDERING_LEASE_MS` and the configured pending-plus-HTTP timeout duration; startup rejects unsafe combinations. |
 | `DISPATCH_PROCESSING_RECOVERY_INTERVAL_MS` | `30000` | How often replicas recheck for stale in-flight deliveries. |
+| `DISPATCH_FAILED_MAX_LEN` | `10000` | Number of newest corrupt-delivery wrappers retained in `dispatch:failed`. Raise only with a Redis memory budget and alerting in place. |
 | `DISPATCH_ORDERING_LEASE_MS` | `120000` | Global claim/send critical-section TTL. It preserves initial-claim order but caps fleet throughput at one in-flight send; replicas are standby/failover. It must exceed BLMOVE plus HTTP and Redis state-write time. |
 | `DISPATCH_ORDERING_CONTENTION_BACKOFF_MS` | `500` | Randomized half-to-full backoff after a global ordering-lease miss or Redis error. Raise if idle replicas create noticeable lease traffic. |
 | `DISPATCH_EVENT_OUTBOX_POLL_INTERVAL_MS` / `DISPATCH_EVENT_OUTBOX_BATCH_SIZE` | `1000` / `25` | Poll cadence and maximum durable dispatcher meta-event tasks considered per pass. |

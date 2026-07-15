@@ -241,7 +241,8 @@ public class DeliveryHandler {
                     safe(delivery.getDeliveryId()), safe(delivery.getEventId()),
                     safe(sub.getSubscriptionId()), safe(sub.getTenantId()),
                     safe(effectiveTraceId(delivery, event)));
-            throw new IllegalStateException("Webhook signing secret is not yet available");
+            throw new RecoverableDeliveryException(
+                    "missing_signing_secret", "Webhook signing secret is not yet available");
         }
 
         delivery.setAttempts(delivery.getAttempts() != null ? delivery.getAttempts() + 1 : 1);
@@ -499,5 +500,19 @@ public class DeliveryHandler {
         if (statusCode >= 400 && statusCode < 500) return REASON_HTTP_4XX;
         if (statusCode >= 500 && statusCode < 600) return REASON_HTTP_5XX;
         return REASON_TRANSPORT_ERROR;
+    }
+
+    /** Expected fail-closed wait state that must retain the processing claim without ERROR noise. */
+    public static final class RecoverableDeliveryException extends IllegalStateException {
+        private final String reason;
+
+        RecoverableDeliveryException(String reason, String message) {
+            super(message);
+            this.reason = reason;
+        }
+
+        public String reason() {
+            return reason;
+        }
     }
 }

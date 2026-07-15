@@ -281,9 +281,11 @@ class SubscriptionRepositoryTest {
                 .thenReturn("{\"delivery_id\":\"del-1\",\"status\":\"PENDING\"}");
         when(jedis.get("webhook:sub-1")).thenReturn(null);
         when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(-3L);
-        assertThat(repository.finalizeDeliveryFailure(
+        SubscriptionRepository.TerminalFailureUpdate superseded = repository.finalizeDeliveryFailure(
                 "sub-1", claimFor(delivery), delivery, Instant.now(), 10,
-                disableTask(), deliveryFailedTask()).applied()).isFalse();
+                disableTask(), deliveryFailedTask());
+        assertThat(superseded.applied()).isFalse();
+        assertThat(superseded.deliveryFound()).isFalse();
 
         reset(jedis);
         when(jedis.get("delivery:del-1")).thenReturn("{\"delivery_id\":\"del-1\",\"status\":\"PENDING\"}");
@@ -300,8 +302,8 @@ class SubscriptionRepositoryTest {
         assertThatThrownBy(() -> repository.finalizeDeliveryFailure(
                 "sub-1", claimFor(delivery), delivery, Instant.now(), 10, disableTask(), deliveryFailedTask()))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Failed to finalize webhook delivery failure")
-                .hasRootCauseMessage("delivery or subscription changed too frequently to finalize failure");
+                .hasMessage("delivery or subscription changed too frequently to finalize failure")
+                .hasNoCause();
         verify(jedis, times(128)).eval(anyString(), anyList(), anyList());
     }
 
@@ -391,8 +393,10 @@ class SubscriptionRepositoryTest {
         reset(jedis);
         when(jedis.get("delivery:del-1"))
                 .thenReturn("{\"delivery_id\":\"del-1\",\"status\":\"FAILED\"}");
-        assertThat(repository.finalizeDeliverySuccess("sub-1", claimFor(success), success,
-                Instant.now()).applied()).isFalse();
+        SubscriptionRepository.DeliverySuccessUpdate superseded = repository.finalizeDeliverySuccess(
+                "sub-1", claimFor(success), success, Instant.now());
+        assertThat(superseded.applied()).isFalse();
+        assertThat(superseded.deliveryFound()).isTrue();
 
         reset(jedis);
         when(jedis.get("delivery:del-1"))
@@ -415,8 +419,10 @@ class SubscriptionRepositoryTest {
 
         assertThat(repository.finalizeDeliverySuccess("sub-1", claimFor(success), success,
                 Instant.now()).deliveryFound()).isFalse();
-        assertThat(repository.finalizeDeliverySuccess("sub-1", claimFor(success), success,
-                Instant.now()).applied()).isFalse();
+        SubscriptionRepository.DeliverySuccessUpdate superseded = repository.finalizeDeliverySuccess(
+                "sub-1", claimFor(success), success, Instant.now());
+        assertThat(superseded.applied()).isFalse();
+        assertThat(superseded.deliveryFound()).isFalse();
     }
 
     @Test
@@ -437,7 +443,8 @@ class SubscriptionRepositoryTest {
         assertThatThrownBy(() -> repository.finalizeDeliverySuccess(
                 "sub-1", claimFor(success), success, Instant.now()))
                 .isInstanceOf(IllegalStateException.class)
-                .hasRootCauseMessage("delivery or subscription changed too frequently to finalize success");
+                .hasMessage("delivery or subscription changed too frequently to finalize success")
+                .hasNoCause();
         verify(jedis, times(128)).eval(anyString(), anyList(), anyList());
     }
 

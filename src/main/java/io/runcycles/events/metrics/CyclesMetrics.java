@@ -46,6 +46,7 @@ public class CyclesMetrics {
     public static final String DELIVERY_FAILED = "cycles.webhook.delivery.failed";
     public static final String DELIVERY_RETRIED = "cycles.webhook.delivery.retried";
     public static final String DELIVERY_STALE = "cycles.webhook.delivery.stale";
+    public static final String DELIVERY_DEAD_LETTERED = "cycles.webhook.delivery.dead_lettered";
     /**
      * Delivery dropped by the last-mile webhook ownership boundary
      * (governance WEBHOOK SUBSCRIPTION INVARIANT 2, issue #209): a
@@ -129,6 +130,12 @@ public class CyclesMetrics {
     public void recordDeliveryStale(String tenant) {
         registry.counter(DELIVERY_STALE,
                 tags(tenant))
+                .increment();
+    }
+
+    public void recordDeliveryDeadLettered(String reason) {
+        registry.counter(DELIVERY_DEAD_LETTERED,
+                Tags.of("reason", normalise(reason)))
                 .increment();
     }
 

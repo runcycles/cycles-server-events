@@ -584,8 +584,11 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
 
         assertThatThrownBy(() -> handler.handle(claimed("del-1")))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("not yet available");
+                .isInstanceOfSatisfying(DeliveryHandler.RecoverableDeliveryException.class,
+                        exception -> {
+                            assertThat(exception).hasMessageContaining("not yet available");
+                            assertThat(exception.reason()).isEqualTo("missing_signing_secret");
+                        });
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.PENDING);
         assertThat(delivery.getErrorMessage()).isNull();

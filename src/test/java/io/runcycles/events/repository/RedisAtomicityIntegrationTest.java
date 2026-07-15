@@ -372,6 +372,69 @@ class RedisAtomicityIntegrationTest {
     }
 
     @Test
+    void lateClaimRecorderCannotOverwriteSuccessorOwner() {
+        String deliveryId = "late-claim-recorder";
+        String successorOwner = "successor-owner";
+        try (Jedis jedis = pool.getResource()) {
+            jedis.del("dispatch:processing", "dispatch:processing:claimed_at",
+                    "dispatch:processing:claim_owner");
+            jedis.lpush("dispatch:processing", deliveryId);
+            jedis.zadd("dispatch:processing:claimed_at", 20_000, deliveryId);
+            jedis.hset("dispatch:processing:claim_owner", deliveryId, successorOwner);
+
+            String script = (String) ReflectionTestUtils.getField(
+                    DeliveryQueueRepository.class, "RECORD_PROCESSING_CLAIM_LUA");
+            Object result = jedis.eval(script,
+                    List.of("dispatch:processing", "dispatch:processing:claimed_at",
+                            "dispatch:processing:claim_owner"),
+                    List.of(deliveryId, "30000", "stale-owner"));
+
+            assertThat(result).isEqualTo(-1L);
+            assertThat(jedis.hget("dispatch:processing:claim_owner", deliveryId))
+                    .isEqualTo(successorOwner);
+            assertThat(jedis.zscore("dispatch:processing:claimed_at", deliveryId))
+                    .isEqualTo(20_000.0);
+            jedis.del("dispatch:processing", "dispatch:processing:claimed_at",
+                    "dispatch:processing:claim_owner");
+        }
+    }
+
+    @Test
+    void corruptDeliveryQuarantineIsOwnedBoundedAndRetainsSourceRecord() throws Exception {
+        DeliveryQueueRepository deliveries = new DeliveryQueueRepository(pool, 2);
+        String deliveryId = "corrupt-delivery";
+        String rawPayload = "{not-valid-json";
+        ClaimedDelivery claim = new ClaimedDelivery(deliveryId, "current-owner");
+        try (Jedis jedis = pool.getResource()) {
+            jedis.del("dispatch:failed", "dispatch:processing", "dispatch:processing:claimed_at",
+                    "dispatch:processing:claim_owner", "delivery:" + deliveryId);
+            jedis.rpush("dispatch:failed", "oldest", "newer");
+            jedis.lpush("dispatch:processing", deliveryId);
+            jedis.zadd("dispatch:processing:claimed_at", 1_000, deliveryId);
+            jedis.hset("dispatch:processing:claim_owner", deliveryId, claim.claimToken());
+            jedis.set("delivery:" + deliveryId, rawPayload);
+        }
+
+        assertThat(deliveries.deadLetterCorruptOwned(
+                new ClaimedDelivery(deliveryId, "stale-owner"), 2_000)).isFalse();
+        assertThat(deliveries.deadLetterCorruptOwned(claim, 2_000)).isTrue();
+
+        try (Jedis jedis = pool.getResource()) {
+            assertThat(jedis.llen("dispatch:failed")).isEqualTo(2);
+            JsonNode deadLetter = mapper.readTree(jedis.lindex("dispatch:failed", 0));
+            assertThat(deadLetter.path("delivery_id").asText()).isEqualTo(deliveryId);
+            assertThat(deadLetter.path("reason").asText()).isEqualTo("corrupt_record");
+            assertThat(deadLetter.path("quarantined_at_ms").asLong()).isEqualTo(2_000);
+            assertThat(deadLetter.path("payload").asText()).isEqualTo(rawPayload);
+            assertThat(jedis.get("delivery:" + deliveryId)).isEqualTo(rawPayload);
+            assertThat(jedis.lrange("dispatch:processing", 0, -1)).isEmpty();
+            assertThat(jedis.zscore("dispatch:processing:claimed_at", deliveryId)).isNull();
+            assertThat(jedis.hget("dispatch:processing:claim_owner", deliveryId)).isNull();
+            jedis.del("dispatch:failed", "delivery:" + deliveryId);
+        }
+    }
+
+    @Test
     void sameDeliveryTerminalTransitionAppliesExactlyOnceUnderContention() throws Exception {
         SubscriptionRepository repository = new SubscriptionRepository(pool, mapper, new CryptoService(""));
         String deliveryId = "same-terminal";

@@ -40,6 +40,10 @@ cross-field evidence constraints, final-attempt state, retry-schedule crash
 recovery, transient missing-secret recovery without unsigned delivery,
 stale-owner ack rejection, fractional-precision rejection, the production
 terminal-failure transaction under contention, and bounded poison outbox tasks.
+The closing re-review added an owner-fenced, bounded corrupt-delivery quarantine,
+late-claim owner-overwrite prevention, precise CAS-exhaustion diagnostics,
+noise-free recoverable secret waits, and mutually exclusive outbox deferred/DLQ
+metrics. Real-Redis tests execute the late-recorder and quarantine Lua paths.
 
 ### 2026-07-11 — v0.1.25.23: last-mile webhook ownership/category boundary at delivery (#209)
 
@@ -393,9 +397,15 @@ The worker now separates store from ack: if storage succeeds but ack fails, the 
 
 ### 2026-06-12 — reliable evidence queue
 
-Replaces destructive BRPOP consumption with a BLMOVE reliable-queue pattern. `EvidenceQueueConsumer.claim` moves a record from `evidence:pending`, atomically replaces its processing-list member with a unique claim ID, and stores the raw payload in a side hash. The worker owner-checks ack/DLQ after durable storage, so identical records do not alias processing metadata and a stale worker cannot remove its successor. A crash between claim and store leaves the record recoverable. Because older binaries treat processing members as raw JSON, the 0.1.25.24 rollout must drain processing and stop older evidence consumers before new workers start.
+Replaces destructive BRPOP consumption with a BLMOVE reliable-queue pattern. `EvidenceQueueConsumer.claim` moves a raw source record from `evidence:pending` to `evidence:processing`; the worker removes that same raw member only after durable storage or deterministic dead-lettering. A crash between claim and store leaves the record recoverable.
 
 `EvidenceRecovery` returns orphaned in-flight records to pending on startup. Reprocessing is safe because envelopes are content-addressed and idempotent. Adds `cycles.evidence.queue.processing-key`, updates operations docs, and covers claim/ack/recover/dead-letter plus worker ack behavior and Redis round trips. No wire or spec change.
+
+**2026-07-15 hardening note:** v0.1.25.24 later replaced raw processing-list
+members with unique claim IDs and a payload side hash, adding owner-fenced
+ack/DLQ transitions. Drain `evidence:processing` and stop older evidence
+consumers before starting 0.1.25.24 workers because older binaries interpret
+processing members as raw JSON.
 
 ### 2026-06-12 — evidence store
 
@@ -537,13 +547,20 @@ architectural rather than a correctness blocker for this release:
   record. This worker forwards those values but cannot add at-rest encryption
   without a coordinated producer/wire-format change.
 
+The events-side absent-config SSRF baseline deliberately blocks more special-use
+ranges than the current admin fallback (`0.0.0.0/8`, CGNAT, IPv6 link-local, and
+unspecified IPv6). Until the admin repository aligns those defaults, a URL
+accepted there without a stored shared config can fail closed here at delivery.
+Weakening the last-mile check would re-open SSRF; admin alignment is the required
+cross-repository follow-up and is outside this event-server-only PR.
+
 ## Test Coverage
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 540 in the 2026-07-15 clean verification |
-| Integration tests | 25 across webhook delivery, evidence signing/store, and Redis atomicity |
-| JaCoCo result | 97.89% line / 95.72% branch |
+| Total tests | 550 in the 2026-07-15 clean verification |
+| Integration tests | 27 across webhook delivery, evidence signing/store, and Redis atomicity |
+| JaCoCo result | 97.82% line / 95.27% branch |
 | JaCoCo minimum | 95% line / 95% branch (both enforced) |
 
 ## Source Inventory
@@ -590,8 +607,9 @@ here, avoiding stale hand-maintained counts.
 | dispatch.loop.delay-ms | 25 | DISPATCH_LOOP_DELAY_MS | OK |
 | dispatch.ordering.lease-ms | 120000 | DISPATCH_ORDERING_LEASE_MS | OK |
 | dispatch.ordering.contention-backoff-ms | 500 | DISPATCH_ORDERING_CONTENTION_BACKOFF_MS | OK |
-| dispatch.processing.recovery-idle-ms | 180000 | DISPATCH_PROCESSING_RECOVERY_IDLE_MS | OK; startup requires > ordering lease |
+| dispatch.processing.recovery-idle-ms | 180000 | DISPATCH_PROCESSING_RECOVERY_IDLE_MS | OK; startup requires > ordering lease and pending + HTTP timeouts |
 | dispatch.processing.recovery-interval-ms | 30000 | DISPATCH_PROCESSING_RECOVERY_INTERVAL_MS | OK |
+| dispatch.failed.max-len | 10000 | DISPATCH_FAILED_MAX_LEN | OK; bounded corrupt-delivery quarantine |
 | dispatch.event-outbox.poll-interval-ms / batch-size | 1000 / 25 | DISPATCH_EVENT_OUTBOX_POLL_INTERVAL_MS / DISPATCH_EVENT_OUTBOX_BATCH_SIZE | OK |
 | dispatch.event-outbox.claim-lease-ms / retry-delay-ms | 30000 / 5000 | DISPATCH_EVENT_OUTBOX_CLAIM_LEASE_MS / DISPATCH_EVENT_OUTBOX_RETRY_DELAY_MS | OK |
 | dispatch.event-outbox.max-attempts / failed-max-len | 100 / 10000 | DISPATCH_EVENT_OUTBOX_MAX_ATTEMPTS / DISPATCH_EVENT_OUTBOX_FAILED_MAX_LEN | OK |

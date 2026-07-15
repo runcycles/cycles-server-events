@@ -110,6 +110,7 @@ class DispatcherEventOutboxPublisherTest {
         publisher.publishDue();
 
         verify(eventRepository).releaseDispatcherEventClaim(eq("task-lost"), anyString());
+        assertThat(registry.find(CyclesMetrics.DISPATCHER_EVENT_DEFERRED).counter()).isNull();
     }
 
     @Test
@@ -203,6 +204,7 @@ class DispatcherEventOutboxPublisherTest {
         assertThat(registry.find(CyclesMetrics.DISPATCHER_EVENT_DEAD_LETTERED)
                 .tags("event_type", "webhook.disabled", "reason", "attempts_exhausted")
                 .counter().count()).isEqualTo(1.0);
+        assertThat(registry.find(CyclesMetrics.DISPATCHER_EVENT_DEFERRED).counter()).isNull();
     }
 
     @Test

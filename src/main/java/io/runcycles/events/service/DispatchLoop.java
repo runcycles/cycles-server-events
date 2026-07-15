@@ -2,8 +2,11 @@ package io.runcycles.events.service;
 
 import static io.runcycles.events.logging.LogSanitizer.safe;
 
+import io.runcycles.events.metrics.CyclesMetrics;
 import io.runcycles.events.repository.DeliveryQueueRepository;
 import io.runcycles.events.repository.DeliveryQueueRepository.ClaimedDelivery;
+import io.runcycles.events.repository.DeliveryRepository.CorruptDeliveryRecordException;
+import io.runcycles.events.service.DeliveryHandler.RecoverableDeliveryException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,6 +27,7 @@ public class DispatchLoop {
 
     private final DeliveryQueueRepository queueRepository;
     private final DeliveryHandler deliveryHandler;
+    private final CyclesMetrics metrics;
     private final int timeoutSeconds;
     private final long orderingLeaseMs;
     private final long contentionBackoffMs;
@@ -32,19 +36,22 @@ public class DispatchLoop {
 
     @Autowired
     public DispatchLoop(DeliveryQueueRepository queueRepository, DeliveryHandler deliveryHandler,
+                        CyclesMetrics metrics,
                         @Value("${dispatch.pending.timeout-seconds:5}") int timeoutSeconds,
                         @Value("${dispatch.ordering.lease-ms:120000}") long orderingLeaseMs,
                         @Value("${dispatch.http.timeout-seconds:30}") int httpTimeoutSeconds,
                         @Value("${dispatch.ordering.contention-backoff-ms:500}") long contentionBackoffMs) {
-        this(queueRepository, deliveryHandler, timeoutSeconds, orderingLeaseMs,
+        this(queueRepository, deliveryHandler, metrics, timeoutSeconds, orderingLeaseMs,
                 httpTimeoutSeconds, contentionBackoffMs, System::nanoTime);
     }
 
     DispatchLoop(DeliveryQueueRepository queueRepository, DeliveryHandler deliveryHandler,
+                 CyclesMetrics metrics,
                  int timeoutSeconds, long orderingLeaseMs, int httpTimeoutSeconds,
                  long contentionBackoffMs, LongSupplier nanoTime) {
         this.queueRepository = queueRepository;
         this.deliveryHandler = deliveryHandler;
+        this.metrics = java.util.Objects.requireNonNull(metrics, "delivery metrics are required");
         this.nanoTime = java.util.Objects.requireNonNull(nanoTime, "monotonic clock is required");
         if (timeoutSeconds <= 0) {
             throw new IllegalArgumentException("dispatch pending timeout must be positive");
@@ -82,10 +89,25 @@ public class DispatchLoop {
             try {
                 ClaimedDelivery claim = queueRepository.claimPending(timeoutSeconds);
                 if (claim != null) {
-                    deliveryHandler.handle(claim);
-                    if (!queueRepository.ack(claim)) {
-                        LOG.warn("Webhook delivery claim was superseded before ack: delivery_id={} claim_token={}",
-                                safe(claim.deliveryId()), safe(claim.claimToken()));
+                    try {
+                        deliveryHandler.handle(claim);
+                        if (!queueRepository.ack(claim)) {
+                            LOG.warn("Webhook delivery ack rejected because ownership changed or the processing entry disappeared: delivery_id={} claim_token={}",
+                                    safe(claim.deliveryId()), safe(claim.claimToken()));
+                        }
+                    } catch (RecoverableDeliveryException recoverable) {
+                        LOG.debug("Webhook delivery retained for age-gated recovery: delivery_id={} reason={}",
+                                safe(claim.deliveryId()), safe(recoverable.reason()));
+                    } catch (CorruptDeliveryRecordException corruptRecord) {
+                        if (queueRepository.deadLetterCorruptOwned(claim, System.currentTimeMillis())) {
+                            metrics.recordDeliveryDeadLettered("corrupt_record");
+                            LOG.error("Corrupt webhook delivery quarantined: delivery_id={} failed_queue={} reason={}",
+                                    safe(corruptRecord.deliveryId()), DeliveryQueueRepository.FAILED_KEY,
+                                    safe(corruptRecord.getMessage()));
+                        } else {
+                            LOG.warn("Corrupt webhook delivery quarantine skipped because the claim was superseded or its processing entry disappeared: delivery_id={} claim_token={}",
+                                    safe(claim.deliveryId()), safe(claim.claimToken()));
+                        }
                     }
                 }
             } finally {

@@ -107,8 +107,9 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `WEBHOOK_SECRET_ENCRYPTION_KEY` | (empty) | AES-256-GCM key for signing secret encryption (base64-encoded 32 bytes). If empty, secrets stored/read as plaintext (backward compatible). |
 | `dispatch.pending.timeout-seconds` | 5 | BLMOVE blocking timeout (seconds) |
 | `DISPATCH_LOOP_DELAY_MS` | 25 | Delay between dispatch-loop invocations after a claim completes or times out. |
-| `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | 180000 | Minimum age before an in-flight `dispatch:processing` delivery is considered stale and requeued. Startup fails unless this is strictly greater than `DISPATCH_ORDERING_LEASE_MS`. |
+| `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | 180000 | Minimum age before an in-flight `dispatch:processing` delivery is considered stale and requeued. Startup requires it to exceed both `DISPATCH_ORDERING_LEASE_MS` and the pending-plus-HTTP timeout duration. |
 | `DISPATCH_PROCESSING_RECOVERY_INTERVAL_MS` | 30000 | Periodic stale-processing recovery interval; prevents quick-restart orphans from remaining stranded |
+| `DISPATCH_FAILED_MAX_LEN` | 10000 | Maximum newest corrupt-delivery quarantine entries retained in `dispatch:failed`. |
 | `DISPATCH_ORDERING_LEASE_MS` | 120000 | Fleet-wide claim/send lease that preserves initial-claim FIFO order. Must exceed BLMOVE plus HTTP timeouts; replicas provide failover, not webhook throughput. |
 | `DISPATCH_ORDERING_CONTENTION_BACKOFF_MS` | 500 | Bounded randomized delay after a global dispatch-lease miss; prevents idle replicas from hammering Redis. |
 | `DISPATCH_EVENT_OUTBOX_POLL_INTERVAL_MS` / `DISPATCH_EVENT_OUTBOX_BATCH_SIZE` | 1000 / 25 | Poll interval and bounded batch for durable dispatcher-generated meta-events. |
@@ -256,6 +257,7 @@ PENDING ──HTTP 2xx──► SUCCESS (reset consecutive_failures)
 | `dispatch:processing:claimed_at` | ZSET | Events (ZADD/ZREM) | Events recovery | Claim timestamps used to recover only stale in-flight deliveries |
 | `dispatch:processing:claim_owner` | HASH | Events claim Lua | Events ack/recovery Lua | Per-delivery claim generation; a stale worker cannot ack a successor's claim |
 | `dispatch:retry` | ZSET | Events (ZADD) | Events (ZRANGEBYSCORE) | Retry queue (score = timestamp) |
+| `dispatch:failed` | LIST | Events quarantine Lua | Operators | Bounded wrappers for corrupt delivery records; source `delivery:{id}` remains available for repair |
 | `evidence:processing` | LIST | Events evidence claim Lua | Events evidence ack/recovery Lua | Unique evidence claim IDs; raw payloads are not used as processing identities |
 | `evidence:processing:claimed_at` | ZSET | Events evidence claim Lua | Events evidence recovery Lua | Evidence claim timestamps keyed by unique claim ID |
 | `evidence:processing:claim_owner` | HASH | Events evidence claim Lua | Events evidence ack/DLQ/recovery Lua | Evidence claim generations used to fence stale workers |
@@ -287,6 +289,7 @@ Final retry exhaustion uses one Redis transaction to persist the failed delivery
 | `dispatch:pending` | Self-draining | Claimed by BLMOVE into `dispatch:processing` |
 | `dispatch:processing` | Self-draining | Acked by LREM; stale entries recovered to pending after the idle window |
 | `dispatch:retry` | Self-draining | Entries move to pending when ready |
+| `dispatch:failed` | Bounded to 10000 by default | Operators inspect, repair the retained `delivery:{id}`, and explicitly replay or discard |
 | `dispatcher:event-outbox:pending`, `task:*`, `lock:*`, `attempts` | Self-draining | Deterministic tasks remain until durably saved, acknowledged, or moved to the bounded DLQ after retry exhaustion |
 | `dispatcher:event-outbox:failed` | Bounded to 10000 by default | Operators inspect and replay or discard poison meta-event tasks |
 

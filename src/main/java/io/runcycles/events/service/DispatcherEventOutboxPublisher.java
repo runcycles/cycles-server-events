@@ -82,6 +82,8 @@ public class DispatcherEventOutboxPublisher {
             if (task == null) {
                 // The inline publisher may have acknowledged it after this scan.
                 claimResolved = eventRepository.ackClaimedDispatcherEvent(taskId, owner);
+                LOG.debug("Cleaned dispatcher outbox index entry without a task payload: task_id={} claim_resolved={}",
+                        safe(taskId), claimResolved);
                 return;
             }
             eventRepository.save(task.event());
@@ -98,8 +100,8 @@ public class DispatcherEventOutboxPublisher {
                     safe(task.event().getCorrelationId()));
         } catch (RuntimeException e) {
             String eventType = task != null && task.event() != null ? task.event().getEventType() : null;
-            metrics.recordDispatcherEventDeferred(eventType, "publish_failure");
             boolean deadLettered = false;
+            boolean deferred = false;
             try {
                 OutboxFailureResult failure = eventRepository.recordDispatcherEventFailure(
                         taskId, owner, System.currentTimeMillis() + retryDelayMs,
@@ -111,14 +113,21 @@ public class DispatcherEventOutboxPublisher {
                     LOG.error("Dispatcher event outbox task dead-lettered after bounded retries: task_id={} event_type={} attempts={} failed_queue={}",
                             safe(taskId), safe(eventType), failure.attempts(),
                             EventRepository.DISPATCHER_OUTBOX_FAILED_KEY);
+                } else if (failure.claimResolved()) {
+                    deferred = true;
                 }
             } catch (RuntimeException deferFailure) {
+                deferred = true;
                 LOG.error("Failed to defer dispatcher event outbox task; task remains discoverable at its prior score: task_id={} event_type={} error={}",
                         safe(taskId), safe(eventType), safe(deferFailure.getMessage()), deferFailure);
             }
-            if (!deadLettered) {
+            if (deferred) {
+                metrics.recordDispatcherEventDeferred(eventType, "publish_failure");
                 LOG.warn("Dispatcher event outbox publish deferred: task_id={} event_type={} error={}",
                         safe(taskId), safe(eventType), safe(e.getMessage()));
+            } else if (!deadLettered) {
+                LOG.debug("Dispatcher event outbox publish result discarded after claim loss: task_id={} event_type={}",
+                        safe(taskId), safe(eventType));
             }
         } finally {
             if (!claimResolved) {

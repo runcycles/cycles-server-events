@@ -201,14 +201,17 @@ public class SubscriptionRepository {
                     return new TerminalFailureUpdate(false, false, subscriptionFound, 0, false, null);
                 }
                 if (Long.valueOf(-3L).equals(result)) {
-                    return new TerminalFailureUpdate(false, true, subscriptionFound, 0, false, null);
+                    return new TerminalFailureUpdate(false, false, subscriptionFound, 0, false, null);
                 }
                 if (result instanceof Long code && code >= 1L && code <= 3L) {
                     return new TerminalFailureUpdate(true, true, subscriptionFound, failures,
                             disabledNow, previousStatus);
                 }
             }
-            throw new IllegalStateException("delivery or subscription changed too frequently to finalize failure");
+            throw new CasExhaustedException(
+                    "delivery or subscription changed too frequently to finalize failure");
+        } catch (CasExhaustedException e) {
+            throw e;
         } catch (Exception e) {
             LOG.error("Failed to atomically finalize webhook delivery failure: delivery_id={} subscription_id={} occurred_at={} default_disable_after={}",
                     safe(failedDelivery.getDeliveryId()), safe(subscriptionId), occurredAt, defaultDisableAfter, e);
@@ -267,13 +270,16 @@ public class SubscriptionRepository {
                     return new DeliverySuccessUpdate(false, false, subscriptionFound);
                 }
                 if (Long.valueOf(-3L).equals(result)) {
-                    return new DeliverySuccessUpdate(false, true, subscriptionFound);
+                    return new DeliverySuccessUpdate(false, false, subscriptionFound);
                 }
                 if (Long.valueOf(1L).equals(result) || Long.valueOf(2L).equals(result)) {
                     return new DeliverySuccessUpdate(true, true, subscriptionFound);
                 }
             }
-            throw new IllegalStateException("delivery or subscription changed too frequently to finalize success");
+            throw new CasExhaustedException(
+                    "delivery or subscription changed too frequently to finalize success");
+        } catch (CasExhaustedException e) {
+            throw e;
         } catch (Exception e) {
             LOG.error("Failed to atomically finalize webhook delivery success: delivery_id={} subscription_id={} occurred_at={}",
                     safe(successfulDelivery.getDeliveryId()), safe(subscriptionId), occurredAt, e);
@@ -324,5 +330,11 @@ public class SubscriptionRepository {
 
     public record DeliverySuccessUpdate(boolean applied, boolean deliveryFound,
                                         boolean subscriptionFound) {
+    }
+
+    private static final class CasExhaustedException extends IllegalStateException {
+        private CasExhaustedException(String message) {
+            super(message);
+        }
     }
 }

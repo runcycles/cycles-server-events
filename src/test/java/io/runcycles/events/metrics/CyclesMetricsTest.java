@@ -143,6 +143,17 @@ class CyclesMetricsTest {
     }
 
     @Test
+    void recordDeliveryDeadLetteredUsesBoundedReasonTag() {
+        metrics.recordDeliveryDeadLettered("corrupt_record");
+        metrics.recordDeliveryDeadLettered(null);
+
+        assertThat(registry.find(CyclesMetrics.DELIVERY_DEAD_LETTERED)
+                .tag("reason", "corrupt_record").counter().count()).isEqualTo(1.0);
+        assertThat(registry.find(CyclesMetrics.DELIVERY_DEAD_LETTERED)
+                .tag("reason", CyclesMetrics.TAG_UNKNOWN).counter().count()).isEqualTo(1.0);
+    }
+
+    @Test
     void recordSubscriptionAutoDisabled_incrementsCounter() {
         metrics.recordSubscriptionAutoDisabled("acme", "consecutive_failures");
 

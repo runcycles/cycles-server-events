@@ -121,6 +121,42 @@ class DeliveryQueueRepositoryTest {
     }
 
     @Test
+    void claimReturnsNullWhenLateClaimantWouldOverwriteSuccessorOwner() {
+        when(jedis.blmove("dispatch:pending", "dispatch:processing",
+                ListDirection.RIGHT, ListDirection.LEFT, 5.0)).thenReturn("del-1");
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(-1L);
+
+        assertThat(repository.claimPending(5)).isNull();
+    }
+
+    @Test
+    void corruptDeliveryIsQuarantinedOnlyByCurrentOwner() {
+        ClaimedDelivery claim = new ClaimedDelivery("del-1", "claim-1");
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(1L, 0L);
+
+        assertThat(repository.deadLetterCorruptOwned(claim, 1234L)).isTrue();
+        assertThat(repository.deadLetterCorruptOwned(claim, 1234L)).isFalse();
+
+        verify(jedis, times(2)).eval(anyString(),
+                eq(List.of("dispatch:failed", "dispatch:processing",
+                        "dispatch:processing:claimed_at", "dispatch:processing:claim_owner",
+                        "delivery:del-1")),
+                eq(List.of("del-1", "claim-1", "1234", "10000")));
+    }
+
+    @Test
+    void corruptDeliveryQuarantineValidatesInputsAndBound() {
+        ClaimedDelivery claim = new ClaimedDelivery("del-1", "claim-1");
+        assertThatThrownBy(() -> repository.deadLetterCorruptOwned(null, 1L))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> repository.deadLetterCorruptOwned(claim, -1L))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new DeliveryQueueRepository(jedisPool, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        verify(jedisPool, never()).getResource();
+    }
+
+    @Test
     void recoverStaleProcessing_marksUntrackedEntriesWithoutRequeueing() {
         when(jedis.eval(anyString(),
                 eq(List.of("dispatch:processing", "dispatch:processing:claimed_at", "dispatch:pending",

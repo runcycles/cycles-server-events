@@ -2,6 +2,7 @@ package io.runcycles.events.repository;
 
 import static io.runcycles.events.logging.LogSanitizer.safe;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.runcycles.events.model.Delivery;
 import io.runcycles.events.model.DeliveryStatus;
@@ -53,7 +54,23 @@ public class DeliveryRepository {
         try (Jedis jedis = jedisPool.getResource()) {
             String data = jedis.get("delivery:" + deliveryId);
             if (data == null) return null;
-            return objectMapper.readValue(data, Delivery.class);
+            Delivery delivery = objectMapper.readValue(data, Delivery.class);
+            if (delivery.getDeliveryId() == null || delivery.getDeliveryId().isBlank()
+                    || !deliveryId.equals(delivery.getDeliveryId())
+                    || delivery.getEventId() == null || delivery.getEventId().isBlank()
+                    || delivery.getSubscriptionId() == null || delivery.getSubscriptionId().isBlank()
+                    || delivery.getStatus() == null) {
+                throw new CorruptDeliveryRecordException(deliveryId,
+                        "stored delivery identity or status is invalid", null);
+            }
+            return delivery;
+        } catch (CorruptDeliveryRecordException corruptRecord) {
+            throw corruptRecord;
+        } catch (JsonProcessingException corruptRecord) {
+            LOG.error("Corrupt webhook delivery record requires quarantine: delivery_id={}",
+                    safe(deliveryId), corruptRecord);
+            throw new CorruptDeliveryRecordException(deliveryId,
+                    "stored delivery JSON is invalid", corruptRecord);
         } catch (Exception e) {
             LOG.error("Failed to read webhook delivery: delivery_id={}", safe(deliveryId), e);
             throw new IllegalStateException("Failed to read webhook delivery", e);
@@ -79,7 +96,8 @@ public class DeliveryRepository {
                     java.util.List.of(key, DeliveryQueueRepository.PROCESSING_CLAIM_OWNER_KEY),
                     java.util.List.of(json, claim.deliveryId(), claim.claimToken()));
             if (Long.valueOf(-4L).equals(updated)) {
-                throw new IllegalStateException("stored webhook delivery has an invalid status");
+                throw new CorruptDeliveryRecordException(delivery.getDeliveryId(),
+                        "stored delivery status is invalid", null);
             }
             if (!Long.valueOf(1L).equals(updated)) {
                 LOG.warn("Webhook delivery transition rejected because the claim was superseded, the record disappeared, or its state was already terminal: delivery_id={} status={} result={}",
@@ -87,6 +105,8 @@ public class DeliveryRepository {
                 return false;
             }
             return true;
+        } catch (CorruptDeliveryRecordException corruptRecord) {
+            throw corruptRecord;
         } catch (Exception e) {
             LOG.error("Failed to update owned webhook delivery: delivery_id={} event_id={} event_type={} subscription_id={} status={} attempts={} trace_id={}",
                     safe(delivery.getDeliveryId()), safe(delivery.getEventId()),
@@ -116,7 +136,8 @@ public class DeliveryRepository {
                     java.util.List.of(json, claim.deliveryId(), claim.claimToken(),
                             Long.toString(nextRetryAtMillis)));
             if (Long.valueOf(-4L).equals(updated)) {
-                throw new IllegalStateException("stored webhook delivery has an invalid status");
+                throw new CorruptDeliveryRecordException(delivery.getDeliveryId(),
+                        "stored delivery status is invalid", null);
             }
             if (!Long.valueOf(1L).equals(updated)) {
                 LOG.warn("Webhook retry transition rejected because the claim was superseded, the record disappeared, or its state was already terminal: delivery_id={} result={}",
@@ -124,6 +145,8 @@ public class DeliveryRepository {
                 return false;
             }
             return true;
+        } catch (CorruptDeliveryRecordException corruptRecord) {
+            throw corruptRecord;
         } catch (Exception e) {
             LOG.error("Failed to atomically persist and schedule owned webhook retry: delivery_id={} event_id={} subscription_id={} next_retry_at_ms={}",
                     safe(delivery.getDeliveryId()), safe(delivery.getEventId()),
@@ -138,6 +161,20 @@ public class DeliveryRepository {
         if (delivery.getDeliveryId() == null || delivery.getDeliveryId().isBlank()
                 || !delivery.getDeliveryId().equals(claim.deliveryId())) {
             throw new IllegalArgumentException("matching delivery and owned claim are required");
+        }
+    }
+
+    /** Signals deterministic stored-data corruption, distinct from Redis availability failures. */
+    public static final class CorruptDeliveryRecordException extends IllegalStateException {
+        private final String deliveryId;
+
+        public CorruptDeliveryRecordException(String deliveryId, String message, Throwable cause) {
+            super(message, cause);
+            this.deliveryId = deliveryId;
+        }
+
+        public String deliveryId() {
+            return deliveryId;
         }
     }
 
