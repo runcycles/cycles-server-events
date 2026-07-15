@@ -45,7 +45,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 class WebhookDeliveryIntegrationTest {
 
     @Container
-    static GenericContainer<?> redis = new GenericContainer<>(DockerImageName.parse("redis:7-alpine"))
+    static GenericContainer<?> redis = new GenericContainer<>(DockerImageName.parse(
+            "redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99"))
             .withExposedPorts(6379);
 
     static HttpServer webhookServer;
@@ -196,12 +197,10 @@ class WebhookDeliveryIntegrationTest {
             assertThat(webhook.get("body")).contains(eventId).contains("tenant.created").contains(TENANT_ID);
 
             // 8. Verify delivery updated to SUCCESS in Redis (poll — handler writes after HTTP response)
-            String deliveryJson = null;
-            for (int i = 0; i < 20; i++) {
-                deliveryJson = jedis.get("delivery:" + deliveryId);
-                if (deliveryJson != null && deliveryJson.contains("\"status\":\"SUCCESS\"")) break;
-                Thread.sleep(250);
-            }
+            org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5))
+                    .untilAsserted(() -> assertThat(jedis.get("delivery:" + deliveryId))
+                            .contains("\"status\":\"SUCCESS\""));
+            String deliveryJson = jedis.get("delivery:" + deliveryId);
             assertThat(deliveryJson).contains("\"status\":\"SUCCESS\"");
             assertThat(deliveryJson).contains("\"response_status\":200");
         }
@@ -227,7 +226,9 @@ class WebhookDeliveryIntegrationTest {
                     "attempts", 0)));
             jedis.lpush("dispatch:pending", deliveryId);
 
-            Thread.sleep(5000);
+            org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5))
+                    .untilAsserted(() -> assertThat(jedis.get("delivery:" + deliveryId))
+                            .contains("\"status\":\"FAILED\""));
 
             assertThat(receivedWebhooks).as("Stale delivery should NOT be delivered").isEmpty();
 
@@ -239,9 +240,8 @@ class WebhookDeliveryIntegrationTest {
 
     @Test
     @Order(3)
-    @DisplayName("Delivery without signing secret omits X-Cycles-Signature")
-    void noSigningSecret_noSignatureHeader() throws Exception {
-        deliveryLatch = new CountDownLatch(1);
+    @DisplayName("Delivery without signing secret fails closed before HTTP")
+    void noSigningSecret_failsClosed() throws Exception {
 
         try (Jedis jedis = jedisPool.getResource()) {
             String unsignedSubId = "whsub_unsigned_001";
@@ -270,12 +270,15 @@ class WebhookDeliveryIntegrationTest {
                     "attempts", 0)));
             jedis.lpush("dispatch:pending", deliveryId);
 
-            boolean delivered = deliveryLatch.await(15, TimeUnit.SECONDS);
-            assertThat(delivered).isTrue();
-
-            Map<String, String> webhook = receivedWebhooks.get(0);
-            assertThat(webhook.get("signature")).isNull();
-            assertThat(webhook.get("event_id")).isEqualTo(eventId);
+            String persisted = null;
+            for (int i = 0; i < 40; i++) {
+                persisted = jedis.get("delivery:" + deliveryId);
+                if (persisted != null && persisted.contains("\"status\":\"FAILED\"")) break;
+                Thread.sleep(250);
+            }
+            assertThat(receivedWebhooks).isEmpty();
+            assertThat(persisted).contains("\"status\":\"FAILED\"")
+                    .contains("signing secret is missing");
 
             jedis.srem("webhooks:" + TENANT_ID, unsignedSubId);
         }
@@ -302,6 +305,7 @@ class WebhookDeliveryIntegrationTest {
                     Map.entry("disable_after_failures", 10),
                     Map.entry("consecutive_failures", 0))));
             jedis.sadd("webhooks:" + TENANT_ID, subId);
+            jedis.set("webhook:secret:" + subId, SIGNING_SECRET);
 
             String traceId = "0123456789abcdef0123456789abcdef";
             String eventId = "evt_flags_" + UUID.randomUUID().toString().substring(0, 8);
@@ -381,7 +385,9 @@ class WebhookDeliveryIntegrationTest {
                     "attempts", 0)));
             jedis.lpush("dispatch:pending", deliveryId);
 
-            Thread.sleep(5000);
+            org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5))
+                    .untilAsserted(() -> assertThat(jedis.get("delivery:" + deliveryId))
+                            .contains("\"status\":\"FAILED\""));
 
             assertThat(receivedWebhooks)
                     .as("policy-blocked delivery must never reach the receiver")

@@ -10,6 +10,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.io.InputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class CyclesEvidenceEnvelopeBuilderTest {
 
@@ -70,6 +71,9 @@ class CyclesEvidenceEnvelopeBuilderTest {
         assertThat(canonicalizer.computeEvidenceId(e)).isEqualTo(built.evidenceId());
         byte[] signingBytes = canonicalizer.signingBytes(e, built.evidenceId());
         assertThat(signer.verify(signingBytes, e.get("signature").asText(), key.signerDid())).isTrue();
+        assertThat(built.json().getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                .as("persisted/served bytes are the RFC 8785 canonical document")
+                .isEqualTo(canonicalizer.canonicalize(e));
     }
 
     @Test
@@ -83,6 +87,22 @@ class CyclesEvidenceEnvelopeBuilderTest {
                 1810000000100L, null, src.get("payload").get("reserve"));
 
         assertThat(built.envelope().has("trace_id")).isFalse();
+    }
+
+    @Test
+    void rejectsIntegerThatJcsWouldSilentlyRound() throws Exception {
+        EvidenceSigningKey key = new LocalEvidenceSigningKey(signer, "", "", true);
+        CyclesEvidenceEnvelopeBuilder builder = new CyclesEvidenceEnvelopeBuilder(canonicalizer, key);
+        ObjectNode src = loadFixture("02-reserve-allow");
+        ObjectNode payload = (ObjectNode) src.get("payload").get("reserve").deepCopy();
+        payload.withObject("response").put("unsafe_test_value", new java.math.BigInteger("9007199254740993"));
+
+        assertThatThrownBy(() -> builder.build(
+                EvidenceArtifactType.RESERVE, "https://cycles.example.com/v1",
+                1810000000100L, null, payload))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot be represented losslessly")
+                .hasMessageContaining("unsafe_test_value");
     }
 
     private ObjectNode loadFixture(String name) throws Exception {

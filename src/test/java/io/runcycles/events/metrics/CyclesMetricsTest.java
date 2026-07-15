@@ -20,6 +20,42 @@ class CyclesMetricsTest {
         metrics = new CyclesMetrics(registry, true); // tenant tag enabled by default
     }
 
+    @Test
+    void evidenceLifecycleMetricsUseBoundedArtifactAndReasonTags() {
+        metrics.recordEvidenceClaimed("reserve");
+        metrics.recordEvidenceStored("reserve");
+        metrics.recordEvidenceDeadLettered(null, "invalid_source");
+        metrics.recordEvidenceRetryDeferred("commit", "store_failure");
+        metrics.recordEvidenceClaimed("attacker-controlled-type");
+        metrics.recordEvidenceClaimed(" ");
+
+        assertThat(registry.find(CyclesMetrics.EVIDENCE_CLAIMED)
+                .tag("artifact_type", "reserve").counter().count()).isEqualTo(1.0);
+        assertThat(registry.find(CyclesMetrics.EVIDENCE_STORED)
+                .tag("artifact_type", "reserve").counter().count()).isEqualTo(1.0);
+        assertThat(registry.find(CyclesMetrics.EVIDENCE_DEAD_LETTERED)
+                .tags("artifact_type", CyclesMetrics.TAG_UNKNOWN, "reason", "invalid_source")
+                .counter().count()).isEqualTo(1.0);
+        assertThat(registry.find(CyclesMetrics.EVIDENCE_RETRY_DEFERRED)
+                .tags("artifact_type", "commit", "reason", "store_failure")
+                .counter().count()).isEqualTo(1.0);
+        assertThat(registry.find(CyclesMetrics.EVIDENCE_CLAIMED)
+                .tag("artifact_type", CyclesMetrics.TAG_UNKNOWN)
+                .counter().count()).isEqualTo(2.0);
+    }
+
+    @Test
+    void dispatcherEventMetricsConstrainEventTypeVocabulary() {
+        metrics.recordDispatcherEventPublished("webhook.disabled");
+        metrics.recordDispatcherEventDeferred("future.meta.event", "publish_failure");
+
+        assertThat(registry.find(CyclesMetrics.DISPATCHER_EVENT_PUBLISHED)
+                .tag("event_type", "webhook.disabled").counter().count()).isEqualTo(1.0);
+        assertThat(registry.find(CyclesMetrics.DISPATCHER_EVENT_DEFERRED)
+                .tags("event_type", CyclesMetrics.TAG_UNKNOWN, "reason", "publish_failure")
+                .counter().count()).isEqualTo(1.0);
+    }
+
     // ---- Delivery lifecycle ----
 
     @Test
@@ -166,6 +202,7 @@ class CyclesMetricsTest {
         metrics.recordDeliverySuccess("t", "e", 404, 1); // 4xx
         metrics.recordDeliverySuccess("t", "e", 503, 1); // 5xx
         metrics.recordDeliverySuccess("t", "e", 199, 1); // out-of-range -> UNKNOWN
+        metrics.recordDeliverySuccess("t", "e", 600, 1); // upper out-of-range -> UNKNOWN
 
         assertThat(registry.find(CyclesMetrics.DELIVERY_SUCCESS)
                 .tag("status_code_family", "2xx").counter().count()).isEqualTo(1.0);
@@ -176,7 +213,7 @@ class CyclesMetricsTest {
         assertThat(registry.find(CyclesMetrics.DELIVERY_SUCCESS)
                 .tag("status_code_family", "5xx").counter().count()).isEqualTo(1.0);
         assertThat(registry.find(CyclesMetrics.DELIVERY_SUCCESS)
-                .tag("status_code_family", CyclesMetrics.TAG_UNKNOWN).counter().count()).isEqualTo(1.0);
+                .tag("status_code_family", CyclesMetrics.TAG_UNKNOWN).counter().count()).isEqualTo(2.0);
     }
 
     @Test

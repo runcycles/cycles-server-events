@@ -6,11 +6,9 @@ import io.runcycles.events.evidence.CyclesEvidenceEnvelopeBuilder.BuiltEvidenceE
  * Where a freshly built, signed CyclesEvidence envelope goes — the seam
  * between envelope production and persistence/serving.
  *
- * <p>The worker depends only on this interface. The current default
- * ({@link LoggingEvidenceSink}) just records that an envelope was produced;
- * the content-addressed object store (persistence slice) and the
- * {@code GET /v1/evidence/{id}} surface (serving slice) drop in behind it
- * without touching the worker.
+ * <p>The worker depends only on this interface. The production default is
+ * {@link StoringEvidenceSink}, backed by the configured content-addressed
+ * store; {@link LoggingEvidenceSink} remains a non-primary diagnostic sink.
  */
 public interface EvidenceSink {
 

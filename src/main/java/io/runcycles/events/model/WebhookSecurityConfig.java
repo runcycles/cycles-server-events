@@ -22,8 +22,8 @@ import java.util.List;
  * <p>Cross-plane read model: {@code ignoreUnknown = true} (like Event and
  * Delivery) so an admin-side config field added later never poisons
  * dispatch. Defaults mirror the admin model exactly — used when the key is
- * absent or unreadable, and they are the restrictive baseline (private
- * ranges blocked, HTTPS required).
+ * absent, and they are the restrictive baseline (private ranges blocked,
+ * HTTPS required). Read/parse failures remain indeterminate and are retried.
  */
 @Data
 @Builder

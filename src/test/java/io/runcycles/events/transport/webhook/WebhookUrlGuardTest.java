@@ -56,6 +56,12 @@ class WebhookUrlGuardTest {
     }
 
     @Test
+    void schemeMatchingIsCaseInsensitivePerUriRules() {
+        when(configRepository.get()).thenReturn(permissive());
+        assertThat(guard.check("HTTPS://203.0.113.10/hook")).isNull();
+    }
+
+    @Test
     void nonHttpScheme_blocked_evenWithAllowHttp() {
         when(configRepository.get()).thenReturn(permissive());
         assertThat(guard.check("ftp://example.com/hook")).isEqualTo("Only HTTP(S) URLs are allowed");
@@ -120,19 +126,88 @@ class WebhookUrlGuardTest {
     }
 
     @Test
+    void nullBlockedRangesSkipResolution() {
+        when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
+                .allowHttp(true).blockedCidrRanges(null).build());
+        assertThat(guard.check("https://127.0.0.1/hook")).isNull();
+    }
+
+    @Test
     void unresolvableHost_blockedWhenRangesConfigured() {
         String v = guard.check("https://definitely-not-a-real-host.invalid/hook");
         assertThat(v).startsWith("Cannot resolve hostname:");
     }
 
     @Test
-    void invalidCidrEntries_skippedNotFatal() {
+    void invalidCidrEntries_failClosedAsIndeterminatePolicy() {
         when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
                 .allowHttp(true)
                 .blockedCidrRanges(List.of("not-a-cidr", "10.0.0.0/99", "127.0.0.0/8"))
                 .build());
-        assertThat(guard.check("https://127.0.0.1/hook")).startsWith("Resolves to blocked IP:");
-        assertThat(guard.check("https://203.0.113.10/hook")).isNull();
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> guard.check("https://127.0.0.1/hook"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("invalid CIDR");
+    }
+
+    @Test
+    void cidrWithIgnoredTrailingSegmentIsRejected() {
+        when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
+                .allowHttp(true)
+                .blockedCidrRanges(List.of("10.0.0.0/8/ignored"))
+                .build());
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> guard.check("https://203.0.113.10/hook"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("invalid CIDR");
+    }
+
+    @Test
+    void hostnameIsRejectedWhereCidrRequiresAddressLiteral() {
+        when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
+                .allowHttp(true)
+                .blockedCidrRanges(List.of("localhost/8"))
+                .build());
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> guard.check("https://203.0.113.10/hook"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("invalid CIDR");
+    }
+
+    @Test
+    void blankCidrEntryIsRejectedAsIndeterminatePolicy() {
+        when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
+                .allowHttp(true)
+                .blockedCidrRanges(java.util.Arrays.asList("127.0.0.0/8", null))
+                .build());
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> guard.check("https://203.0.113.10/hook"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("blank entry");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "10.0.0.0/not-a-prefix",
+            "10.0.0.0/999999999999999999999",
+            "10.0.0/8",
+            "10.0.x.1/8",
+            "10.0.0.256/8",
+            "fe80::1%eth0/64"
+    })
+    void malformedAddressLiteralOrPrefixIsRejected(String cidr) {
+        when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
+                .allowHttp(true)
+                .blockedCidrRanges(List.of(cidr))
+                .build());
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> guard.check("https://203.0.113.10/hook"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("invalid CIDR");
     }
 
     // --- allowed URL patterns ---

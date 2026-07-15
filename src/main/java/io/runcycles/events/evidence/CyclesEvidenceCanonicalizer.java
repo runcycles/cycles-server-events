@@ -1,12 +1,14 @@
 package io.runcycles.events.evidence;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.erdtman.jcs.JsonCanonicalizer;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 
@@ -52,13 +54,44 @@ public class CyclesEvidenceCanonicalizer {
     }
 
     /** RFC 8785 canonical UTF-8 bytes of an arbitrary object node. */
-    byte[] canonicalize(ObjectNode node) {
+    public byte[] canonicalize(ObjectNode node) {
+        requireLosslessJcsNumbers(node, "$");
         try {
             return new JsonCanonicalizer(mapper.writeValueAsString(node)).getEncodedUTF8();
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("envelope serialization failed", e);
         } catch (IOException e) {
             throw new IllegalStateException("JCS canonicalization failed", e);
+        }
+    }
+
+    /**
+     * RFC 8785 serializes numbers with ECMAScript/IEEE-754 semantics. Reject a
+     * source value when converting it to binary64 would change its mathematical
+     * value; silently signing a rounded amount would corrupt audit evidence.
+     */
+    private static void requireLosslessJcsNumbers(JsonNode node, String path) {
+        if (node.isNumber()) {
+            double binary64 = node.doubleValue();
+            if (!Double.isFinite(binary64)) {
+                throw new IllegalArgumentException("evidence number is not finite at " + path);
+            }
+            BigDecimal original = node.decimalValue();
+            BigDecimal jcsValue = BigDecimal.valueOf(binary64);
+            if (original.compareTo(jcsValue) != 0) {
+                throw new IllegalArgumentException(
+                        "evidence number cannot be represented losslessly by RFC 8785 at " + path
+                                + ": " + node.asText());
+            }
+            return;
+        }
+        if (node.isObject()) {
+            node.fields().forEachRemaining(entry ->
+                    requireLosslessJcsNumbers(entry.getValue(), path + "." + entry.getKey()));
+        } else if (node.isArray()) {
+            for (int i = 0; i < node.size(); i++) {
+                requireLosslessJcsNumbers(node.get(i), path + "[" + i + "]");
+            }
         }
     }
 

@@ -14,6 +14,7 @@ import java.util.Collections;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -44,6 +45,28 @@ class DeliveryQueueRepositoryTest {
     }
 
     @Test
+    void orderingLockUsesOwnedLeaseAndCompareDeleteRelease() {
+        when(jedis.set(eq("dispatch:ordering:lock"), eq("owner-1"),
+                any(redis.clients.jedis.params.SetParams.class))).thenReturn("OK");
+
+        assertThat(repository.tryAcquireOrderingLock("owner-1", 60_000)).isTrue();
+        repository.releaseOrderingLock("owner-1");
+
+        verify(jedis).set(eq("dispatch:ordering:lock"), eq("owner-1"),
+                any(redis.clients.jedis.params.SetParams.class));
+        verify(jedis).eval(anyString(), eq(List.of("dispatch:ordering:lock")), eq(List.of("owner-1")));
+    }
+
+    @Test
+    void orderingLockRejectsInvalidOwnerAndLease() {
+        assertThatThrownBy(() -> repository.tryAcquireOrderingLock("", 60_000))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.tryAcquireOrderingLock("owner-1", 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        verify(jedisPool, never()).getResource();
+    }
+
+    @Test
     void claimPending_timeout_returnsNull() {
         when(jedis.blmove("dispatch:pending", "dispatch:processing",
                 ListDirection.RIGHT, ListDirection.LEFT, 5.0)).thenReturn(null);
@@ -64,32 +87,24 @@ class DeliveryQueueRepositoryTest {
 
     @Test
     void recoverStaleProcessing_marksUntrackedEntriesWithoutRequeueing() {
-        when(jedis.lrange("dispatch:processing", 0, -1)).thenReturn(List.of("del-1"));
-        when(jedis.zscore("dispatch:processing:claimed_at", "del-1")).thenReturn(null);
+        when(jedis.eval(anyString(),
+                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at", "dispatch:pending")),
+                eq(List.of("1000", "10000", "-110000")))).thenReturn(0L);
 
         long recovered = repository.recoverStaleProcessing(10_000L, 120_000L);
 
         assertThat(recovered).isZero();
-        verify(jedis).zadd("dispatch:processing:claimed_at", 10_000L, "del-1");
-        verify(jedis, never()).eval(anyString(), anyList(), anyList());
     }
 
     @Test
     void recoverStaleProcessing_requeuesOnlyIdleEntries() {
-        when(jedis.lrange("dispatch:processing", 0, -1)).thenReturn(List.of("fresh", "stale"));
-        when(jedis.zscore("dispatch:processing:claimed_at", "fresh")).thenReturn(9_500.0);
-        when(jedis.zscore("dispatch:processing:claimed_at", "stale")).thenReturn(1_000.0);
         when(jedis.eval(anyString(),
                 eq(List.of("dispatch:processing", "dispatch:processing:claimed_at", "dispatch:pending")),
-                eq(List.of("stale")))).thenReturn(1L);
+                eq(List.of("1000", "10000", "5000")))).thenReturn(1L);
 
         long recovered = repository.recoverStaleProcessing(10_000L, 5_000L);
 
         assertThat(recovered).isEqualTo(1L);
-        verify(jedis, never()).eval(anyString(), anyList(), eq(List.of("fresh")));
-        verify(jedis).eval(anyString(),
-                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at", "dispatch:pending")),
-                eq(List.of("stale")));
     }
 
     @Test
@@ -101,44 +116,35 @@ class DeliveryQueueRepositoryTest {
 
     @Test
     void popRetryReady_withReadyItems() {
-        when(jedis.zrangeByScore("dispatch:retry", "-inf", "1700000000000", 0, 100))
+        when(jedis.eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")),
+                eq(List.of("1700000000000", "100"))))
                 .thenReturn(Arrays.asList("del-1", "del-2"));
-        when(jedis.eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")), eq(List.of("del-1"))))
-                .thenReturn(1L);
-        when(jedis.eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")), eq(List.of("del-2"))))
-                .thenReturn(1L);
 
         List<String> result = repository.popRetryReady(1700000000000L, 100);
 
         assertThat(result).containsExactly("del-1", "del-2");
-        verify(jedis).eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")), eq(List.of("del-1")));
-        verify(jedis).eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")), eq(List.of("del-2")));
+        verify(jedis).eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")),
+                eq(List.of("1700000000000", "100")));
     }
 
     @Test
-    void popRetryReady_concurrentWorker_skipsAlreadyRemovedItems() {
-        when(jedis.zrangeByScore("dispatch:retry", "-inf", "1700000000000", 0, 100))
-                .thenReturn(Arrays.asList("del-1", "del-2"));
-        when(jedis.eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")), eq(List.of("del-1"))))
-                .thenReturn(1L);
-        when(jedis.eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")), eq(List.of("del-2"))))
-                .thenReturn(0L); // already removed by another worker
+    void popRetryReady_decodesBinaryLuaResults() {
+        when(jedis.eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")), anyList()))
+                .thenReturn(Arrays.asList("del-1".getBytes(java.nio.charset.StandardCharsets.UTF_8), "del-2"));
 
         List<String> result = repository.popRetryReady(1700000000000L, 100);
 
-        assertThat(result).containsExactly("del-1");
-        verify(jedis).eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")), eq(List.of("del-1")));
-        verify(jedis).eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")), eq(List.of("del-2")));
+        assertThat(result).containsExactly("del-1", "del-2");
     }
 
     @Test
     void popRetryReady_noReadyItems() {
-        when(jedis.zrangeByScore("dispatch:retry", "-inf", "1700000000000", 0, 100))
+        when(jedis.eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")), anyList()))
                 .thenReturn(Collections.emptyList());
 
         List<String> result = repository.popRetryReady(1700000000000L, 100);
 
         assertThat(result).isEmpty();
-        verify(jedis, never()).eval(anyString(), anyList(), anyList());
+        verify(jedis).eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")), anyList());
     }
 }

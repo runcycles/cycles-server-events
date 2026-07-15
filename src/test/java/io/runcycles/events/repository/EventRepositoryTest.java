@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.runcycles.events.model.Event;
 import io.runcycles.events.model.EventCategory;
+import io.runcycles.events.model.DispatcherEventTask;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -23,9 +24,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.never;
 
 @ExtendWith(MockitoExtension.class)
 class EventRepositoryTest {
@@ -194,6 +198,44 @@ class EventRepositoryTest {
         ArgumentCaptor<List<String>> keysCaptor = ArgumentCaptor.forClass(List.class);
         verify(jedis).eval(anyString(), keysCaptor.capture(), anyList());
         assertThat(keysCaptor.getValue()).hasSize(3);
+    }
+
+    @Test
+    void dispatcherOutboxClaimUsesFiniteOwnerLease() {
+        when(jedis.set(eq("dispatcher:event-outbox:lock:task-1"), eq("owner-1"), any()))
+                .thenReturn("OK");
+
+        assertThat(repository.tryClaimDispatcherEvent("task-1", "owner-1", 30_000)).isTrue();
+
+        verify(jedis).set(eq("dispatcher:event-outbox:lock:task-1"), eq("owner-1"), any());
+    }
+
+    @Test
+    void dispatcherOutboxTaskRoundTripsFromRedis() throws Exception {
+        DispatcherEventTask task = DispatcherEventTask.create("task-1", Event.builder()
+                .eventType("webhook.disabled").tenantId("t-1").build());
+        when(jedis.get(EventRepository.dispatcherOutboxTaskKey("task-1")))
+                .thenReturn(objectMapper.writeValueAsString(task));
+
+        DispatcherEventTask loaded = repository.findDispatcherEventTask("task-1");
+
+        assertThat(loaded.taskId()).isEqualTo("task-1");
+        assertThat(loaded.event().getEventId()).isEqualTo(task.event().getEventId());
+    }
+
+    @Test
+    void inlineOutboxAckReportsWhetherItCompletedAPendingTask() {
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(1L, 0L);
+
+        assertThat(repository.ackDispatcherEvent("task-1")).isTrue();
+        assertThat(repository.ackDispatcherEvent("task-1")).isFalse();
+    }
+
+    @Test
+    void invalidOutboxClaimArgumentsFailBeforeRedis() {
+        assertThatThrownBy(() -> repository.tryClaimDispatcherEvent("", "owner", 30_000))
+                .isInstanceOf(IllegalArgumentException.class);
+        verify(jedis, never()).set(anyString(), anyString(), any());
     }
 
 }

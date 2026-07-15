@@ -16,7 +16,6 @@ import redis.clients.jedis.JedisPool;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import redis.clients.jedis.params.SetParams;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
@@ -81,32 +80,32 @@ class DeliveryRepositoryTest {
     }
 
     @Test
-    void update_noTtl_plainSet() throws Exception {
+    void update_existingKeyPreservesTtlAtomically() throws Exception {
         Delivery delivery = Delivery.builder()
                 .deliveryId("del-1")
                 .status(DeliveryStatus.SUCCESS)
                 .completedAt(Instant.now())
                 .build();
-        when(jedis.ttl("delivery:del-1")).thenReturn(-1L); // no TTL
+        when(jedis.eval(anyString(), eq(java.util.List.of("delivery:del-1")), anyList())).thenReturn(1L);
 
         repository.update(delivery);
 
-        verify(jedis).set(eq("delivery:del-1"), anyString());
-        verify(jedis, never()).set(anyString(), anyString(), any(SetParams.class));
+        verify(jedis).eval(anyString(), eq(java.util.List.of("delivery:del-1")), anyList());
     }
 
     @Test
-    void update_withTtl_preservesTtlAtomically() throws Exception {
+    void update_missingKeyDoesNotResurrectIt() throws Exception {
         Delivery delivery = Delivery.builder()
                 .deliveryId("del-1")
                 .status(DeliveryStatus.SUCCESS)
                 .completedAt(Instant.now())
                 .build();
-        when(jedis.ttl("delivery:del-1")).thenReturn(86400L); // 1 day remaining
+        when(jedis.eval(anyString(), eq(java.util.List.of("delivery:del-1")), anyList())).thenReturn(0L);
 
         repository.update(delivery);
 
-        verify(jedis).set(eq("delivery:del-1"), anyString(), any(SetParams.class));
+        verify(jedis).eval(anyString(), eq(java.util.List.of("delivery:del-1")), anyList());
+        verify(jedis, never()).set(anyString(), anyString());
     }
 
     @Test
@@ -124,7 +123,6 @@ class DeliveryRepositoryTest {
         assertThatThrownBy(() -> brokenRepo.update(delivery))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Failed to update webhook delivery");
-        verify(jedis, never()).set(anyString(), anyString());
-        verify(jedis, never()).set(anyString(), anyString(), any(SetParams.class));
+        verify(jedis, never()).eval(anyString(), anyList(), anyList());
     }
 }

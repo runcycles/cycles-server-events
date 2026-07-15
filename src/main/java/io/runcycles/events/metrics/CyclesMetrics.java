@@ -10,6 +10,8 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 /**
  * Centralised Micrometer instrumentation for webhook dispatch operations.
@@ -62,7 +64,18 @@ public class CyclesMetrics {
      */
     public static final String EVENTS_PAYLOAD_INVALID = "cycles.webhook.events.payload.invalid";
 
+    public static final String EVIDENCE_CLAIMED = "cycles.evidence.claimed";
+    public static final String EVIDENCE_STORED = "cycles.evidence.stored";
+    public static final String EVIDENCE_DEAD_LETTERED = "cycles.evidence.dead_lettered";
+    public static final String EVIDENCE_RETRY_DEFERRED = "cycles.evidence.retry_deferred";
+    public static final String DISPATCHER_EVENT_PUBLISHED = "cycles.webhook.dispatcher_event.published";
+    public static final String DISPATCHER_EVENT_DEFERRED = "cycles.webhook.dispatcher_event.deferred";
+
     public static final String TAG_UNKNOWN = "UNKNOWN";
+    private static final Set<String> EVIDENCE_ARTIFACT_TYPES =
+            Set.of("decide", "reserve", "commit", "release", "error");
+    private static final Set<String> DISPATCHER_EVENT_TYPES =
+            Set.of("webhook.disabled", "system.webhook_delivery_failed");
     public static final String OUTCOME_SUCCESS = "success";
     public static final String OUTCOME_FAILURE = "failure";
 
@@ -153,6 +166,38 @@ public class CyclesMetrics {
                 .increment();
     }
 
+    // ---- Evidence lifecycle ----
+
+    public void recordEvidenceClaimed(String artifactType) {
+        registry.counter(EVIDENCE_CLAIMED,
+                Tags.of("artifact_type", evidenceArtifactType(artifactType))).increment();
+    }
+
+    public void recordEvidenceStored(String artifactType) {
+        registry.counter(EVIDENCE_STORED,
+                Tags.of("artifact_type", evidenceArtifactType(artifactType))).increment();
+    }
+
+    public void recordEvidenceDeadLettered(String artifactType, String reason) {
+        registry.counter(EVIDENCE_DEAD_LETTERED,
+                Tags.of("artifact_type", evidenceArtifactType(artifactType), "reason", normalise(reason))).increment();
+    }
+
+    public void recordEvidenceRetryDeferred(String artifactType, String reason) {
+        registry.counter(EVIDENCE_RETRY_DEFERRED,
+                Tags.of("artifact_type", evidenceArtifactType(artifactType), "reason", normalise(reason))).increment();
+    }
+
+    public void recordDispatcherEventPublished(String eventType) {
+        registry.counter(DISPATCHER_EVENT_PUBLISHED,
+                Tags.of("event_type", dispatcherEventType(eventType))).increment();
+    }
+
+    public void recordDispatcherEventDeferred(String eventType, String reason) {
+        registry.counter(DISPATCHER_EVENT_DEFERRED,
+                Tags.of("event_type", dispatcherEventType(eventType), "reason", normalise(reason))).increment();
+    }
+
     // ---- Internals ----
 
     private void recordLatency(String tenant, String eventType, String outcome, long latencyMs) {
@@ -180,6 +225,16 @@ public class CyclesMetrics {
 
     private static String normalise(String s) {
         return (s == null || s.isBlank()) ? TAG_UNKNOWN : s;
+    }
+
+    private static String evidenceArtifactType(String value) {
+        if (value == null || value.isBlank()) return TAG_UNKNOWN;
+        String normalized = value.toLowerCase(Locale.ROOT);
+        return EVIDENCE_ARTIFACT_TYPES.contains(normalized) ? normalized : TAG_UNKNOWN;
+    }
+
+    private static String dispatcherEventType(String value) {
+        return value != null && DISPATCHER_EVENT_TYPES.contains(value) ? value : TAG_UNKNOWN;
     }
 
     private static String statusFamily(int status) {

@@ -2,6 +2,28 @@
 
 ## Implementation History
 
+### 2026-07-15 — v0.1.25.25: distributed reliability and evidence integrity
+
+Closed the 9.5-readiness review findings: continuous age-gated recovery,
+atomic subscription and delivery transitions, cross-replica dispatch and
+maintenance leases, batched retry promotion, fail-closed webhook signing,
+canonical evidence persistence, poison-vs-infrastructure failure separation,
+atomic evidence DLQ movement, full bundled v0.2 payload/envelope schema
+validation, bounded evidence lifecycle metrics, Redis TLS/ACL support, and
+blocking real-Redis/branch-coverage CI.
+The final hardening pass also made terminal delivery failure plus both mandatory
+dispatcher meta-events one atomic Redis transition backed by a deterministic,
+leased publication outbox; corrected auto-disable to the spec's strict
+"exceeds threshold" rule for ACTIVE and PAUSED subscriptions; bounded blocking
+Redis sockets and ordering contention; rejected lossy RFC 8785 numbers; made
+CIDR parsing literal-only; and retained identity-drift evidence for recovery
+without draining the pending queue into the DLQ.
+Regression coverage includes concurrent failure increments with exactly one
+disable transition, TTL preservation/non-resurrection, young-orphan recovery,
+active-replica evidence isolation, canonical stored bytes, nested and
+cross-field evidence constraints, final-attempt state, retry-schedule crash
+recovery, and missing-secret fail-closed delivery.
+
 ### 2026-07-11 — v0.1.25.23: last-mile webhook ownership/category boundary at delivery (#209)
 
 SECURITY. The load-bearing delivery half of issue
@@ -343,7 +365,11 @@ Each case asserts artifact-type payload mapping, `server_id`/`signer_did`, recom
 
 ### 2026-06-12 — v0.1.25.14: evidence worker cross-check and review fixes
 
-Adds a producer `evidence_id` cross-check to `EvidenceWorker.build`. The worker compares the producer-stamped id from cycles-server against the id it recomputes and dead-letters mismatches caused by server-id or signer-did drift. Records without a producer `evidence_id` keep the legacy skip behavior.
+Adds a producer `evidence_id` cross-check to `EvidenceWorker.build`. At that
+version, mismatches were dead-lettered. The 2026-07-15 final hardening pass
+supersedes that failure policy: identity drift now remains in-flight with a
+claim backoff so reconciliation can recover the source record. Records without
+a producer `evidence_id` keep the legacy skip behavior.
 
 The worker now separates store from ack: if storage succeeds but ack fails, the record remains in processing for recovery instead of being dead-lettered after persistence. `artifact_type` upper-casing now uses `Locale.ROOT`, avoiding locale-sensitive enum lookup failures. Four new worker tests cover cross-check match/mismatch, stored-then-ack-fails, and locale-independent enum parsing; `mvn verify` passed with 253 tests and the 95% JaCoCo gate.
 
@@ -437,9 +463,9 @@ Adds the Prometheus registry dependency and typed `DeliveryStatus` / `WebhookSta
 
 Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler, retry scheduler, AES-256-GCM secret encryption, TTL-based retention, and end-to-end integration coverage.
 
-**Spec:** `cycles-governance-admin-v0.1.25.yaml` (OpenAPI 3.1.0, v0.1.25.34) — authoritative source at `cycles-protocol` repo; served from `cycles-server-admin`. v0.1.25.33 introduced the `webhook.*` lifecycle EventTypes and `EventDataWebhookLifecycle` schema; v0.1.25.34 added the `webhook` value to `EventCategory`. This service implements only the dispatcher-emission half (auto-disable → `webhook.disabled`); the operator-plane emits live in `cycles-server-admin` v0.1.25.39.
+**Specs:** `cycles-governance-admin-v0.1.25.yaml` (OpenAPI 3.1.0) is the event/webhook authority; `cycles-evidence-v0.2.yaml` is the evidence envelope, nested mirror, and signer-authority reference. Both are authoritative in `cycles-protocol`. The evidence schema is bundled for deterministic runtime validation while its compatible wire discriminator remains `cycles-evidence/v0.1`.
 
-**Service:** Spring Boot 3.5.14 / Java 21 / Jedis 6.2.0 / Micrometer Prometheus registry. Redis-driven webhook dispatcher (no inbound API surface of its own). · tomcat-embed-core 10.1.55 pin (SB 3.5.14 still manages 10.1.54; pin re-introduced 2026-05-25 for Apache Tomcat CVE-2026-43512 / -43513 / -43514 / -43515 / -42498 / -41284 / -41293)
+**Service:** Spring Boot 3.5.16 / Java 21 / Jedis 7.5.2 / Micrometer Prometheus registry. Redis-driven webhook dispatcher and evidence signer (no application API surface of its own). Spring Boot 3.5.16 manages tomcat-embed-core 10.1.55 directly.
 
 **Downstream docs:**
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes for consumers (Keep-a-Changelog format)
@@ -453,54 +479,56 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 | Field | Value |
 |-------|-------|
 | Service | cycles-server-events |
-| Version | 0.1.25.12 |
+| Version | 0.1.25.25 |
 | Java | 21 |
-| Spring Boot | 3.5.14 |
-| Spec Authority | [complete-budget-governance-v0.1.25.yaml](https://github.com/runcycles/cycles-server-admin/blob/main/complete-budget-governance-v0.1.25.yaml) |
+| Spring Boot | 3.5.16 |
+| Spec Authority | [cycles-governance-admin-v0.1.25.yaml](https://github.com/runcycles/cycles-protocol/blob/main/cycles-governance-admin-v0.1.25.yaml) and [cycles-evidence-v0.2.yaml](https://github.com/runcycles/cycles-protocol/blob/main/cycles-evidence-v0.2.yaml) |
+
+## Current Assessment
+
+**9.5 / 10.** The release-blocking reliability, evidence-conformance,
+security, atomicity, coverage, and multi-replica coordination gaps found in the
+2026-07-15 review are closed and verified. The remaining half-point is
+architectural rather than a correctness blocker for this release:
+
+- the global dispatch lease preserves one claim/send lane across replicas,
+  which trades horizontal webhook throughput for ordering safety; producer-side
+  tenant partitioning would permit both strict tenant order and parallelism;
+- delayed retry completion can still occur after a later event under
+  at-least-once exponential backoff;
+- `java.net.http.HttpClient` resolves the hostname again after the delivery-time
+  URL guard, leaving a narrow DNS-rebinding/TOCTOU residual that requires a
+  connect-to-validated-address transport or egress proxy to eliminate fully;
+- the Jedis 7 `JedisPool` compatibility API is deprecated, though supported;
+  a follow-up migration to `RedisClient` removes the compile warning; and
+- dispatcher-generated meta-events are atomically staged, durably and
+  idempotently published, but intentionally not fanned out, avoiding recursive
+  `system.webhook_delivery_failed` loops; a dedicated non-recursive alert fan-out
+  path would be needed for webhook alerts;
+- the evidence schema permits the full non-negative int64 range while RFC 8785
+  canonicalization is binary64-based; this worker rejects values that would
+  round rather than signing altered evidence, but producer/spec bounds should
+  be aligned across repositories; and
+- custom-header persistence belongs to the admin producer's shared subscription
+  record. This worker forwards those values but cannot add at-rest encryption
+  without a coordinated producer/wire-format change.
 
 ## Test Coverage
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 205 |
-| Unit tests | 201 |
-| Integration tests | 4 (WebhookDeliveryIntegrationTest) |
-| JaCoCo minimum | 95% line coverage (enforced) |
+| Total tests | 471 in the 2026-07-15 clean verification |
+| Integration tests | 17 across webhook delivery, evidence signing/store, and Redis atomicity |
+| JaCoCo result | 95.59% line / 80.08% branch |
+| JaCoCo minimum | 95% line / 80% branch (both enforced) |
 
-## Source File Inventory (22 classes)
+## Source Inventory
 
-| Layer | File | Tests |
-|-------|------|-------|
-| App | EventsApplication.java | EventsApplicationTest (1) |
-| Config | RedisConfig.java | RedisConfigTest (3) |
-| Config | EventsConfig.java | EventsConfigTest (1) |
-| Config | CryptoService.java | CryptoServiceTest (9) |
-| Metrics | CyclesMetrics.java | CyclesMetricsTest (17) |
-| Model | Event.java | ModelTest (31 total) |
-| Model | EventType.java (41 types) | ModelTest |
-| Model | EventCategory.java | ModelTest |
-| Model | Actor.java, ActorType.java | ModelTest |
-| Model | Delivery.java, DeliveryStatus.java | ModelTest |
-| Model | Subscription.java, WebhookStatus.java | ModelTest |
-| Model | RetryPolicy.java | ModelTest |
-| Model | WebhookThresholdConfig.java | ModelTest |
-| Repository | EventRepository.java | EventRepositoryTest (3) |
-| Repository | DeliveryRepository.java | DeliveryRepositoryTest (6) |
-| Repository | SubscriptionRepository.java | SubscriptionRepositoryTest (11) |
-| Repository | DeliveryQueueRepository.java | DeliveryQueueRepositoryTest (8) |
-| Service | DeliveryHandler.java | DeliveryHandlerTest (36) |
-| Service | DispatchLoop.java | DispatchLoopTest (4) |
-| Service | RetryScheduler.java | RetrySchedulerTest (3) |
-| Service | RetentionCleanupService.java | RetentionCleanupServiceTest (3) |
-| Transport | Transport.java (interface) | (via WebhookTransportTest) |
-| Transport | TransportResult.java | ModelTest |
-| Transport | PayloadSigner.java | PayloadSignerTest (5) |
-| Transport | WebhookTransport.java | WebhookTransportTest (19) |
-| Transport | TraceContext.java | TraceContextTest (11) |
-| Validation | EventPayloadValidator.java | EventPayloadValidatorTest (24) |
-| Integration | - | WebhookDeliveryIntegrationTest (4) |
-
-*Note: Surefire excludes \*IntegrationTest by default. `mvn verify` runs unit tests only; `mvn verify -Pintegration-tests` includes integration (removes exclusion).*
+The current tree contains 55 production Java files and 42 Java test/support
+files. The inventory is derived from the tree rather than duplicated per class
+here, avoiding the stale hand-maintained counts that existed before v0.1.25.24.
+`mvn verify` runs the fast suite; `mvn verify -Pintegration-tests` removes the
+`*IntegrationTest` exclusion and is blocking in CI.
 
 ## Security Audit
 
@@ -525,10 +553,15 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 | server.port | 7980 | - | OK |
 | redis.host | localhost | REDIS_HOST | OK |
 | redis.port | 6379 | REDIS_PORT | OK |
+| redis.username | (empty) | REDIS_USERNAME | OK |
 | redis.password | (empty) | REDIS_PASSWORD | OK |
+| redis.tls.enabled | false | REDIS_TLS_ENABLED | OK |
+| redis.connect-timeout-ms / socket-timeout-ms | 2000 / 5000 | REDIS_CONNECT_TIMEOUT_MS / REDIS_SOCKET_TIMEOUT_MS | OK |
 | webhook.secret.encryption-key | (empty) | WEBHOOK_SECRET_ENCRYPTION_KEY | OK |
 | dispatch.pending.timeout-seconds | 5 | - | OK |
+| dispatch.ordering.lease-ms | 120000 | DISPATCH_ORDERING_LEASE_MS | OK |
 | dispatch.processing.recovery-idle-ms | 120000 | DISPATCH_PROCESSING_RECOVERY_IDLE_MS | OK |
+| dispatch.processing.recovery-interval-ms | 30000 | DISPATCH_PROCESSING_RECOVERY_INTERVAL_MS | OK |
 | dispatch.retry.poll-interval-ms | 5000 | - | OK |
 | dispatch.retry.batch-size | 100 | RETRY_BATCH_SIZE | OK |
 | dispatch.http.timeout-seconds | 30 | - | OK |
@@ -537,6 +570,10 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 | events.retention.event-ttl-days | 90 | EVENT_TTL_DAYS | OK |
 | events.retention.delivery-ttl-days | 14 | DELIVERY_TTL_DAYS | OK |
 | events.retention.cleanup-interval-ms | 3600000 | RETENTION_CLEANUP_INTERVAL_MS | OK |
+| events.retention.lock-lease-ms | 300000 | RETENTION_LOCK_LEASE_MS | OK |
+| cycles.evidence.queue.recovery-idle-ms / interval-ms | 120000 / 30000 | EVIDENCE_RECOVERY_IDLE_MS / EVIDENCE_RECOVERY_INTERVAL_MS | OK |
+| cycles.evidence.queue.recovery-batch-size | 100 | EVIDENCE_RECOVERY_BATCH_SIZE | OK |
+| cycles.evidence.queue.failed-max-len | 10000 | EVIDENCE_FAILED_MAX_LEN | OK |
 | spring.task.scheduling.pool.size | 5 | SCHEDULING_POOL_SIZE | OK |
 | cycles.metrics.tenant-tag.enabled | false | CYCLES_METRICS_TENANT_TAG_ENABLED | OK |
 | management.endpoints.web.exposure.include | health,info,prometheus | - | OK |
@@ -548,12 +585,15 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 
 | Dependency | Version | Purpose |
 |------------|---------|---------|
-| spring-boot-starter-web | 3.5.15 | Embedded worker/management web server |
-| spring-boot-starter-actuator | 3.5.15 | Health + metrics |
+| spring-boot-starter-web | 3.5.16 | Embedded worker/management web server |
+| spring-boot-starter-actuator | 3.5.16 | Health + metrics |
 | jedis | 7.5.2 | Redis client |
 | jackson-datatype-jsr310 | (parent) | Java time serialization |
+| jackson-dataformat-yaml | (parent) | Bundled OpenAPI schema parsing |
+| json-schema-validator | 2.0.0 | JSON Schema 2020-12 evidence conformance |
+| java-json-canonicalization | 1.1 | RFC 8785 canonical evidence bytes |
 | lombok | (parent) | Compile-time only |
-| spring-boot-starter-test | 3.5.15 | Test framework |
+| spring-boot-starter-test | 3.5.16 | Test framework |
 | testcontainers | 1.20.4 | Integration test Redis |
 | micrometer-registry-prometheus | (parent) | Prometheus metrics endpoint |
 | jacoco | 0.8.15 | Coverage enforcement |
@@ -566,14 +606,15 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 | Auto-disable webhooks | After N consecutive failures (default 10) |
 | Stale delivery pruning | Deliveries > 24h auto-failed |
 | Redis connection errors | Caught and logged, schedulers continue |
-| Concurrent safety | BLMOVE claim + LREM ack; stale recovery age-gated by `dispatch:processing:claimed_at` |
+| Concurrent safety | BLMOVE claim + LREM ack; cross-replica claim/send lease; periodic stale recovery age-gated by `dispatch:processing:claimed_at` |
+| Evidence conformance | Full v0.2 nested payload and completed-envelope schema validation before durable storage |
 | TTL-based retention | Events 90d, deliveries 14d, ZSET indexes trimmed hourly |
 
 ## Spec Compliance (v0.1.25)
 
 | Requirement | Status |
 |-------------|--------|
-| 47 event types across 7 categories (incl. webhook lifecycle and budget.reset_spent) | PASS |
+| 51 event types across 7 categories (incl. tenant-cascade lifecycle additions) | PASS |
 | Enum serialization (lowercase) | PASS - ActorType, EventCategory, EventType |
 | Status fields use enums | PASS - DeliveryStatus, WebhookStatus (not string literals) |
 | Subscription model fields | PASS - all spec fields present |
@@ -649,11 +690,11 @@ Captured explicitly so a future reviewer doesn't re-litigate the gap analysis:
 
 ## Last Audited
 
-- **Date:** 2026-04-18
-- **Version:** 0.1.25.8
-- **Build:** PASS (201 unit tests, 95%+ coverage enforced)
-- **Integration test:** PASS (4 Testcontainers Redis tests — incl. end-to-end `traceparent_inbound_valid=true` trace-flags preservation)
-- **Total:** 205 tests
+- **Date:** 2026-07-15
+- **Version:** 0.1.25.25
+- **Build:** PASS (`mvn -B clean verify -Pintegration-tests`)
+- **Coverage:** 95.59% line / 80.08% branch; 95% / 80% gates enforced
+- **Total:** 471 tests (454 unit + 17 Docker-backed integration), zero failures
 
 ## Cross-Repo Spec Drift Notes (informational)
 

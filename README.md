@@ -8,13 +8,13 @@ Cycles Event Server is the asynchronous processing tier for the Cycles stack. It
 
 It currently runs two independent workers:
 
-1. **Webhook delivery** — consumes Cycles events and delivers them to subscriber endpoints using signed, at-least-once HTTP delivery. Deliveries include HMAC-SHA256 signatures, retry with exponential backoff, delivery-attempt tracking, automatic subscription disablement after repeated failures, and encrypted storage for webhook secrets and custom headers.
+1. **Webhook delivery** — consumes Cycles events and delivers them to subscriber endpoints using signed, at-least-once HTTP delivery. Deliveries include HMAC-SHA256 signatures, retry with exponential backoff, delivery-attempt tracking, automatic subscription disablement after repeated failures, decryption of webhook signing secrets, and forwarding of administrator-configured custom headers. Custom-header persistence is owned by the admin producer and is not encrypted by this worker.
 
-2. **CyclesEvidence signing** — consumes evidence source records emitted by `cycles-server`, builds a `cycles-evidence/v0.1` envelope, signs it with Ed25519, and stores the signed envelope by content address. `cycles-server` then serves the signed evidence at `GET /v1/evidence/{id}`. The evidence private signing key is isolated in this service; `cycles-server` does not need access to it. See [CyclesEvidence signing](#cyclesevidence-signing) and the [identity enablement runbook](docs/evidence-identity-enablement.md).
+2. **CyclesEvidence signing** — consumes evidence source records emitted by `cycles-server`, validates every nested request/response against the bundled authoritative v0.2 schema, builds a `cycles-evidence/v0.1` envelope, signs it with Ed25519, and stores its RFC 8785 canonical bytes by content address. `cycles-server` then serves the signed evidence at `GET /v1/evidence/{id}`. The evidence private signing key is isolated in this service; `cycles-server` does not need access to it. See [CyclesEvidence signing](#cyclesevidence-signing) and the [identity enablement runbook](docs/evidence-identity-enablement.md).
 
 The event server is not the runtime budget authority. It does not reserve, commit, release, or enforce budget. Its role is to turn Cycles state changes into durable, auditable delivery and identity artifacts: webhook deliveries, replayable event history, delivery diagnostics, trace-correlated records, and signed evidence envelopes.
 
-**Specs:** [`cycles-governance-admin-v0.1.25.yaml`](https://github.com/runcycles/cycles-protocol/blob/main/cycles-governance-admin-v0.1.25.yaml) for events, webhooks, delivery records, and replay · [`cycles-evidence-v0.1.yaml`](https://github.com/runcycles/cycles-protocol/blob/main/drafts/cycles-evidence-v0.1.yaml) for the evidence envelope.
+**Specs:** [`cycles-governance-admin-v0.1.25.yaml`](https://github.com/runcycles/cycles-protocol/blob/main/cycles-governance-admin-v0.1.25.yaml) for events, webhooks, delivery records, and replay · [`cycles-evidence-v0.2.yaml`](https://github.com/runcycles/cycles-protocol/blob/main/cycles-evidence-v0.2.yaml) for the evidence envelope and signer authority model. The compatible wire discriminator remains `cycles-evidence/v0.1`.
 
 ## Architecture
 
@@ -41,10 +41,11 @@ Redis ──BLMOVE──► cycles-server-events (DispatchLoop)
                     ├── On failure + retries left: exponential backoff → RETRYING
                     ├── On failure + retries exhausted: FAILED + increment consecutive failures
                     ├── Ack: LREM dispatch:processing only after state/retry is durable
-                    └── On consecutive failures >= threshold: subscription → DISABLED
+                     └── When consecutive failures exceed threshold: subscription → DISABLED
 ```
 
-Event sources (per spec `source` field): `cycles-admin`, `cycles-server`, `expiry-sweeper`, `anomaly-detector`
+Event sources (per spec `source` field): `cycles-admin`, `cycles-server`,
+`cycles-events`, `expiry-sweeper`, `anomaly-detector`
 
 ### Why a separate service?
 
@@ -57,20 +58,21 @@ Event sources (per spec `source` field): `cycles-admin`, `cycles-server`, `expir
 
 ## CyclesEvidence signing
 
-Alongside webhook delivery, this service is the **signing tier** for CyclesEvidence — tamper-evident, content-addressed audit envelopes for every budget decision (see the [concept docs](https://docs.runcycles.io/) and [cycles-evidence-v0.1.yaml](https://github.com/runcycles/cycles-protocol/blob/main/drafts/cycles-evidence-v0.1.yaml)).
+Alongside webhook delivery, this service is the **signing tier** for CyclesEvidence — tamper-evident, content-addressed audit envelopes for every budget decision (see the [concept docs](https://docs.runcycles.io/) and [cycles-evidence-v0.2.yaml](https://github.com/runcycles/cycles-protocol/blob/main/cycles-evidence-v0.2.yaml)).
 
 ```
 cycles-server (producer)                       cycles-server-events (signer)
   emits {decide|reserve|commit|release|error}     EvidenceWorker (reliable queue: BLMOVE)
-  source record + computes evidence_id ──LPUSH──►   ├── CyclesEvidenceEnvelopeBuilder: build cycles-evidence/v0.1
-  (returns cycles_evidence on the response)         ├── recompute evidence_id; CROSS-CHECK vs producer's
-                                                    │     stamped id → dead-letter on drift
+  source record + computes evidence_id ──LPUSH──►   ├── validate full nested payload against evidence v0.2
+  (returns cycles_evidence on the response)         ├── CyclesEvidenceEnvelopeBuilder: build cycles-evidence/v0.1
+                                                     ├── recompute evidence_id; CROSS-CHECK vs producer's
+                                                    │     stamped id → retain in-flight + pause on drift
                                           evidence:pending ├── EnvelopeSigner: Ed25519 sign (PRIVATE KEY lives here)
-                                                    └── EvidenceStore: SET evidence:envelope:<id>  ◄── cycles-server
+                                                     └── EvidenceStore: SET canonical evidence:envelope:<id> ◄── cycles-server
                                                                                                         serves GET /v1/evidence/{id}
 ```
 
-Why the signer is in this tier: the expensive work (JCS canonicalization + Ed25519 signing) is asynchronous and must not block a reservation, and the **private signing key** is isolated to this service — `cycles-server` only ever holds the public identity (it reproduces the `evidence_id` content hash synchronously, never signs). The worker recomputes the id and **dead-letters on mismatch**, so producer/worker config drift fails closed.
+Why the signer is in this tier: the expensive work (JCS canonicalization + Ed25519 signing) is asynchronous and must not block a reservation, and the **private signing key** is isolated to this service — `cycles-server` only ever holds the public identity (it reproduces the `evidence_id` content hash synchronously, never signs). The worker recomputes the id and, on mismatch, **retains the record in-flight and pauses new claims briefly**. This fails closed without destroying evidence while operators reconcile producer/worker identity.
 
 **Configure it:** the shared public identity (`EVIDENCE_SERVER_ID`, `EVIDENCE_SIGNING_SIGNER_DID`) plus this service's **private key** (`EVIDENCE_SIGNING_PRIVATE_KEY_HEX`) — full provisioning, coherence rules, and verification steps are in [`docs/evidence-identity-enablement.md`](docs/evidence-identity-enablement.md). If `EVIDENCE_SERVER_ID` is blank, the evidence signer is disabled and does not claim or dead-letter source records.
 
@@ -98,9 +100,18 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `REDIS_HOST` | localhost | Redis hostname |
 | `REDIS_PORT` | 6379 | Redis port |
 | `REDIS_PASSWORD` | (empty) | Redis password |
+| `REDIS_USERNAME` | (empty) | Redis ACL username |
+| `REDIS_TLS_ENABLED` | false | Enable TLS for Redis connections |
+| `REDIS_CONNECT_TIMEOUT_MS` / `REDIS_SOCKET_TIMEOUT_MS` | 2000 / 5000 | Positive Redis connection and non-blocking command timeouts |
+| `REDIS_BLOCKING_SOCKET_TIMEOUT_MS` | 10000 | Finite socket timeout for blocking Redis claims. Must exceed the longest configured BLMOVE timeout. |
 | `WEBHOOK_SECRET_ENCRYPTION_KEY` | (empty) | AES-256-GCM key for signing secret encryption (base64-encoded 32 bytes). If empty, secrets stored/read as plaintext (backward compatible). |
 | `dispatch.pending.timeout-seconds` | 5 | BLMOVE blocking timeout (seconds) |
 | `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | 120000 | Minimum age before an in-flight `dispatch:processing` delivery is considered stale and requeued. Keep above the max expected webhook HTTP + Redis write time. |
+| `DISPATCH_PROCESSING_RECOVERY_INTERVAL_MS` | 30000 | Periodic stale-processing recovery interval; prevents quick-restart orphans from remaining stranded |
+| `DISPATCH_ORDERING_LEASE_MS` | 120000 | Cross-replica claim/send lease that prevents simultaneous sends. Must exceed BLMOVE plus HTTP timeouts; retain margin for Redis state writes |
+| `DISPATCH_ORDERING_CONTENTION_BACKOFF_MS` | 500 | Bounded randomized delay after a global dispatch-lease miss; prevents idle replicas from hammering Redis. |
+| `DISPATCH_EVENT_OUTBOX_POLL_INTERVAL_MS` / `DISPATCH_EVENT_OUTBOX_BATCH_SIZE` | 1000 / 25 | Poll interval and bounded batch for durable dispatcher-generated meta-events. |
+| `DISPATCH_EVENT_OUTBOX_CLAIM_LEASE_MS` / `DISPATCH_EVENT_OUTBOX_RETRY_DELAY_MS` | 30000 / 5000 | Per-task publication lease and retry deferral for dispatcher meta-events. |
 | `dispatch.retry.poll-interval-ms` | 5000 | Retry queue poll interval (ms) |
 | `RETRY_BATCH_SIZE` | 100 | Max retries to requeue per poll cycle |
 | `dispatch.http.timeout-seconds` | 30 | HTTP request timeout for webhook delivery |
@@ -109,12 +120,18 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `EVENT_TTL_DAYS` | 90 | Redis TTL for `event:{id}` keys (days). Spec: "90 days hot." |
 | `DELIVERY_TTL_DAYS` | 14 | Redis TTL for `delivery:{id}` keys (days). |
 | `RETENTION_CLEANUP_INTERVAL_MS` | 3600000 | How often to trim expired ZSET index entries (ms). Default: 1 hour. |
+| `RETENTION_LOCK_LEASE_MS` | 300000 | Cross-replica retention-cleanup lease; keep above the expected cleanup duration |
 | `CYCLES_METRICS_TENANT_TAG_ENABLED` | false | Include tenant IDs as Prometheus metric labels. Keep false in production unless per-tenant drill-down is worth the cardinality. |
 | `JAVA_OPTS` | (empty) | Extra JVM options appended after image defaults by the Docker entrypoint. |
-| `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. Blank disables the evidence signer. When set, it **must be byte-identical to `cycles-server`'s** value (incl. the `/v1` base) or the worker's id cross-check dead-letters. See the [enablement runbook](docs/evidence-identity-enablement.md). |
+| `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. Blank disables the evidence signer. When set, it must be an absolute URI and **byte-identical to `cycles-server`'s** value (incl. the `/v1` base), or the worker retains the mismatched record in-flight and pauses new claims. See the [enablement runbook](docs/evidence-identity-enablement.md). |
 | `EVIDENCE_SIGNING_SIGNER_DID` | (empty) | Public Ed25519 key (64 hex), the public half of `EVIDENCE_SIGNING_PRIVATE_KEY_HEX`, **identical to `cycles-server`'s** value. |
 | `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | (empty) | **Secret** — Ed25519 seed (64 hex) this service signs with; lives **only** here. Required when `EVIDENCE_SERVER_ID` is set unless ephemeral dev mode is explicitly allowed; setting only one of the signing pair fails startup. |
 | `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY` | false | Development-only escape hatch. When `true` and evidence is enabled without a signing pair, generates an ephemeral key that will not verify across restarts. Keep `false` in production. |
+| `EVIDENCE_RECOVERY_IDLE_MS` / `EVIDENCE_RECOVERY_INTERVAL_MS` | 120000 / 30000 | Age threshold and polling interval for recovering evidence work orphaned in `evidence:processing` |
+| `EVIDENCE_RECOVERY_BATCH_SIZE` | 100 | Maximum processing records inspected per recovery pass |
+| `EVIDENCE_FAILED_MAX_LEN` | 10000 | Positive maximum length of the evidence poison-record DLQ |
+| `EVIDENCE_LOOP_DELAY_MS` / `EVIDENCE_QUEUE_FAILURE_BACKOFF_MS` | 25 / 1000 | Scheduler delay and Redis claim/ack outage backoff; prevents tight retry/log loops. |
+| `EVIDENCE_INFRASTRUCTURE_BACKOFF_MS` | 30000 | Claim pause after identity, signing, or store failures; limits in-flight growth during systemic outages. |
 
 ### Generating the encryption key
 
@@ -171,7 +188,7 @@ def verify(body: bytes, secret: str, signature: str) -> bool:
 | `X-Cycles-Signature` | `sha256=<hex>` | HMAC-SHA256 of body (if signing secret configured) |
 | `X-Cycles-Event-Id` | `evt_abc123...` | For deduplication (at-least-once delivery) |
 | `X-Cycles-Event-Type` | `budget.exhausted` | Event type for routing |
-| `User-Agent` | `cycles-server-events/0.1.25.22` | Service identifier |
+| `User-Agent` | `cycles-server-events/<build-version>` | Service identifier |
 | `X-Cycles-Trace-Id` | `<32-hex-lowercase>` | W3C trace-id (spec v0.1.25.27) — always present |
 | `traceparent` | `00-<trace-id>-<16-hex-span>-<flags>` | W3C Trace Context v00 — always present. `<flags>` preserves upstream sampling when `WebhookDelivery.traceparent_inbound_valid=true` (spec v0.1.25.28), else `01` |
 | `X-Request-Id` | `<request-id>` | Originating HTTP request id — present when `event.request_id` is populated |
@@ -203,7 +220,7 @@ PENDING ──HTTP 2xx──► SUCCESS (reset consecutive_failures)
                       │
                       └──max retries exceeded──► FAILED
                                                     │
-                                                    └──consecutive >= threshold──► subscription DISABLED
+                                                    └──consecutive > threshold──► subscription DISABLED
 ```
 
 ## Redis Keys (shared with cycles-server-admin)
@@ -218,10 +235,15 @@ PENDING ──HTTP 2xx──► SUCCESS (reset consecutive_failures)
 | `event:{id}` | STRING | Admin (SET) | Events (GET) | Event record JSON |
 | `webhook:{id}` | STRING | Admin (SET) | Events (GET/SET) | Subscription JSON |
 | `webhook:secret:{id}` | STRING | Admin (SET, encrypted) | Events (GET, decrypts) | AES-256-GCM encrypted signing secret |
+| `dispatcher:event-outbox:pending` | ZSET | Events terminal-state Lua | Events outbox publisher | Due dispatcher meta-event task IDs (score = next attempt time) |
+| `dispatcher:event-outbox:task:{id}` | STRING | Events terminal-state Lua | Events outbox publisher | Durable `webhook.disabled` or `system.webhook_delivery_failed` publication task |
+| `dispatcher:event-outbox:lock:{id}` | STRING | Events outbox publisher | Events outbox publisher | Short owner-token publication lease; removed on ack or expiry |
 
 ### Concurrent safety
 
-Multiple events service instances can safely claim from the same `dispatch:pending` list. Each claim atomically moves one delivery ID to `dispatch:processing`; the worker removes it from processing only after delivery, subscription, and retry state is durable. Recovery is age-gated: only entries that remain in `dispatch:processing` longer than `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` are moved back to pending, so rolling deploys do not requeue another live replica's active delivery.
+Multiple events service instances can safely share `dispatch:pending`. A short Redis lease serializes claim/send sections across replicas, preventing simultaneous sends while preserving FIFO order for initial claims. Delayed retries can still complete after later events, as expected for at-least-once delivery with backoff. Each claim atomically moves one delivery ID to `dispatch:processing`, and the worker removes it only after delivery, subscription, and retry state is durable. Recovery is age-gated and periodic: only entries older than `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` are moved back to pending, so rolling deploys do not steal active work and a quick-restart orphan is reconsidered without another restart.
+
+Final retry exhaustion uses one Redis transaction to persist the failed delivery, increment/disable the subscription, and stage both required dispatcher meta-events. A background publisher uses deterministic event IDs and per-task leases, so a crash or Redis error can replay safely without losing or multiplying the logical event. Meta-events are persisted for observation but are not recursively fanned out as webhook deliveries.
 
 ### TTL and retention
 
@@ -234,6 +256,7 @@ Multiple events service instances can safely claim from the same `dispatch:pendi
 | `dispatch:pending` | Self-draining | Claimed by BLMOVE into `dispatch:processing` |
 | `dispatch:processing` | Self-draining | Acked by LREM; stale entries recovered to pending after the idle window |
 | `dispatch:retry` | Self-draining | Entries move to pending when ready |
+| `dispatcher:event-outbox:*` | Self-draining | Deterministic tasks remain until their event record is durably saved and acknowledged |
 
 ### Resilience: events service down
 
@@ -257,17 +280,17 @@ Admin-initiated updates record `actor_type=admin_on_behalf_of` in audit metadata
 
 **No functional impact on this service** — `cycles-server-events` reads subscriptions from Redis directly and does not call those admin HTTP endpoints. Noted here for observability and ops awareness.
 
-## Event Types (47)
+## Event Types (51)
 
 | Category | Count | Types |
 |----------|-------|-------|
-| `budget` | 16 | created, updated, funded, debited, reset, **reset_spent**, debt_repaid, frozen, unfrozen, closed, threshold_crossed, exhausted, over_limit_entered, over_limit_exited, debt_incurred, burn_rate_anomaly |
-| `reservation` | 5 | denied, denial_rate_spike, expired, expiry_rate_spike, commit_overage |
+| `budget` | 17 | created, updated, funded, debited, reset, **reset_spent**, debt_repaid, frozen, unfrozen, closed, **closed_via_tenant_cascade**, threshold_crossed, exhausted, over_limit_entered, over_limit_exited, debt_incurred, burn_rate_anomaly |
+| `reservation` | 6 | denied, denial_rate_spike, expired, expiry_rate_spike, commit_overage, **released_via_tenant_cascade** |
 | `tenant` | 6 | created, updated, suspended, reactivated, closed, settings_changed |
-| `api_key` | 6 | created, revoked, expired, permissions_changed, auth_failed, auth_failure_rate_spike |
+| `api_key` | 7 | created, revoked, **revoked_via_tenant_cascade**, expired, permissions_changed, auth_failed, auth_failure_rate_spike |
 | `policy` | 3 | created, updated, deleted |
 | `system` | 5 | store_connection_lost, store_connection_restored, high_latency, webhook_delivery_failed, webhook_test |
-| `webhook` | 6 | created, updated, paused, resumed, deleted, disabled |
+| `webhook` | 7 | created, updated, paused, resumed, deleted, disabled, **disabled_via_tenant_cascade** |
 
 `budget.reset_spent` (v0.1.25.6, admin-spec v0.1.25.18) is emitted for billing-period rollovers and is distinct from `budget.reset` (which is a ceiling resize that preserves spent). Consumers can route these separately. The payload's `spent_override_provided` flag indicates whether `spent` was explicitly supplied (migration / proration / correction) vs defaulted to 0 (routine rollover).
 
@@ -306,7 +329,7 @@ scrape_configs:
 
 Override the management port via the `MANAGEMENT_PORT` env var if 9980 collides.
 
-In addition to Spring Boot's auto-emitted `http_server_requests_seconds` (which covers the actuator endpoints, not the outbound webhook traffic), this service exposes eight domain-level meters under the `cycles_webhook_*` namespace — seven counters plus one latency timer. Operators can alert on fleet-wide failure rates, stale-delivery backlogs, subscription auto-disables, and payload-validator warnings without grepping logs.
+In addition to Spring Boot's auto-emitted `http_server_requests_seconds`, the service exposes webhook delivery meters under `cycles_webhook_*` and evidence lifecycle counters under `cycles_evidence_*`. Operators can alert on delivery failures, stale backlogs, subscription auto-disables, invalid payloads, evidence DLQ growth, and infrastructure-deferred evidence retries without grepping logs.
 
 Full metric inventory, tag semantics, ready-to-paste Prometheus alert rules, SLO definitions, dashboard queries, and an incident playbook live in [`OPERATIONS.md`](OPERATIONS.md).
 
@@ -339,10 +362,11 @@ The webhook POST body is the full event JSON. Null fields are omitted.
 ## Build & Test
 
 ```bash
-# Build and run unit tests (293 unit tests, 95%+ line coverage enforced by JaCoCo)
-mvn verify
+# Run the fast unit suite (454 tests in the current suite)
+mvn test
 
-# Run all tests including integration (requires Docker for Testcontainers Redis)
+# Run all 471 tests including integration; enforces 95% line / 80% branch coverage
+# (requires Docker for Testcontainers Redis)
 mvn verify -Pintegration-tests
 
 # Run

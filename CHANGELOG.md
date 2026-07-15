@@ -20,6 +20,54 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [0.1.25.25] — 2026-07-15
+
+### Fixed
+
+- Periodic, age-gated webhook and evidence recovery prevents quick-restart
+  orphans while avoiding active work owned by another replica.
+- Subscription failure increments and ACTIVE/PAUSED auto-disable transitions are
+  atomic and follow the spec's "exceeds threshold" rule. Required disable events
+  are staged once per transition and published idempotently under concurrency.
+- Evidence store outages now retain work for retry instead of dead-lettering
+  transient failures. Poison-record DLQ movement is atomic.
+- Producer/worker evidence identity drift retains the source in-flight and
+  briefly pauses new claims instead of draining recoverable records into the DLQ.
+- Evidence payloads and completed envelopes are validated against the bundled
+  authoritative `cycles-evidence-v0.2` OpenAPI 3.1 / JSON Schema 2020-12
+  components before storage, including nested mirror and cross-field rules.
+- Persisted evidence is RFC 8785 JCS-canonical, matching the bytes expected at
+  the evidence fetch endpoint.
+- Terminal delivery state records the final attempt and clears obsolete retry
+  and error fields.
+- Missing webhook signing secrets fail closed before HTTP delivery.
+- Recovered `RETRYING` deliveries restore their Redis retry schedule when the
+  backoff has not elapsed, closing the persist-before-ZSET crash window without
+  sending early.
+
+### Changed
+
+- Cross-replica claim/send and retention-maintenance leases prevent simultaneous
+  sends and duplicate cleanup work. Retry backoff retains at-least-once semantics
+  and can still complete an earlier event after a later event.
+- Retry promotion is a single bounded Redis Lua operation.
+- Redis supports ACL usernames, TLS, and validated connection timeouts.
+- Blocking Redis claims now have a finite socket timeout; ordering-lease
+  contention uses randomized backoff rather than tight scheduler polling.
+- Terminal delivery state and both required dispatcher meta-events are staged in
+  one Redis transaction. A leased durable outbox publishes deterministic event
+  IDs and retries safely after crashes or Redis failures.
+- RFC 8785 canonicalization rejects numbers that binary64 would round, preventing
+  silent mathematical changes in signed evidence.
+- Webhook CIDR configuration uses a strict literal-only parser and rejects
+  malformed prefixes, extra path segments, hostnames, and IPv6 zone identifiers.
+- Evidence lifecycle metrics now constrain `artifact_type` to the five-value
+  protocol vocabulary, and malformed source JSON is logged without payload
+  excerpts.
+- Evidence claim scheduling now backs off on Redis, identity, signing, and store
+  failures, preventing tight reconnect/log loops and rapid in-flight growth.
+- CI now makes the real-Redis profile and 95% line / 80% branch gates blocking.
+
 ## [0.1.25.23] — 2026-07-11
 
 ### Security

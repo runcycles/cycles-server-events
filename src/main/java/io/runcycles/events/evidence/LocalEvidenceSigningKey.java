@@ -11,6 +11,7 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.Locale;
 
 /**
  * Config-backed {@link EvidenceSigningKey} — holds the server's Ed25519 signing
@@ -102,7 +103,7 @@ public class LocalEvidenceSigningKey implements EvidenceSigningKey {
         if (!ok) {
             throw new IllegalStateException(name + " must be 64 hex characters (a 32-byte Ed25519 key)");
         }
-        return value;
+        return value.toLowerCase(Locale.ROOT);
     }
 
     private static boolean isHexDigit(int c) {

@@ -42,6 +42,17 @@ class LocalEvidenceSigningKeyTest {
     }
 
     @Test
+    void normalizesConfiguredHexToLowercaseWireIdentity() {
+        KeyHex kp = freshKeyPair();
+        LocalEvidenceSigningKey key = new LocalEvidenceSigningKey(
+                signer, kp.priv().toUpperCase(java.util.Locale.ROOT),
+                kp.pub().toUpperCase(java.util.Locale.ROOT), false);
+
+        assertThat(key.signerDid()).isEqualTo(kp.pub());
+        assertThat(key.signerDid()).matches("[0-9a-f]{64}");
+    }
+
+    @Test
     void rejectsMismatchedPair() {
         String priv = freshKeyPair().priv();
         String unrelatedDid = freshKeyPair().pub();

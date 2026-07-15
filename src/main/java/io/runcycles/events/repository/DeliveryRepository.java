@@ -9,12 +9,16 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Repository;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
-import redis.clients.jedis.params.SetParams;
 
 @Repository
 public class DeliveryRepository {
 
     private static final Logger LOG = LoggerFactory.getLogger(DeliveryRepository.class);
+    private static final String UPDATE_EXISTING_LUA = """
+            if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+            redis.call('SET', KEYS[1], ARGV[1], 'KEEPTTL')
+            return 1
+            """;
 
     private final JedisPool jedisPool;
     private final ObjectMapper objectMapper;
@@ -39,11 +43,11 @@ public class DeliveryRepository {
         try (Jedis jedis = jedisPool.getResource()) {
             String json = objectMapper.writeValueAsString(delivery);
             String key = "delivery:" + delivery.getDeliveryId();
-            long ttl = jedis.ttl(key);
-            if (ttl > 0) {
-                jedis.set(key, json, SetParams.setParams().ex(ttl));
-            } else {
-                jedis.set(key, json);
+            Object updated = jedis.eval(UPDATE_EXISTING_LUA,
+                    java.util.List.of(key), java.util.List.of(json));
+            if (!Long.valueOf(1L).equals(updated)) {
+                LOG.warn("Webhook delivery disappeared before update; refusing to resurrect it: delivery_id={} status={}",
+                        safe(delivery.getDeliveryId()), delivery.getStatus());
             }
         } catch (Exception e) {
             LOG.error("Failed to update webhook delivery: delivery_id={} event_id={} event_type={} subscription_id={} status={} attempts={} trace_id={}",
@@ -58,4 +62,5 @@ public class DeliveryRepository {
             throw new IllegalStateException("Failed to update webhook delivery", e);
         }
     }
+
 }

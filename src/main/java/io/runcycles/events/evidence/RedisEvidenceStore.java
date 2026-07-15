@@ -5,6 +5,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.params.SetParams;
 
 /**
  * Default {@link EvidenceStore}: persists envelopes in the shared Redis at
@@ -28,16 +29,25 @@ public class RedisEvidenceStore implements EvidenceStore {
             @Value("${cycles.evidence.store.key-prefix:evidence:envelope:}") String keyPrefix,
             @Value("${cycles.evidence.store.ttl-seconds:0}") long ttlSeconds) {
         this.jedisPool = jedisPool;
+        if (keyPrefix == null || keyPrefix.isBlank()) {
+            throw new IllegalArgumentException("evidence store key prefix must not be blank");
+        }
+        if (ttlSeconds < 0) {
+            throw new IllegalArgumentException("evidence store TTL must not be negative");
+        }
         this.keyPrefix = keyPrefix;
         this.ttlSeconds = ttlSeconds;
     }
 
     @Override
     public void put(String evidenceId, String envelopeJson) {
+        if (evidenceId == null || evidenceId.isBlank() || envelopeJson == null) {
+            throw new IllegalArgumentException("evidence id and envelope JSON are required");
+        }
         String key = keyPrefix + evidenceId;
         try (Jedis jedis = jedisPool.getResource()) {
             if (ttlSeconds > 0) {
-                jedis.setex(key, ttlSeconds, envelopeJson);
+                jedis.set(key, envelopeJson, SetParams.setParams().ex(ttlSeconds));
             } else {
                 jedis.set(key, envelopeJson);
             }

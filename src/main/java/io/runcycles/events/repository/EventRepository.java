@@ -3,6 +3,7 @@ package io.runcycles.events.repository;
 import static io.runcycles.events.logging.LogSanitizer.safe;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.runcycles.events.model.DispatcherEventTask;
 import io.runcycles.events.model.Event;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,6 +21,25 @@ import java.util.UUID;
 public class EventRepository {
 
     private static final Logger LOG = LoggerFactory.getLogger(EventRepository.class);
+
+    public static final String DISPATCHER_OUTBOX_PENDING_KEY = "dispatcher:event-outbox:pending";
+    private static final String DISPATCHER_OUTBOX_TASK_PREFIX = "dispatcher:event-outbox:task:";
+    private static final String DISPATCHER_OUTBOX_LOCK_PREFIX = "dispatcher:event-outbox:lock:";
+
+    private static final String ACK_CLAIMED_OUTBOX_TASK_LUA = """
+            if redis.call('GET', KEYS[3]) ~= ARGV[2] then return 0 end
+            redis.call('ZREM', KEYS[1], ARGV[1])
+            redis.call('DEL', KEYS[2])
+            redis.call('DEL', KEYS[3])
+            return 1
+            """;
+
+    private static final String RELEASE_OUTBOX_LOCK_LUA = """
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+              return redis.call('DEL', KEYS[1])
+            end
+            return 0
+            """;
 
     // Mirrors admin-side cycles-server-admin EventRepository.SAVE_EVENT_LUA so
     // dispatcher-emitted events land in the same Redis shape the admin plane
@@ -79,6 +99,79 @@ public class EventRepository {
                     safe(event != null ? event.getTraceId() : null),
                     e);
             throw new RuntimeException("Failed to save event", e);
+        }
+    }
+
+    /** Stable Redis key used by state-transition Lua scripts to stage a task. */
+    public static String dispatcherOutboxTaskKey(String taskId) {
+        return DISPATCHER_OUTBOX_TASK_PREFIX + taskId;
+    }
+
+    /** Remove a task after an inline idempotent publish completed. */
+    public boolean ackDispatcherEvent(String taskId) {
+        try (Jedis jedis = jedisPool.getResource()) {
+            Object result = jedis.eval("""
+                    local pending = redis.call('ZREM', KEYS[1], ARGV[1])
+                    local task = redis.call('DEL', KEYS[2])
+                    if pending > 0 or task > 0 then return 1 end
+                    return 0
+                    """, List.of(DISPATCHER_OUTBOX_PENDING_KEY, dispatcherOutboxTaskKey(taskId)),
+                    List.of(taskId));
+            return Long.valueOf(1L).equals(result);
+        }
+    }
+
+    /** Find due task ids without removing them; a per-task lease controls ownership. */
+    public List<String> findDueDispatcherEvents(long nowMillis, int limit) {
+        if (limit <= 0) return List.of();
+        try (Jedis jedis = jedisPool.getResource()) {
+            return jedis.zrangeByScore(DISPATCHER_OUTBOX_PENDING_KEY,
+                    Double.NEGATIVE_INFINITY, nowMillis, 0, limit);
+        }
+    }
+
+    public boolean tryClaimDispatcherEvent(String taskId, String owner, long leaseMillis) {
+        if (taskId == null || taskId.isBlank() || owner == null || owner.isBlank() || leaseMillis <= 0) {
+            throw new IllegalArgumentException("outbox task id, owner, and positive lease are required");
+        }
+        try (Jedis jedis = jedisPool.getResource()) {
+            String claimed = jedis.set(DISPATCHER_OUTBOX_LOCK_PREFIX + taskId, owner,
+                    redis.clients.jedis.params.SetParams.setParams().nx().px(leaseMillis));
+            return "OK".equals(claimed);
+        }
+    }
+
+    public DispatcherEventTask findDispatcherEventTask(String taskId) {
+        try (Jedis jedis = jedisPool.getResource()) {
+            String json = jedis.get(dispatcherOutboxTaskKey(taskId));
+            if (json == null) return null;
+            return objectMapper.readValue(json, DispatcherEventTask.class);
+        } catch (Exception e) {
+            LOG.error("Failed to read dispatcher event outbox task: task_id={}", safe(taskId), e);
+            throw new IllegalStateException("Failed to read dispatcher event outbox task", e);
+        }
+    }
+
+    public void deferDispatcherEvent(String taskId, long nextAttemptAtMillis) {
+        try (Jedis jedis = jedisPool.getResource()) {
+            jedis.zadd(DISPATCHER_OUTBOX_PENDING_KEY, nextAttemptAtMillis, taskId);
+        }
+    }
+
+    public boolean ackClaimedDispatcherEvent(String taskId, String owner) {
+        try (Jedis jedis = jedisPool.getResource()) {
+            Object result = jedis.eval(ACK_CLAIMED_OUTBOX_TASK_LUA,
+                    List.of(DISPATCHER_OUTBOX_PENDING_KEY, dispatcherOutboxTaskKey(taskId),
+                            DISPATCHER_OUTBOX_LOCK_PREFIX + taskId),
+                    List.of(taskId, owner));
+            return Long.valueOf(1L).equals(result);
+        }
+    }
+
+    public void releaseDispatcherEventClaim(String taskId, String owner) {
+        try (Jedis jedis = jedisPool.getResource()) {
+            jedis.eval(RELEASE_OUTBOX_LOCK_LUA,
+                    List.of(DISPATCHER_OUTBOX_LOCK_PREFIX + taskId), List.of(owner));
         }
     }
 

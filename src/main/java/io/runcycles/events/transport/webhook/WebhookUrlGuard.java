@@ -13,9 +13,9 @@ import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.UnknownHostException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 /**
  * Delivery-time SSRF guard. Re-validates the subscription URL against the
@@ -36,11 +36,10 @@ import java.util.stream.Collectors;
  *       existed.</li>
  * </ul>
  *
- * <p>Validation semantics are a line-for-line port of the admin plane's
- * {@code WebhookUrlValidator} (same config key, same defaults, same CIDR
- * matching incl. IPv4-mapped IPv6, same glob dialect for
- * {@code allowed_url_patterns}) so a URL admitted by admin at create time
- * is admitted here under the same config — the two ends cannot disagree.
+ * <p>Wire-policy semantics follow the admin plane's {@code WebhookUrlValidator}
+ * (same config key, CIDR matching incl. IPv4-mapped IPv6, and glob dialect).
+ * This delivery-side parser is deliberately stricter for malformed CIDRs:
+ * an indeterminate blocklist is rejected rather than partially ignored.
  *
  * <p>Returns a violation reason string, or {@code null} when the URL is
  * allowed. Unresolvable hosts are treated as violations when CIDR ranges
@@ -73,10 +72,13 @@ public class WebhookUrlGuard {
             return "Malformed URL";
         }
         WebhookSecurityConfig config = configRepository.get();
-        if (!Boolean.TRUE.equals(config.getAllowHttp()) && !"https".equals(uri.getScheme())) {
+        String scheme = uri.getScheme();
+        boolean isHttps = "https".equalsIgnoreCase(scheme);
+        boolean isHttp = "http".equalsIgnoreCase(scheme);
+        if (!Boolean.TRUE.equals(config.getAllowHttp()) && !isHttps) {
             return "HTTPS required";
         }
-        if (!"https".equals(uri.getScheme()) && !"http".equals(uri.getScheme())) {
+        if (!isHttps && !isHttp) {
             return "Only HTTP(S) URLs are allowed";
         }
         String host = uri.getHost();
@@ -112,11 +114,20 @@ public class WebhookUrlGuard {
         if (cidrStrings == null || cidrStrings.isEmpty()) {
             return List.of();
         }
-        return cidrStrings.stream()
-            .filter(s -> s != null)
-            .map(CidrRange::parse)
-            .filter(r -> r != null)
-            .collect(Collectors.toList());
+        List<CidrRange> ranges = new ArrayList<>(cidrStrings.size());
+        for (String cidr : cidrStrings) {
+            if (cidr == null || cidr.isBlank()) {
+                throw new IllegalStateException("blocked_cidr_ranges contains a blank entry");
+            }
+            CidrRange parsed = CidrRange.parse(cidr);
+            if (parsed == null) {
+                // A malformed blocklist is an indeterminate security policy,
+                // never permission to silently ignore part of the policy.
+                throw new IllegalStateException("blocked_cidr_ranges contains invalid CIDR: " + safe(cidr));
+            }
+            ranges.add(parsed);
+        }
+        return ranges;
     }
 
     static class CidrRange {
@@ -132,21 +143,55 @@ public class WebhookUrlGuard {
 
         static CidrRange parse(String cidr) {
             try {
-                String[] parts = cidr.split("/");
-                InetAddress addr = InetAddress.getByName(parts[0]);
+                String[] parts = cidr.split("/", -1);
+                if (parts.length < 1 || parts.length > 2 || parts[0].isBlank()
+                        || (parts.length == 2 && parts[1].isBlank())) {
+                    return null;
+                }
+                InetAddress addr = parseAddressLiteral(parts[0]);
                 int maxPrefix = addr.getAddress().length * 8;
+                if (parts.length == 2 && !parts[1].chars().allMatch(Character::isDigit)) {
+                    return null;
+                }
                 int prefix = parts.length > 1 ? Integer.parseInt(parts[1]) : maxPrefix;
                 if (prefix < 0 || prefix > maxPrefix) {
-                    LOG.warn("Invalid webhook CIDR config skipped: config_field=blocked_cidr_ranges cidr={} prefix_length={} max_prefix_length={}",
+                    LOG.warn("Invalid webhook CIDR config rejected: config_field=blocked_cidr_ranges cidr={} prefix_length={} max_prefix_length={}",
                         safe(cidr), prefix, maxPrefix);
                     return null;
                 }
                 return new CidrRange(addr.getAddress(), prefix, addr instanceof Inet4Address);
             } catch (Exception e) {
-                LOG.warn("Invalid webhook CIDR config skipped: config_field=blocked_cidr_ranges cidr={} exception_class={} error={}",
+                LOG.warn("Invalid webhook CIDR config rejected: config_field=blocked_cidr_ranges cidr={} exception_class={} error={}",
                     safe(cidr), e.getClass().getSimpleName(), safe(e.getMessage()));
                 return null;
             }
+        }
+
+        private static InetAddress parseAddressLiteral(String value) throws UnknownHostException {
+            if (value.indexOf(':') >= 0) {
+                // A colon distinguishes an IPv6 literal from a DNS hostname.
+                // Zone identifiers are inappropriate in a portable CIDR policy.
+                if (value.indexOf('%') >= 0 || !value.matches("[0-9A-Fa-f:.]+")) {
+                    throw new UnknownHostException("not an IPv6 address literal");
+                }
+                return InetAddress.getByName(value);
+            }
+            String[] octets = value.split("\\.", -1);
+            if (octets.length != 4) {
+                throw new UnknownHostException("not an IP address literal");
+            }
+            byte[] bytes = new byte[4];
+            for (int i = 0; i < octets.length; i++) {
+                if (octets[i].isEmpty() || !octets[i].chars().allMatch(Character::isDigit)) {
+                    throw new UnknownHostException("not an IPv4 address literal");
+                }
+                int parsed = Integer.parseInt(octets[i]);
+                if (parsed < 0 || parsed > 255) {
+                    throw new UnknownHostException("IPv4 octet out of range");
+                }
+                bytes[i] = (byte) parsed;
+            }
+            return InetAddress.getByAddress(bytes);
         }
 
         boolean contains(InetAddress address) {

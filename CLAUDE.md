@@ -44,6 +44,6 @@ If empty/unset, signing secrets are stored and read as plaintext (backward compa
 
 ## Test Coverage
 
-205 tests (201 unit + 4 integration), 95%+ line coverage enforced via JaCoCo.
+CI runs both the fast unit suite and the Docker-backed `integration-tests` profile. JaCoCo enforces 95%+ line and 80%+ branch coverage.
 
 See [`AUDIT.md`](AUDIT.md) for the full source-file → test-class inventory.

@@ -70,7 +70,8 @@ class RecoveredDeliveryBoundaryTest {
         handler = new DeliveryHandler(deliveryRepository, eventRepository,
                 subscriptionRepository, queueRepository, transport, metrics, validator,
                 urlGuard, 86400000L);
-        dispatchLoop = new DispatchLoop(queueRepository, handler, 5);
+        dispatchLoop = new DispatchLoop(queueRepository, handler, 5, 120_000L, 30, 500);
+        when(queueRepository.tryAcquireOrderingLock(anyString(), anyLong())).thenReturn(true);
         recovery = new DispatchRecovery(queueRepository, 120000L);
     }
 
