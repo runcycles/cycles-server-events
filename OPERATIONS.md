@@ -74,6 +74,8 @@ The `tenant` tag listed here is emitted only when
 | `cycles_webhook_delivery_latency_seconds` | `tenant`, `event_type`, `outcome` | End-to-end outbound HTTP latency. `outcome=success`/`failure`. Only recorded when a transport round-trip actually occurred (upstream failures like `event_not_found` have no meaningful latency and are skipped). |
 | `cycles_webhook_dispatcher_event_published_total` | `event_type` | Durable dispatcher meta-event task published and acknowledged. Event types are bounded to `webhook.disabled` and `system.webhook_delivery_failed`. |
 | `cycles_webhook_dispatcher_event_deferred_total` | `event_type`, `reason` | Meta-event publication retained for retry after `inline_publish_failure`, `publish_failure`, `scan_failure`, or `claim_failure`. |
+| `cycles_webhook_dispatcher_event_dead_lettered_total` | `event_type`, `reason` | A repeatedly unpublishable meta-event task exhausted its bounded retry budget and moved to `dispatcher:event-outbox:failed`. Any increase requires operator inspection. |
+| `cycles_webhook_security_config_indeterminate_total` | none | Delivery-time SSRF policy could not be parsed or loaded. The delivery is retained for recovery; a sustained increase can stop all webhook sends. |
 
 ### Event payload validation
 
@@ -102,7 +104,9 @@ Tag values on the `reason` label of `cycles_webhook_delivery_failed_total`:
   `subscription_not_found` (Redis `webhook:{id}` is missing),
   `subscription_inactive` (subscription status is `PAUSED` or `DISABLED`),
   `ssrf_blocked` (the current delivery target violates webhook egress policy),
-  or `missing_signing_secret` (delivery was refused rather than sent unsigned).
+  or `missing_signing_secret` (delivery was retained for recovery rather than
+  sent unsigned; a persistent secret/configuration gap eventually reaches the
+  normal stale-delivery age gate).
 
 Stale deliveries (age > `MAX_DELIVERY_AGE_MS`) increment only
 `cycles_webhook_delivery_stale_total` — they do **not** double-count into
@@ -254,6 +258,31 @@ producer.
                   File against the producer (cycles-server-admin or cycles-server), not this service."
 ```
 
+### Security configuration and durable-outbox integrity
+
+A malformed `blocked_cidr_ranges` entry intentionally fails closed. Because the
+same configuration is evaluated for every target, one bad entry can pause the
+fleet until corrected. A poison dispatcher meta-event is bounded and moved to a
+DLQ instead of warning every five seconds forever.
+
+```yaml
+- alert: CyclesWebhookSecurityConfigIndeterminate
+  expr: increase(cycles_webhook_security_config_indeterminate_total[5m]) > 0
+  for: 1m
+  labels: {severity: page}
+  annotations:
+    summary: "webhook egress security configuration is unreadable"
+    description: "Inspect config:webhook-security, especially every blocked_cidr_ranges entry. Deliveries are retained, not sent."
+
+- alert: CyclesWebhookDispatcherEventDeadLettered
+  expr: increase(cycles_webhook_dispatcher_event_dead_lettered_total[15m]) > 0
+  for: 1m
+  labels: {severity: ticket}
+  annotations:
+    summary: "dispatcher meta-event moved to its dead-letter queue"
+    description: "Inspect LRANGE dispatcher:event-outbox:failed 0 10 and correct the malformed or persistently unpublishable task before replay."
+```
+
 ### Redis connectivity (infers from missing traffic)
 
 The dispatcher claims with BLMOVE; when Redis is unavailable, attempts go to
@@ -367,6 +396,8 @@ sum by (type, rule) (rate(cycles_webhook_events_payload_invalid_total[5m]))
 redis_list_length{key="dispatch:pending"}
 redis_list_length{key="dispatch:processing"}
 redis_zset_length{key="dispatch:retry"}
+redis_zset_length{key="dispatcher:event-outbox:pending"}
+redis_list_length{key="dispatcher:event-outbox:failed"}
 ```
 
 A `redis_exporter` instance scraping the same Redis your dispatcher talks
@@ -435,10 +466,39 @@ climb in `cycles_webhook_delivery_attempts_total`.
    `cycles_webhook_delivery_latency_seconds_sum` rate. A tenant with a
    slow endpoint can hold a dispatcher thread for the full HTTP timeout
    (default 30s).
-4. Remediation: scale dispatcher instances horizontally (BLMOVE claim + ack
-   is atomic; N instances safely parallelise), or lower
-   `dispatch.http.timeout-seconds` so one slow subscriber doesn't block
-   the queue.
+4. The global `dispatch:ordering:lock` deliberately permits only one claim/send
+   section fleet-wide. At the 30-second HTTP timeout the worst-case ceiling is
+   roughly two webhook deliveries per minute, and adding replicas improves
+   failover only. Lower `dispatch.http.timeout-seconds`, repair the slow target,
+   or raise `MAX_DELIVERY_AGE_MS` while draining an accepted backlog. Parallel
+   delivery requires a future per-subscription/tenant ordering design; do not
+   remove the global lock ad hoc.
+
+### Symptom: security policy is indeterminate
+
+`cycles_webhook_security_config_indeterminate_total` is increasing and delivery
+attempts have stopped.
+
+1. Read `GET config:webhook-security` and validate every
+   `blocked_cidr_ranges` value as a literal IPv4/IPv6 CIDR. Blank values,
+   hostnames, zone identifiers, and malformed prefixes are rejected.
+2. Correct the config through the admin plane. Do not delete the key merely to
+   bypass validation unless accepting the documented hardened fallback is an
+   explicit incident decision.
+3. No delivery replay is normally needed: affected records remain in
+   `dispatch:processing` and return to pending after the recovery idle window.
+
+### Symptom: dispatcher meta-event in the DLQ
+
+1. Inspect `LRANGE dispatcher:event-outbox:failed 0 10`. Each entry is a JSON
+   wrapper containing `task_id` and the original serialized `payload` (empty if
+   the payload had already disappeared).
+2. Fix the serialization or Redis event-save failure. The default retry budget
+   is 100 attempts and the DLQ retains the newest 10000 entries.
+3. Replay a repaired task by restoring
+   `dispatcher:event-outbox:task:{task_id}` and `ZADD`ing its ID to
+   `dispatcher:event-outbox:pending`; deterministic event IDs make replay
+   idempotent. Remove the DLQ copy only after the published counter increments.
 
 ### Symptom: a specific subscription was auto-disabled
 
@@ -507,18 +567,20 @@ don't fit.
 
 | Property / Env Var | Default | When to change |
 |---|---|---|
-| `REDIS_HOST`, `REDIS_PORT`, `REDIS_USERNAME`, `REDIS_PASSWORD` | `localhost`, `6379`, (empty), (empty) | Always set for production; use a least-privilege ACL identity. |
+| `REDIS_HOST`, `REDIS_PORT`, `REDIS_USERNAME`, `REDIS_PASSWORD` | `localhost`, `6379`, (empty), (empty) | Always set for production; use a least-privilege ACL identity. Jedis sets client name `cycles-server-events`, so the ACL must include `+client|setname`. |
 | `REDIS_TLS_ENABLED` | `false` | Enable for off-host production Redis. JVM trust configuration must trust the Redis certificate. |
 | `REDIS_CONNECT_TIMEOUT_MS` / `REDIS_SOCKET_TIMEOUT_MS` / `REDIS_BLOCKING_SOCKET_TIMEOUT_MS` | `2000` / `5000` / `10000` | Connection, ordinary-command, and blocking-command socket bounds. The blocking timeout must exceed every BLMOVE command timeout so an unavailable peer cannot pin a scheduler thread forever. |
 | `WEBHOOK_SECRET_ENCRYPTION_KEY` | (empty) | Set to a base64-encoded 32-byte key to enable AES-256-GCM for webhook signing secrets at rest. Must match the key configured in `cycles-server-admin`. If empty, secrets are stored/read as plaintext (backward-compatible, not recommended for production). |
 | `dispatch.http.timeout-seconds` | `30` | Lower if one slow subscriber is blocking the queue and you can tolerate more retries. Raise if you have legitimately slow subscribers that need more time. |
 | `dispatch.http.connect-timeout-seconds` | `5` | Rarely needs tuning. Lower if your egress is fast and you want to fail faster on unreachable DNS. |
-| `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | `120000` | Minimum age before an in-flight delivery in `dispatch:processing` is considered stale and requeued. Keep above the max expected webhook HTTP timeout plus Redis write time. |
+| `DISPATCH_LOOP_DELAY_MS` | `25` | Pause after each dispatch invocation. This is not the empty-queue wait; BLMOVE can block for `dispatch.pending.timeout-seconds`. |
+| `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | `180000` | Minimum age before an in-flight delivery is requeued. It must be strictly greater than `DISPATCH_ORDERING_LEASE_MS`; startup rejects unsafe combinations. |
 | `DISPATCH_PROCESSING_RECOVERY_INTERVAL_MS` | `30000` | How often replicas recheck for stale in-flight deliveries. |
-| `DISPATCH_ORDERING_LEASE_MS` | `120000` | Cross-replica claim/send critical-section TTL that prevents simultaneous sends. It must exceed BLMOVE plus HTTP timeouts and should retain margin for Redis state writes; delayed retries may still finish after later events. |
+| `DISPATCH_ORDERING_LEASE_MS` | `120000` | Global claim/send critical-section TTL. It preserves initial-claim order but caps fleet throughput at one in-flight send; replicas are standby/failover. It must exceed BLMOVE plus HTTP and Redis state-write time. |
 | `DISPATCH_ORDERING_CONTENTION_BACKOFF_MS` | `500` | Randomized half-to-full backoff after a global ordering-lease miss or Redis error. Raise if idle replicas create noticeable lease traffic. |
 | `DISPATCH_EVENT_OUTBOX_POLL_INTERVAL_MS` / `DISPATCH_EVENT_OUTBOX_BATCH_SIZE` | `1000` / `25` | Poll cadence and maximum durable dispatcher meta-event tasks considered per pass. |
 | `DISPATCH_EVENT_OUTBOX_CLAIM_LEASE_MS` / `DISPATCH_EVENT_OUTBOX_RETRY_DELAY_MS` | `30000` / `5000` | Per-task owner lease and next-attempt delay. Keep the lease above normal Redis event-save latency. |
+| `DISPATCH_EVENT_OUTBOX_MAX_ATTEMPTS` / `DISPATCH_EVENT_OUTBOX_FAILED_MAX_LEN` | `100` / `10000` | Attempts before an unpublishable task moves to the bounded DLQ, and the number of newest DLQ payloads retained. |
 | `MAX_DELIVERY_AGE_MS` | `86400000` (24h) | Raise if you legitimately replay multi-day-old events. Lower (with caution) if you'd rather drop old deliveries than burden subscribers with stale data. |
 | `EVENT_TTL_DAYS` | `90` | Matches spec "90 days hot" recommendation. Lower only if Redis memory is tight. |
 | `DELIVERY_TTL_DAYS` | `14` | Two weeks of delivery history. Lower if Redis memory is tight; raise if compliance review needs a longer window. |
@@ -651,8 +713,10 @@ it to the sink. Operational notes:
 - **Dispatcher meta-event outbox.** Final webhook retry exhaustion atomically
   stages `system.webhook_delivery_failed` and, on the qualifying transition,
   `webhook.disabled`. Monitor `ZCARD dispatcher:event-outbox:pending` and the
-  two `cycles_webhook_dispatcher_event_*` metrics. Tasks use deterministic event
-  IDs, remain queued after publisher errors, and are safe to replay.
+  three `cycles_webhook_dispatcher_event_*` metrics. Tasks use deterministic
+  event IDs and are safe to replay. Publish failures retry up to
+  `DISPATCH_EVENT_OUTBOX_MAX_ATTEMPTS`, then move to the bounded
+  `dispatcher:event-outbox:failed` list for operator action.
 - **Scheduler pool.** `SCHEDULING_POOL_SIZE` (default 5) must stay >= the number
   of continuous blocking loops (`DispatchLoop`, plus `EvidenceWorker` when
   evidence is enabled) plus headroom for periodic tasks, or webhook retries and

@@ -204,6 +204,7 @@ public class DeliveryHandler {
         try {
             violation = urlGuard.check(sub.getUrl());
         } catch (RuntimeException configIndeterminate) {
+            metrics.recordSecurityConfigIndeterminate();
             LOG.warn("Webhook security config indeterminate; leaving delivery for retry: delivery_id={} event_id={} subscription_id={} tenant_id={} trace_id={}",
                     safe(delivery.getDeliveryId()), safe(delivery.getEventId()),
                     safe(sub.getSubscriptionId()), safe(sub.getTenantId()),
@@ -224,12 +225,11 @@ public class DeliveryHandler {
         if (secret == null || secret.isBlank()) {
             metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(),
                     REASON_MISSING_SIGNING_SECRET, 0);
-            markFailed(delivery, "Webhook signing secret is missing; refusing unsigned delivery");
-            LOG.error("Webhook delivery blocked because signing secret is missing: delivery_id={} event_id={} subscription_id={} tenant_id={} trace_id={}",
+            LOG.warn("Webhook delivery deferred because signing secret is not yet available: delivery_id={} event_id={} subscription_id={} tenant_id={} trace_id={}",
                     safe(delivery.getDeliveryId()), safe(delivery.getEventId()),
                     safe(sub.getSubscriptionId()), safe(sub.getTenantId()),
                     safe(effectiveTraceId(delivery, event)));
-            return;
+            throw new IllegalStateException("Webhook signing secret is not yet available");
         }
 
         delivery.setAttempts(delivery.getAttempts() != null ? delivery.getAttempts() + 1 : 1);
@@ -346,14 +346,13 @@ public class DeliveryHandler {
                 delivery.getNextRetryAt(), result.getLatencyMs(), safe(delivery.getTraceId()), safe(reason));
     }
 
-    private boolean markFailed(Delivery delivery, String errorMessage) {
+    private void markFailed(Delivery delivery, String errorMessage) {
         delivery.setStatus(DeliveryStatus.FAILED);
         delivery.setErrorMessage(errorMessage);
         delivery.setCompletedAt(Instant.now());
         delivery.setNextRetryAt(null);
         deliveryRepository.update(delivery);
         logPermanentFailure(delivery, errorMessage);
-        return true;
     }
 
     private void logPermanentFailure(Delivery delivery, String errorMessage) {

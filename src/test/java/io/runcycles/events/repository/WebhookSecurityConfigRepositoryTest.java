@@ -87,14 +87,15 @@ class WebhookSecurityConfigRepositoryTest {
     }
 
     @Test
-    void defaults_matchAdminPlaneDefaults() {
-        // The two ends must agree on the absent-config baseline, or a URL
-        // admitted at create time could be blocked at delivery time (or
-        // vice versa) with no config present.
+    void absentConfigUsesHardenedDeliveryDefaults() {
+        // Delivery is the final SSRF enforcement boundary. Its absent-config
+        // fallback includes special-use ranges beyond the historical admin
+        // defaults so an absent config cannot weaken egress policy.
         WebhookSecurityConfig config = WebhookSecurityConfig.builder().build();
         assertThat(config.getBlockedCidrRanges()).containsExactly(
-                "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-                "127.0.0.0/8", "169.254.0.0/16", "::1/128", "fc00::/7");
+                "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10",
+                "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8",
+                "169.254.0.0/16", "::1/128", "fe80::/10", "fc00::/7");
         assertThat(config.getAllowHttp()).isFalse();
     }
 

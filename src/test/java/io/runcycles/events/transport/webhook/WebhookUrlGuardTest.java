@@ -95,7 +95,9 @@ class WebhookUrlGuardTest {
 
     @Test
     void privateRanges_blockedByDefaults() {
+        assertThat(guard.check("https://0.0.0.1/hook")).startsWith("Resolves to blocked IP:");
         assertThat(guard.check("https://10.1.2.3/hook")).startsWith("Resolves to blocked IP:");
+        assertThat(guard.check("https://100.64.0.1/hook")).startsWith("Resolves to blocked IP:");
         assertThat(guard.check("https://192.168.1.1/hook")).startsWith("Resolves to blocked IP:");
         assertThat(guard.check("https://172.16.0.9/hook")).startsWith("Resolves to blocked IP:");
         assertThat(guard.check("https://169.254.169.254/latest/meta-data")).startsWith("Resolves to blocked IP:");
@@ -104,6 +106,12 @@ class WebhookUrlGuardTest {
     @Test
     void ipv6Loopback_blockedByDefaults() {
         assertThat(guard.check("https://[::1]/hook")).startsWith("Resolves to blocked IP:");
+        assertThat(guard.check("https://[fe80::1]/hook")).startsWith("Resolves to blocked IP:");
+    }
+
+    @Test
+    void decimalEncodedIpv4LoopbackIsBlocked() {
+        assertThat(guard.check("https://2130706433/hook")).startsWith("Resolves to blocked IP:");
     }
 
     @Test

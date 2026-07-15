@@ -1,5 +1,6 @@
 package io.runcycles.events.repository;
 
+import io.runcycles.events.repository.DeliveryQueueRepository.ClaimedDelivery;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -37,11 +38,14 @@ class DeliveryQueueRepositoryTest {
     void claimPending_movesDeliveryToProcessingAndReturnsDeliveryId() {
         when(jedis.blmove("dispatch:pending", "dispatch:processing",
                 ListDirection.RIGHT, ListDirection.LEFT, 5.0)).thenReturn("del-1");
+        when(jedis.eval(anyString(), eq(List.of("dispatch:processing",
+                "dispatch:processing:claimed_at", "dispatch:processing:claim_owner")), anyList()))
+                .thenReturn(1L);
 
-        String result = repository.claimPending(5);
+        ClaimedDelivery result = repository.claimPending(5);
 
-        assertThat(result).isEqualTo("del-1");
-        verify(jedis).zadd(eq("dispatch:processing:claimed_at"), anyDouble(), eq("del-1"));
+        assertThat(result.deliveryId()).isEqualTo("del-1");
+        assertThat(result.claimToken()).isNotBlank();
     }
 
     @Test
@@ -73,24 +77,50 @@ class DeliveryQueueRepositoryTest {
         when(jedis.blmove("dispatch:pending", "dispatch:processing",
                 ListDirection.RIGHT, ListDirection.LEFT, 5.0)).thenReturn(null);
 
-        String result = repository.claimPending(5);
+        ClaimedDelivery result = repository.claimPending(5);
 
         assertThat(result).isNull();
     }
 
     @Test
     void ack_removesDeliveryFromProcessing() {
-        repository.ack("del-1");
+        ClaimedDelivery claim = new ClaimedDelivery("del-1", "claim-1");
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(1L);
+
+        assertThat(repository.ack(claim)).isTrue();
 
         verify(jedis).eval(anyString(),
-                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at")),
-                eq(List.of("del-1")));
+                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at",
+                        "dispatch:processing:claim_owner")),
+                eq(List.of("del-1", "claim-1")));
+    }
+
+    @Test
+    void ackRejectsInvalidClaimAndReportsSupersededOwner() {
+        assertThatThrownBy(() -> repository.ack(null)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.ack(new ClaimedDelivery("", "token")))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.ack(new ClaimedDelivery("del-1", "")))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(0L);
+        assertThat(repository.ack(new ClaimedDelivery("del-1", "stale-token"))).isFalse();
+    }
+
+    @Test
+    void claimReturnsNullWhenRecoveryWinsBeforeOwnershipIsRecorded() {
+        when(jedis.blmove("dispatch:pending", "dispatch:processing",
+                ListDirection.RIGHT, ListDirection.LEFT, 5.0)).thenReturn("del-1");
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(0L);
+
+        assertThat(repository.claimPending(5)).isNull();
     }
 
     @Test
     void recoverStaleProcessing_marksUntrackedEntriesWithoutRequeueing() {
         when(jedis.eval(anyString(),
-                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at", "dispatch:pending")),
+                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at", "dispatch:pending",
+                        "dispatch:processing:claim_owner")),
                 eq(List.of("1000", "10000", "-110000")))).thenReturn(0L);
 
         long recovered = repository.recoverStaleProcessing(10_000L, 120_000L);
@@ -101,7 +131,8 @@ class DeliveryQueueRepositoryTest {
     @Test
     void recoverStaleProcessing_requeuesOnlyIdleEntries() {
         when(jedis.eval(anyString(),
-                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at", "dispatch:pending")),
+                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at", "dispatch:pending",
+                        "dispatch:processing:claim_owner")),
                 eq(List.of("1000", "10000", "5000")))).thenReturn(1L);
 
         long recovered = repository.recoverStaleProcessing(10_000L, 5_000L);
@@ -112,7 +143,8 @@ class DeliveryQueueRepositoryTest {
     @Test
     void recoverStaleProcessingClampsNegativeIdleAndHandlesUnexpectedLuaResult() {
         when(jedis.eval(anyString(),
-                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at", "dispatch:pending")),
+                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at", "dispatch:pending",
+                        "dispatch:processing:claim_owner")),
                 eq(List.of("1000", "10000", "10000")))).thenReturn("unexpected");
 
         assertThat(repository.recoverStaleProcessing(10_000L, -1L)).isZero();

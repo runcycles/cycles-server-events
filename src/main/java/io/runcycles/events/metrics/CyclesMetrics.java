@@ -70,6 +70,8 @@ public class CyclesMetrics {
     public static final String EVIDENCE_RETRY_DEFERRED = "cycles.evidence.retry_deferred";
     public static final String DISPATCHER_EVENT_PUBLISHED = "cycles.webhook.dispatcher_event.published";
     public static final String DISPATCHER_EVENT_DEFERRED = "cycles.webhook.dispatcher_event.deferred";
+    public static final String DISPATCHER_EVENT_DEAD_LETTERED = "cycles.webhook.dispatcher_event.dead_lettered";
+    public static final String SECURITY_CONFIG_INDETERMINATE = "cycles.webhook.security_config.indeterminate";
 
     public static final String TAG_UNKNOWN = "UNKNOWN";
     private static final Set<String> EVIDENCE_ARTIFACT_TYPES =
@@ -196,6 +198,15 @@ public class CyclesMetrics {
     public void recordDispatcherEventDeferred(String eventType, String reason) {
         registry.counter(DISPATCHER_EVENT_DEFERRED,
                 Tags.of("event_type", dispatcherEventType(eventType), "reason", normalise(reason))).increment();
+    }
+
+    public void recordDispatcherEventDeadLettered(String eventType, String reason) {
+        registry.counter(DISPATCHER_EVENT_DEAD_LETTERED,
+                Tags.of("event_type", dispatcherEventType(eventType), "reason", normalise(reason))).increment();
+    }
+
+    public void recordSecurityConfigIndeterminate() {
+        registry.counter(SECURITY_CONFIG_INDETERMINATE).increment();
     }
 
     // ---- Internals ----

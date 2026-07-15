@@ -23,10 +23,12 @@ public class DispatchRecovery {
     private final long recoveryIdleMs;
 
     public DispatchRecovery(DeliveryQueueRepository queueRepository,
-                            @Value("${dispatch.processing.recovery-idle-ms:120000}") long recoveryIdleMs) {
+                            @Value("${dispatch.processing.recovery-idle-ms:180000}") long recoveryIdleMs,
+                            @Value("${dispatch.ordering.lease-ms:120000}") long orderingLeaseMs) {
         this.queueRepository = queueRepository;
-        if (recoveryIdleMs <= 0) {
-            throw new IllegalArgumentException("dispatch recovery idle time must be positive");
+        if (orderingLeaseMs <= 0 || recoveryIdleMs <= orderingLeaseMs) {
+            throw new IllegalArgumentException(
+                    "dispatch recovery idle time must exceed the ordering lease");
         }
         this.recoveryIdleMs = recoveryIdleMs;
     }

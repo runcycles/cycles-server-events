@@ -11,6 +11,7 @@ import io.runcycles.events.model.DeliveryStatus;
 import io.runcycles.events.model.DispatcherEventTask;
 import io.runcycles.events.model.Event;
 import io.runcycles.events.metrics.CyclesMetrics;
+import io.runcycles.events.repository.DeliveryQueueRepository.ClaimedDelivery;
 import io.runcycles.events.service.DispatcherEventOutboxPublisher;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -61,37 +62,65 @@ class RedisAtomicityIntegrationTest {
     @Test
     void concurrentFailuresAreNeverLostAndDisableExactlyOnce() throws Exception {
         SubscriptionRepository repository = new SubscriptionRepository(pool, mapper, new CryptoService(""));
+        int calls = 50;
         try (Jedis jedis = pool.getResource()) {
             jedis.set("webhook:concurrent", """
                     {"subscription_id":"concurrent","status":"ACTIVE",
                      "consecutive_failures":0,"disable_after_failures":25,
                      "url":"https://operator-edited.example/hook"}
                     """);
+            for (int i = 0; i < calls; i++) {
+                String id = "concurrent-" + i;
+                jedis.set("delivery:" + id, mapper.writeValueAsString(Delivery.builder()
+                        .deliveryId(id)
+                        .subscriptionId("concurrent")
+                        .eventId("event-" + i)
+                        .eventType("tenant.created")
+                        .status(DeliveryStatus.PENDING)
+                        .attempts(5)
+                        .build()));
+            }
         }
 
-        int calls = 50;
         ExecutorService executor = Executors.newFixedThreadPool(8);
         CountDownLatch start = new CountDownLatch(1);
-        List<Callable<SubscriptionRepository.FailureUpdate>> tasks = new ArrayList<>();
+        List<Callable<SubscriptionRepository.TerminalFailureUpdate>> tasks = new ArrayList<>();
         for (int i = 0; i < calls; i++) {
+            int sequence = i;
             tasks.add(() -> {
                 start.await();
-                return repository.recordDeliveryFailure("concurrent", Instant.now(), 10,
-                        DispatcherEventTask.create("disable-concurrent", Event.builder()
+                String id = "concurrent-" + sequence;
+                Delivery failed = Delivery.builder()
+                        .deliveryId(id)
+                        .subscriptionId("concurrent")
+                        .eventId("event-" + sequence)
+                        .eventType("tenant.created")
+                        .status(DeliveryStatus.FAILED)
+                        .attempts(6)
+                        .completedAt(Instant.now())
+                        .build();
+                return repository.finalizeDeliveryFailure(
+                        "concurrent", failed, Instant.now(), 10,
+                        DispatcherEventTask.create("disable-" + id, Event.builder()
                                 .eventType("webhook.disabled")
                                 .data(new java.util.LinkedHashMap<>())
+                                .build()),
+                        DispatcherEventTask.create("failure-" + id, Event.builder()
+                                .eventType("system.webhook_delivery_failed")
                                 .build()));
             });
         }
-        List<Future<SubscriptionRepository.FailureUpdate>> futures = new ArrayList<>();
-        for (Callable<SubscriptionRepository.FailureUpdate> task : tasks) {
+        List<Future<SubscriptionRepository.TerminalFailureUpdate>> futures = new ArrayList<>();
+        for (Callable<SubscriptionRepository.TerminalFailureUpdate> task : tasks) {
             futures.add(executor.submit(task));
         }
         start.countDown();
 
         int disableTransitions = 0;
-        for (Future<SubscriptionRepository.FailureUpdate> future : futures) {
-            if (future.get().disabledNow()) disableTransitions++;
+        for (Future<SubscriptionRepository.TerminalFailureUpdate> future : futures) {
+            SubscriptionRepository.TerminalFailureUpdate result = future.get();
+            assertThat(result.deliveryFound()).isTrue();
+            if (result.disabledNow()) disableTransitions++;
         }
         executor.shutdownNow();
 
@@ -101,10 +130,17 @@ class RedisAtomicityIntegrationTest {
             assertThat(stored.path("status").asText()).isEqualTo("DISABLED");
             assertThat(stored.path("url").asText())
                     .isEqualTo("https://operator-edited.example/hook");
-            assertThat(jedis.zscore(EventRepository.DISPATCHER_OUTBOX_PENDING_KEY,
-                    "disable-concurrent")).isNotNull();
-            assertThat(jedis.exists(EventRepository.dispatcherOutboxTaskKey(
-                    "disable-concurrent"))).isTrue();
+            List<String> staged = jedis.zrange(EventRepository.DISPATCHER_OUTBOX_PENDING_KEY, 0, -1)
+                    .stream()
+                    .filter(id -> id.startsWith("disable-concurrent-")
+                            || id.startsWith("failure-concurrent-"))
+                    .toList();
+            assertThat(staged.stream().filter(id -> id.startsWith("disable-")).count()).isEqualTo(1);
+            assertThat(staged.stream().filter(id -> id.startsWith("failure-")).count()).isEqualTo(calls);
+            for (int i = 0; i < calls; i++) {
+                assertThat(mapper.readTree(jedis.get("delivery:concurrent-" + i)).path("status").asText())
+                        .isEqualTo("FAILED");
+            }
         }
         assertThat(disableTransitions).isEqualTo(1);
     }
@@ -202,7 +238,7 @@ class RedisAtomicityIntegrationTest {
         ReflectionTestUtils.setField(events, "eventTtlDays", 90);
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
         DispatcherEventOutboxPublisher publisher = new DispatcherEventOutboxPublisher(
-                events, new CyclesMetrics(registry, false), 10, 30_000, 1_000);
+                events, new CyclesMetrics(registry, false), 10, 30_000, 1_000, 100, 10_000);
 
         publisher.publishDue();
 
@@ -218,13 +254,80 @@ class RedisAtomicityIntegrationTest {
     }
 
     @Test
+    void claimedOutboxTaskCannotBeAcknowledgedByInlinePublisher() throws Exception {
+        String taskId = "outbox-owned-ack";
+        String owner = "publisher-a";
+        DispatcherEventTask task = DispatcherEventTask.create(taskId,
+                Event.builder().eventType("system.webhook_delivery_failed").build());
+        EventRepository events = new EventRepository(pool, mapper);
+        try (Jedis jedis = pool.getResource()) {
+            jedis.del(EventRepository.DISPATCHER_OUTBOX_PENDING_KEY,
+                    EventRepository.dispatcherOutboxTaskKey(taskId),
+                    "dispatcher:event-outbox:lock:" + taskId,
+                    "dispatcher:event-outbox:attempts");
+            jedis.set(EventRepository.dispatcherOutboxTaskKey(taskId), mapper.writeValueAsString(task));
+            jedis.zadd(EventRepository.DISPATCHER_OUTBOX_PENDING_KEY,
+                    System.currentTimeMillis() - 1, taskId);
+        }
+
+        assertThat(events.tryClaimDispatcherEvent(taskId, owner, 30_000)).isTrue();
+        assertThat(events.ackDispatcherEvent(taskId)).isFalse();
+        assertThat(events.ackClaimedDispatcherEvent(taskId, owner)).isTrue();
+        assertThat(events.ackClaimedDispatcherEvent(taskId, owner)).isFalse();
+        try (Jedis jedis = pool.getResource()) {
+            assertThat(jedis.exists(EventRepository.dispatcherOutboxTaskKey(taskId))).isFalse();
+            assertThat(jedis.zscore(EventRepository.DISPATCHER_OUTBOX_PENDING_KEY, taskId)).isNull();
+            assertThat(jedis.exists("dispatcher:event-outbox:lock:" + taskId)).isFalse();
+        }
+    }
+
+    @Test
+    void poisonOutboxTaskMovesToBoundedDeadLetterQueue() throws Exception {
+        String taskId = "outbox-poison";
+        String malformedTask = "{not-json";
+        try (Jedis jedis = pool.getResource()) {
+            jedis.del(EventRepository.DISPATCHER_OUTBOX_PENDING_KEY,
+                    EventRepository.DISPATCHER_OUTBOX_FAILED_KEY,
+                    EventRepository.dispatcherOutboxTaskKey(taskId),
+                    "dispatcher:event-outbox:lock:" + taskId,
+                    "dispatcher:event-outbox:attempts");
+            jedis.set(EventRepository.dispatcherOutboxTaskKey(taskId), malformedTask);
+            jedis.zadd(EventRepository.DISPATCHER_OUTBOX_PENDING_KEY,
+                    System.currentTimeMillis() - 1, taskId);
+        }
+        EventRepository events = new EventRepository(pool, mapper);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        DispatcherEventOutboxPublisher publisher = new DispatcherEventOutboxPublisher(
+                events, new CyclesMetrics(registry, false), 10, 30_000, 1_000, 1, 10);
+
+        publisher.publishDue();
+
+        try (Jedis jedis = pool.getResource()) {
+            List<String> failed = jedis.lrange(EventRepository.DISPATCHER_OUTBOX_FAILED_KEY, 0, -1);
+            assertThat(failed).hasSize(1);
+            JsonNode deadLetter = mapper.readTree(failed.getFirst());
+            assertThat(deadLetter.path("task_id").asText()).isEqualTo(taskId);
+            assertThat(deadLetter.path("payload").asText()).isEqualTo(malformedTask);
+            assertThat(jedis.exists(EventRepository.dispatcherOutboxTaskKey(taskId))).isFalse();
+            assertThat(jedis.zscore(EventRepository.DISPATCHER_OUTBOX_PENDING_KEY, taskId)).isNull();
+            assertThat(jedis.hexists("dispatcher:event-outbox:attempts", taskId)).isFalse();
+            assertThat(jedis.exists("dispatcher:event-outbox:lock:" + taskId)).isFalse();
+        }
+        assertThat(registry.find(CyclesMetrics.DISPATCHER_EVENT_DEAD_LETTERED)
+                .tag("event_type", CyclesMetrics.TAG_UNKNOWN)
+                .tag("reason", "attempts_exhausted").counter().count()).isEqualTo(1.0);
+    }
+
+    @Test
     void youngCrashOrphansBecomeRecoverableOnPeriodicPass() {
         DeliveryQueueRepository deliveries = new DeliveryQueueRepository(pool);
         long now = 100_000L;
         try (Jedis jedis = pool.getResource()) {
-            jedis.del("dispatch:pending", "dispatch:processing", "dispatch:processing:claimed_at");
+            jedis.del("dispatch:pending", "dispatch:processing", "dispatch:processing:claimed_at",
+                    "dispatch:processing:claim_owner");
             jedis.lpush("dispatch:processing", "delivery-orphan");
             jedis.zadd("dispatch:processing:claimed_at", now, "delivery-orphan");
+            jedis.hset("dispatch:processing:claim_owner", "delivery-orphan", "claim-orphan");
         }
 
         assertThat(deliveries.recoverStaleProcessing(now + 10, 100)).isZero();
@@ -232,6 +335,32 @@ class RedisAtomicityIntegrationTest {
         try (Jedis jedis = pool.getResource()) {
             assertThat(jedis.lrange("dispatch:pending", 0, -1)).containsExactly("delivery-orphan");
         }
+    }
+
+    @Test
+    void staleDeliveryAckCannotRemoveSuccessorClaim() {
+        DeliveryQueueRepository deliveries = new DeliveryQueueRepository(pool);
+        try (Jedis jedis = pool.getResource()) {
+            jedis.del("dispatch:pending", "dispatch:processing", "dispatch:processing:claimed_at",
+                    "dispatch:processing:claim_owner");
+            jedis.lpush("dispatch:pending", "owned-delivery");
+        }
+
+        ClaimedDelivery first = deliveries.claimPending(1);
+        assertThat(first).isNotNull();
+        assertThat(deliveries.recoverStaleProcessing(System.currentTimeMillis() + 1_000, 100))
+                .isEqualTo(1);
+        ClaimedDelivery successor = deliveries.claimPending(1);
+        assertThat(successor).isNotNull();
+        assertThat(successor.claimToken()).isNotEqualTo(first.claimToken());
+
+        assertThat(deliveries.ack(first)).isFalse();
+        try (Jedis jedis = pool.getResource()) {
+            assertThat(jedis.lrange("dispatch:processing", 0, -1)).containsExactly("owned-delivery");
+            assertThat(jedis.hget("dispatch:processing:claim_owner", "owned-delivery"))
+                    .isEqualTo(successor.claimToken());
+        }
+        assertThat(deliveries.ack(successor)).isTrue();
     }
 
     @Test
@@ -252,17 +381,49 @@ class RedisAtomicityIntegrationTest {
     }
 
     @Test
+    void evidenceAckAndDeadLetterScriptsExecuteAgainstRealRedis() {
+        EvidenceQueueConsumer evidence = new EvidenceQueueConsumer(
+                pool, "evidence:lua:pending", "evidence:lua:processing", "evidence:lua:failed", 2);
+        String valid = "{\"artifact_type\":\"reserve\",\"sequence\":1}";
+        String poison = "{ not valid json";
+        try (Jedis jedis = pool.getResource()) {
+            jedis.del("evidence:lua:pending", "evidence:lua:processing",
+                    "evidence:lua:processing:claimed_at", "evidence:lua:failed");
+            jedis.lpush("evidence:lua:pending", valid);
+        }
+
+        assertThat(evidence.claim(1)).isEqualTo(valid);
+        evidence.ack(valid);
+        try (Jedis jedis = pool.getResource()) {
+            assertThat(jedis.llen("evidence:lua:processing")).isZero();
+            assertThat(jedis.zscore("evidence:lua:processing:claimed_at", valid)).isNull();
+            jedis.lpush("evidence:lua:pending", poison);
+        }
+
+        assertThat(evidence.claim(1)).isEqualTo(poison);
+        assertThat(evidence.deadLetterAndAck(poison)).isTrue();
+        try (Jedis jedis = pool.getResource()) {
+            assertThat(jedis.lrange("evidence:lua:failed", 0, -1)).containsExactly(poison);
+            assertThat(jedis.llen("evidence:lua:processing")).isZero();
+            assertThat(jedis.zscore("evidence:lua:processing:claimed_at", poison)).isNull();
+        }
+    }
+
+    @Test
     void boundedRecoveryStartsAtOldestWorkSoTheTailCannotStarve() {
         DeliveryQueueRepository deliveries = new DeliveryQueueRepository(pool);
         long now = 300_000L;
         try (Jedis jedis = pool.getResource()) {
-            jedis.del("dispatch:pending", "dispatch:processing", "dispatch:processing:claimed_at");
+            jedis.del("dispatch:pending", "dispatch:processing", "dispatch:processing:claimed_at",
+                    "dispatch:processing:claim_owner");
             jedis.rpush("dispatch:processing", "oldest-stale");
             jedis.zadd("dispatch:processing:claimed_at", now - 1_000, "oldest-stale");
+            jedis.hset("dispatch:processing:claim_owner", "oldest-stale", "oldest-owner");
             for (int i = 0; i < 1_000; i++) {
                 String fresh = "fresh-" + i;
                 jedis.lpush("dispatch:processing", fresh);
                 jedis.zadd("dispatch:processing:claimed_at", now, fresh);
+                jedis.hset("dispatch:processing:claim_owner", fresh, "owner-" + i);
             }
         }
 

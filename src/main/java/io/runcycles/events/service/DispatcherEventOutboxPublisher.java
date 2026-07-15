@@ -5,6 +5,7 @@ import static io.runcycles.events.logging.LogSanitizer.safe;
 import io.runcycles.events.metrics.CyclesMetrics;
 import io.runcycles.events.model.DispatcherEventTask;
 import io.runcycles.events.repository.EventRepository;
+import io.runcycles.events.repository.EventRepository.OutboxFailureResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -25,14 +26,19 @@ public class DispatcherEventOutboxPublisher {
     private final int batchSize;
     private final long claimLeaseMs;
     private final long retryDelayMs;
+    private final int maxAttempts;
+    private final int failedMaxLen;
 
     public DispatcherEventOutboxPublisher(
             EventRepository eventRepository,
             CyclesMetrics metrics,
             @Value("${dispatch.event-outbox.batch-size:25}") int batchSize,
             @Value("${dispatch.event-outbox.claim-lease-ms:30000}") long claimLeaseMs,
-            @Value("${dispatch.event-outbox.retry-delay-ms:5000}") long retryDelayMs) {
-        if (batchSize <= 0 || claimLeaseMs <= 0 || retryDelayMs <= 0) {
+            @Value("${dispatch.event-outbox.retry-delay-ms:5000}") long retryDelayMs,
+            @Value("${dispatch.event-outbox.max-attempts:100}") int maxAttempts,
+            @Value("${dispatch.event-outbox.failed-max-len:10000}") int failedMaxLen) {
+        if (batchSize <= 0 || claimLeaseMs <= 0 || retryDelayMs <= 0
+                || maxAttempts <= 0 || failedMaxLen <= 0) {
             throw new IllegalArgumentException("dispatcher event outbox limits must be positive");
         }
         this.eventRepository = eventRepository;
@@ -40,6 +46,8 @@ public class DispatcherEventOutboxPublisher {
         this.batchSize = batchSize;
         this.claimLeaseMs = claimLeaseMs;
         this.retryDelayMs = retryDelayMs;
+        this.maxAttempts = maxAttempts;
+        this.failedMaxLen = failedMaxLen;
     }
 
     @Scheduled(fixedDelayString = "${dispatch.event-outbox.poll-interval-ms:1000}")
@@ -68,20 +76,20 @@ public class DispatcherEventOutboxPublisher {
         }
 
         DispatcherEventTask task = null;
-        boolean acknowledged = false;
+        boolean claimResolved = false;
         try {
             task = eventRepository.findDispatcherEventTask(taskId);
             if (task == null) {
                 // The inline publisher may have acknowledged it after this scan.
-                acknowledged = eventRepository.ackClaimedDispatcherEvent(taskId, owner);
+                claimResolved = eventRepository.ackClaimedDispatcherEvent(taskId, owner);
                 return;
             }
             eventRepository.save(task.event());
-            acknowledged = eventRepository.ackClaimedDispatcherEvent(taskId, owner);
-            if (!acknowledged) {
-                // Another publisher (normally the terminal handler's inline
-                // fast path) completed the same deterministic task. The event
-                // save is idempotent; do not recreate or count the task again.
+            claimResolved = eventRepository.ackClaimedDispatcherEvent(taskId, owner);
+            if (!claimResolved) {
+                // The lease expired and a successor completed the same
+                // deterministic task. The event save is idempotent; do not
+                // recreate or count the task again.
                 return;
             }
             metrics.recordDispatcherEventPublished(task.event().getEventType());
@@ -91,16 +99,29 @@ public class DispatcherEventOutboxPublisher {
         } catch (RuntimeException e) {
             String eventType = task != null && task.event() != null ? task.event().getEventType() : null;
             metrics.recordDispatcherEventDeferred(eventType, "publish_failure");
+            boolean deadLettered = false;
             try {
-                eventRepository.deferDispatcherEvent(taskId, System.currentTimeMillis() + retryDelayMs);
+                OutboxFailureResult failure = eventRepository.recordDispatcherEventFailure(
+                        taskId, owner, System.currentTimeMillis() + retryDelayMs,
+                        maxAttempts, failedMaxLen);
+                claimResolved = failure.claimResolved();
+                if (failure.deadLettered()) {
+                    deadLettered = true;
+                    metrics.recordDispatcherEventDeadLettered(eventType, "attempts_exhausted");
+                    LOG.error("Dispatcher event outbox task dead-lettered after bounded retries: task_id={} event_type={} attempts={} failed_queue={}",
+                            safe(taskId), safe(eventType), failure.attempts(),
+                            EventRepository.DISPATCHER_OUTBOX_FAILED_KEY);
+                }
             } catch (RuntimeException deferFailure) {
                 LOG.error("Failed to defer dispatcher event outbox task; task remains discoverable at its prior score: task_id={} event_type={} error={}",
                         safe(taskId), safe(eventType), safe(deferFailure.getMessage()), deferFailure);
             }
-            LOG.warn("Dispatcher event outbox publish deferred: task_id={} event_type={} error={}",
-                    safe(taskId), safe(eventType), safe(e.getMessage()));
+            if (!deadLettered) {
+                LOG.warn("Dispatcher event outbox publish deferred: task_id={} event_type={} error={}",
+                        safe(taskId), safe(eventType), safe(e.getMessage()));
+            }
         } finally {
-            if (!acknowledged) {
+            if (!claimResolved) {
                 try {
                     eventRepository.releaseDispatcherEventClaim(taskId, owner);
                 } catch (RuntimeException releaseFailure) {

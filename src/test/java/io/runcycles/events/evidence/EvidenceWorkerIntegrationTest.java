@@ -160,6 +160,9 @@ class EvidenceWorkerIntegrationTest {
 
         String envJson = pollForStoredEnvelope(15_000);
         assertThat(envJson).as("%s envelope persisted to the store within 15s", artifactType).isNotNull();
+        assertThat(pollUntilProcessingQueueDrained(5_000))
+                .as("%s source record acknowledged from the real Redis processing queue", artifactType)
+                .isTrue();
 
         ObjectNode env = (ObjectNode) MAPPER.readTree(envJson);
         assertThat(env.get("artifact_type").asText()).isEqualTo(artifactType);
@@ -195,6 +198,20 @@ class EvidenceWorkerIntegrationTest {
             Thread.sleep(100);
         }
         return null;
+    }
+
+    private boolean pollUntilProcessingQueueDrained(long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try (Jedis jedis = jedisPool.getResource()) {
+                if (jedis.llen("evidence:processing") == 0
+                        && jedis.zcard("evidence:processing:claimed_at") == 0) {
+                    return true;
+                }
+            }
+            Thread.sleep(25);
+        }
+        return false;
     }
 
     private record KeyHex(String priv, String pub) {

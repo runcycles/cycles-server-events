@@ -3,6 +3,7 @@ package io.runcycles.events.evidence;
 import static io.runcycles.events.logging.LogSanitizer.safe;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.runcycles.events.evidence.CyclesEvidenceEnvelopeBuilder.BuiltEvidenceEnvelope;
@@ -64,7 +65,11 @@ public class EvidenceWorker {
         this.builder = builder;
         this.schemaValidator = schemaValidator;
         this.sink = sink;
-        this.mapper = mapper;
+        // Preserve the exact mathematical value of source fractions until the
+        // RFC 8785 binary64 guard evaluates them. The default tree parser would
+        // create DoubleNode first and make the later losslessness comparison a
+        // tautology over an already-rounded value.
+        this.mapper = mapper.copy().enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);
         this.metrics = metrics;
         if (timeoutSeconds <= 0) {
             throw new IllegalArgumentException("evidence queue timeout must be positive");

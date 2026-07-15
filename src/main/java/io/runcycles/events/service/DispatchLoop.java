@@ -3,8 +3,10 @@ package io.runcycles.events.service;
 import static io.runcycles.events.logging.LogSanitizer.safe;
 
 import io.runcycles.events.repository.DeliveryQueueRepository;
+import io.runcycles.events.repository.DeliveryQueueRepository.ClaimedDelivery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -13,6 +15,7 @@ import redis.clients.jedis.exceptions.JedisConnectionException;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 @Service
 public class DispatchLoop {
@@ -24,15 +27,25 @@ public class DispatchLoop {
     private final int timeoutSeconds;
     private final long orderingLeaseMs;
     private final long contentionBackoffMs;
+    private final LongSupplier nanoTime;
     private volatile long nextOrderingAttemptNanos;
 
+    @Autowired
     public DispatchLoop(DeliveryQueueRepository queueRepository, DeliveryHandler deliveryHandler,
                         @Value("${dispatch.pending.timeout-seconds:5}") int timeoutSeconds,
                         @Value("${dispatch.ordering.lease-ms:120000}") long orderingLeaseMs,
                         @Value("${dispatch.http.timeout-seconds:30}") int httpTimeoutSeconds,
                         @Value("${dispatch.ordering.contention-backoff-ms:500}") long contentionBackoffMs) {
+        this(queueRepository, deliveryHandler, timeoutSeconds, orderingLeaseMs,
+                httpTimeoutSeconds, contentionBackoffMs, System::nanoTime);
+    }
+
+    DispatchLoop(DeliveryQueueRepository queueRepository, DeliveryHandler deliveryHandler,
+                 int timeoutSeconds, long orderingLeaseMs, int httpTimeoutSeconds,
+                 long contentionBackoffMs, LongSupplier nanoTime) {
         this.queueRepository = queueRepository;
         this.deliveryHandler = deliveryHandler;
+        this.nanoTime = java.util.Objects.requireNonNull(nanoTime, "monotonic clock is required");
         if (timeoutSeconds <= 0) {
             throw new IllegalArgumentException("dispatch pending timeout must be positive");
         }
@@ -55,7 +68,8 @@ public class DispatchLoop {
 
     @Scheduled(fixedDelayString = "${dispatch.loop.delay-ms:25}")
     public void processNext() {
-        if (System.nanoTime() < nextOrderingAttemptNanos) return;
+        long retryAt = nextOrderingAttemptNanos;
+        if (retryAt != 0 && retryAt - nanoTime.getAsLong() > 0) return;
         // A fresh token per invocation prevents an over-time invocation from
         // deleting a newer lease acquired by the same replica after expiry.
         String orderingOwner = UUID.randomUUID().toString();
@@ -66,10 +80,13 @@ public class DispatchLoop {
             }
             nextOrderingAttemptNanos = 0;
             try {
-                String deliveryId = queueRepository.claimPending(timeoutSeconds);
-                if (deliveryId != null) {
-                    deliveryHandler.handle(deliveryId);
-                    queueRepository.ack(deliveryId);
+                ClaimedDelivery claim = queueRepository.claimPending(timeoutSeconds);
+                if (claim != null) {
+                    deliveryHandler.handle(claim.deliveryId());
+                    if (!queueRepository.ack(claim)) {
+                        LOG.warn("Webhook delivery claim was superseded before ack: delivery_id={} claim_token={}",
+                                safe(claim.deliveryId()), safe(claim.claimToken()));
+                    }
                 }
             } finally {
                 queueRepository.releaseOrderingLock(orderingOwner);
@@ -88,6 +105,6 @@ public class DispatchLoop {
     private void deferOrderingAttempt() {
         long minimum = Math.max(1L, contentionBackoffMs / 2L);
         long delayMs = ThreadLocalRandom.current().nextLong(minimum, contentionBackoffMs + 1L);
-        nextOrderingAttemptNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(delayMs);
+        nextOrderingAttemptNanos = nanoTime.getAsLong() + TimeUnit.MILLISECONDS.toNanos(delayMs);
     }
 }

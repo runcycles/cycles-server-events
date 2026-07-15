@@ -1,12 +1,15 @@
 package io.runcycles.events.service;
 
 import io.runcycles.events.repository.DeliveryQueueRepository;
+import io.runcycles.events.repository.DeliveryQueueRepository.ClaimedDelivery;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.mockito.Mockito.*;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -19,21 +22,38 @@ class DispatchLoopTest {
     @Mock private DeliveryHandler deliveryHandler;
 
     private DispatchLoop dispatchLoop;
+    private final AtomicLong nanoTime = new AtomicLong(1_000L);
 
     @BeforeEach
     void setUp() {
-        dispatchLoop = new DispatchLoop(queueRepository, deliveryHandler, 5, 120_000L, 30, 500);
+        dispatchLoop = new DispatchLoop(queueRepository, deliveryHandler, 5, 120_000L, 30, 500,
+                nanoTime::get);
         lenient().when(queueRepository.tryAcquireOrderingLock(anyString(), eq(120_000L))).thenReturn(true);
     }
 
     @Test
     void processNext_claimsHandlesAndAcks() {
-        when(queueRepository.claimPending(5)).thenReturn("del-1");
+        ClaimedDelivery claim = new ClaimedDelivery("del-1", "claim-1");
+        when(queueRepository.claimPending(5)).thenReturn(claim);
+        when(queueRepository.ack(claim)).thenReturn(true);
 
         dispatchLoop.processNext();
 
         verify(deliveryHandler).handle("del-1");
-        verify(queueRepository).ack("del-1");
+        verify(queueRepository).ack(claim);
+        verify(queueRepository).releaseOrderingLock(anyString());
+    }
+
+    @Test
+    void supersededClaimIsNotTreatedAsSuccessfullyAcknowledged() {
+        ClaimedDelivery claim = new ClaimedDelivery("del-stale", "claim-stale");
+        when(queueRepository.claimPending(5)).thenReturn(claim);
+        when(queueRepository.ack(claim)).thenReturn(false);
+
+        dispatchLoop.processNext();
+
+        verify(deliveryHandler).handle("del-stale");
+        verify(queueRepository).ack(claim);
         verify(queueRepository).releaseOrderingLock(anyString());
     }
 
@@ -44,18 +64,19 @@ class DispatchLoopTest {
         dispatchLoop.processNext();
 
         verify(deliveryHandler, never()).handle(anyString());
-        verify(queueRepository, never()).ack(anyString());
+        verify(queueRepository, never()).ack(any());
     }
 
     @Test
     void processNext_handlerException_caughtAndNotAcked() {
-        when(queueRepository.claimPending(5)).thenReturn("del-1");
+        ClaimedDelivery claim = new ClaimedDelivery("del-1", "claim-1");
+        when(queueRepository.claimPending(5)).thenReturn(claim);
         doThrow(new RuntimeException("handler error")).when(deliveryHandler).handle("del-1");
 
         // Should not throw
         dispatchLoop.processNext();
 
-        verify(queueRepository, never()).ack(anyString());
+        verify(queueRepository, never()).ack(any());
     }
 
     @Test
@@ -86,6 +107,16 @@ class DispatchLoopTest {
         dispatchLoop.processNext();
 
         verify(queueRepository, times(1)).tryAcquireOrderingLock(anyString(), eq(120_000L));
+    }
+
+    @Test
+    void negativeMonotonicClockValueDoesNotLookLikeActiveBackoff() {
+        nanoTime.set(-1_000L);
+        when(queueRepository.tryAcquireOrderingLock(anyString(), eq(120_000L))).thenReturn(false);
+
+        dispatchLoop.processNext();
+
+        verify(queueRepository).tryAcquireOrderingLock(anyString(), eq(120_000L));
     }
 
     @Test

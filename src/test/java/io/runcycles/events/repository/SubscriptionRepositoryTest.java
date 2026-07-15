@@ -203,124 +203,12 @@ class SubscriptionRepositoryTest {
     }
 
     @Test
-    void recordDeliveryFailure_returnsAtomicTransitionResult() {
-        String existing = """
-                {"subscription_id":"sub-1","status":"ACTIVE",
-                 "consecutive_failures":10,"disable_after_failures":10}
-                """.strip();
-        when(jedis.get("webhook:sub-1")).thenReturn(existing);
-        when(jedis.eval(anyString(), eq(List.of("webhook:sub-1",
-                EventRepository.dispatcherOutboxTaskKey("disable-test"),
-                EventRepository.DISPATCHER_OUTBOX_PENDING_KEY)), anyList())).thenReturn(1L);
-        Instant now = Instant.parse("2026-07-15T12:00:00Z");
-
-        SubscriptionRepository.FailureUpdate result =
-                repository.recordDeliveryFailure("sub-1", now, 10, disableTask());
-
-        assertThat(result.found()).isTrue();
-        assertThat(result.consecutiveFailures()).isEqualTo(11);
-        assertThat(result.disabledNow()).isTrue();
-        assertThat(result.previousStatus()).isEqualTo(WebhookStatus.ACTIVE);
-        verify(jedis).eval(anyString(), eq(List.of("webhook:sub-1",
-                EventRepository.dispatcherOutboxTaskKey("disable-test"),
-                EventRepository.DISPATCHER_OUTBOX_PENDING_KEY)), argThat(args ->
-                args.getFirst().equals(existing)
-                        && args.get(1).contains("\"consecutive_failures\":11")
-                        && args.get(1).contains("\"status\":\"DISABLED\"")
-                        && args.get(1).contains(now.toString())));
-    }
-
-    @Test
-    void recordDeliveryFailure_handlesMissingSubscription() {
-        when(jedis.get("webhook:missing")).thenReturn(null);
-
-        SubscriptionRepository.FailureUpdate result =
-                repository.recordDeliveryFailure("missing", Instant.now(), 10, disableTask());
-
-        assertThat(result.found()).isFalse();
-        assertThat(result.disabledNow()).isFalse();
-        verify(jedis, never()).eval(anyString(), anyList(), anyList());
-    }
-
-    @Test
-    void recordDeliveryFailureDoesNotDisableUntilCountExceedsThreshold() {
-        String existing = """
-                {"subscription_id":"sub-1","status":"ACTIVE",
-                 "consecutive_failures":9,"disable_after_failures":10}
-                """.strip();
-        when(jedis.get("webhook:sub-1")).thenReturn(existing);
-        when(jedis.eval(anyString(), eq(List.of("webhook:sub-1")), anyList())).thenReturn(1L);
-
-        SubscriptionRepository.FailureUpdate result = repository.recordDeliveryFailure(
-                "sub-1", Instant.parse("2026-07-15T12:00:00Z"), 10, disableTask());
-
-        assertThat(result.consecutiveFailures()).isEqualTo(10);
-        assertThat(result.disabledNow()).isFalse();
-        verify(jedis).eval(anyString(), eq(List.of("webhook:sub-1")), argThat(args ->
-                args.get(1).contains("\"consecutive_failures\":10")
-                        && !args.get(1).contains("\"status\":\"DISABLED\"")));
-    }
-
-    @Test
-    void recordDeliveryFailure_retriesAfterConcurrentAdminWrite() {
-        String beforeAdminWrite = """
-                {"subscription_id":"sub-1","status":"ACTIVE","consecutive_failures":0,
-                 "disable_after_failures":10,"url":"https://old.example/hook"}
-                """.strip();
-        String afterAdminWrite = """
-                {"subscription_id":"sub-1","status":"ACTIVE","consecutive_failures":4,
-                 "disable_after_failures":10,"url":"https://new.example/hook"}
-                """.strip();
-        when(jedis.get("webhook:sub-1")).thenReturn(beforeAdminWrite, afterAdminWrite);
-        when(jedis.eval(anyString(), eq(List.of("webhook:sub-1")), anyList()))
-                .thenReturn(0L, 1L);
-
-        SubscriptionRepository.FailureUpdate result = repository.recordDeliveryFailure(
-                "sub-1", Instant.parse("2026-07-15T12:00:00Z"), 10, disableTask());
-
-        assertThat(result.consecutiveFailures()).isEqualTo(5);
-        verify(jedis, times(2)).eval(anyString(), eq(List.of("webhook:sub-1")), anyList());
-        verify(jedis).eval(anyString(), eq(List.of("webhook:sub-1")), argThat(args ->
-                args.getFirst().equals(afterAdminWrite)
-                        && args.get(1).contains("https://new.example/hook")
-                        && args.get(1).contains("\"consecutive_failures\":5")));
-    }
-
-    @Test
-    void recordDeliveryFailureSaturatesCounterAndFallsBackFromInvalidStoredThreshold() {
-        String existing = """
-                {"subscription_id":"sub-1","status":"ACTIVE",
-                 "consecutive_failures":2147483647,"disable_after_failures":0}
-                """.strip();
-        when(jedis.get("webhook:sub-1")).thenReturn(existing);
-        when(jedis.eval(anyString(), eq(List.of("webhook:sub-1",
-                EventRepository.dispatcherOutboxTaskKey("disable-test"),
-                EventRepository.DISPATCHER_OUTBOX_PENDING_KEY)), anyList())).thenReturn(1L);
-
-        SubscriptionRepository.FailureUpdate result = repository.recordDeliveryFailure(
-                "sub-1", Instant.parse("2026-07-15T12:00:00Z"), 10, disableTask());
-
-        assertThat(result.consecutiveFailures()).isEqualTo(Integer.MAX_VALUE);
-        assertThat(result.disabledNow()).isTrue();
-    }
-
-    @Test
     void rejectsInvalidOperationalUpdateInputs() {
         assertThatThrownBy(() -> repository.updateDeliveryState(null, 0, null, null, null, null))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> repository.updateDeliveryState("", 0, null, null, null, null))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> repository.updateDeliveryState("sub-1", -1, null, null, null, null))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> repository.recordDeliveryFailure("sub-1", Instant.now(), 0, disableTask()))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> repository.recordDeliveryFailure("sub-1", null, 10, disableTask()))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> repository.recordDeliveryFailure(null, Instant.now(), 10, disableTask()))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> repository.recordDeliveryFailure("", Instant.now(), 10, disableTask()))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> repository.recordDeliveryFailure("sub-1", Instant.now(), 10, null))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
@@ -347,61 +235,6 @@ class SubscriptionRepositoryTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Failed to update webhook subscription delivery state")
                 .hasRootCauseMessage("subscription changed too frequently to update delivery state");
-        verify(jedis, times(128)).eval(anyString(), anyList(), anyList());
-    }
-
-    @Test
-    void recordDeliveryFailureFallsBackForMalformedFieldsAndUnknownStatus() {
-        String existing = """
-                {"subscription_id":"sub-1","status":"FUTURE",
-                 "consecutive_failures":"bad","disable_after_failures":"bad"}
-                """.strip();
-        when(jedis.get("webhook:sub-1")).thenReturn(existing);
-        when(jedis.eval(anyString(), eq(List.of("webhook:sub-1")), anyList())).thenReturn(1L);
-
-        SubscriptionRepository.FailureUpdate result = repository.recordDeliveryFailure(
-                "sub-1", Instant.parse("2026-07-15T12:00:00Z"), 10, disableTask());
-
-        assertThat(result.consecutiveFailures()).isEqualTo(1);
-        assertThat(result.disabledNow()).isFalse();
-        assertThat(result.previousStatus()).isNull();
-    }
-
-    @Test
-    void recordDeliveryFailureSupportsPausedStatusAndNullEventData() {
-        String existing = """
-                {"subscription_id":"sub-1","status":"PAUSED",
-                 "consecutive_failures":10,"disable_after_failures":10}
-                """.strip();
-        DispatcherEventTask task = disableTask(null);
-        when(jedis.get("webhook:sub-1")).thenReturn(existing);
-        when(jedis.eval(anyString(), eq(List.of("webhook:sub-1",
-                EventRepository.dispatcherOutboxTaskKey("disable-test"),
-                EventRepository.DISPATCHER_OUTBOX_PENDING_KEY)), anyList())).thenReturn(1L);
-
-        SubscriptionRepository.FailureUpdate result = repository.recordDeliveryFailure(
-                "sub-1", Instant.parse("2026-07-15T12:00:00Z"), 10, task);
-
-        assertThat(result.disabledNow()).isTrue();
-        assertThat(result.previousStatus()).isEqualTo(WebhookStatus.PAUSED);
-    }
-
-    @Test
-    void recordDeliveryFailureHandlesCasDisappearanceAndRetryExhaustion() {
-        String existing = "{\"subscription_id\":\"sub-1\",\"status\":\"ACTIVE\"}";
-        when(jedis.get("webhook:sub-1")).thenReturn(existing);
-        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(-1L);
-        assertThat(repository.recordDeliveryFailure("sub-1", Instant.now(), 10, disableTask()).found())
-                .isFalse();
-
-        reset(jedis);
-        when(jedis.get("webhook:sub-1")).thenReturn(existing);
-        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(0L);
-        assertThatThrownBy(() -> repository.recordDeliveryFailure(
-                "sub-1", Instant.now(), 10, disableTask()))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Failed to record webhook subscription failure")
-                .hasRootCauseMessage("subscription changed too frequently to record delivery failure");
         verify(jedis, times(128)).eval(anyString(), anyList(), anyList());
     }
 
@@ -528,19 +361,6 @@ class SubscriptionRepositoryTest {
                 .hasMessageContaining("Failed to finalize webhook delivery failure")
                 .hasRootCauseMessage("delivery or subscription changed too frequently to finalize failure");
         verify(jedis, times(128)).eval(anyString(), anyList(), anyList());
-    }
-
-    @Test
-    void recordFailureWithMissingStatusReturnsNullPreviousStatus() {
-        String existing = "{\"subscription_id\":\"sub-1\",\"consecutive_failures\":0}";
-        when(jedis.get("webhook:sub-1")).thenReturn(existing);
-        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(1L);
-
-        SubscriptionRepository.FailureUpdate result = repository.recordDeliveryFailure(
-                "sub-1", Instant.now(), 10, disableTask());
-
-        assertThat(result.previousStatus()).isNull();
-        assertThat(result.disabledNow()).isFalse();
     }
 
     @Test

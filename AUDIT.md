@@ -2,7 +2,7 @@
 
 ## Implementation History
 
-### 2026-07-15 — v0.1.25.25: distributed reliability and evidence integrity
+### 2026-07-15 — v0.1.25.24: distributed reliability and evidence integrity
 
 Closed the 9.5-readiness review findings: continuous age-gated recovery,
 atomic subscription and delivery transitions, cross-replica dispatch and
@@ -10,19 +10,27 @@ maintenance leases, batched retry promotion, fail-closed webhook signing,
 canonical evidence persistence, poison-vs-infrastructure failure separation,
 atomic evidence DLQ movement, full bundled v0.2 payload/envelope schema
 validation, bounded evidence lifecycle metrics, Redis TLS/ACL support, and
-blocking real-Redis/branch-coverage CI.
+blocking real-Redis/branch-coverage CI. The follow-up review added
+owner-token delivery acknowledgement, a recovery/lease startup invariant,
+lossless decimal parsing before the RFC 8785 guard, real-Redis execution of
+the evidence ack/DLQ scripts, bounded dispatcher-outbox poison handling, and
+deduplicated outbox publication metrics.
 The final hardening pass also made terminal delivery failure plus both mandatory
 dispatcher meta-events one atomic Redis transition backed by a deterministic,
 leased publication outbox; corrected auto-disable to the spec's strict
 "exceeds threshold" rule for ACTIVE and PAUSED subscriptions; bounded blocking
 Redis sockets and ordering contention; rejected lossy RFC 8785 numbers; made
-CIDR parsing literal-only; and retained identity-drift evidence for recovery
+CIDR parsing literal-only; surfaced indeterminate security configuration with a
+dedicated alertable metric; hardened the absent-config CIDR baseline; and
+retained identity-drift evidence for recovery
 without draining the pending queue into the DLQ.
 Regression coverage includes concurrent failure increments with exactly one
 disable transition, TTL preservation/non-resurrection, young-orphan recovery,
 active-replica evidence isolation, canonical stored bytes, nested and
 cross-field evidence constraints, final-attempt state, retry-schedule crash
-recovery, and missing-secret fail-closed delivery.
+recovery, transient missing-secret recovery without unsigned delivery,
+stale-owner ack rejection, fractional-precision rejection, the production
+terminal-failure transaction under contention, and bounded poison outbox tasks.
 
 ### 2026-07-11 — v0.1.25.23: last-mile webhook ownership/category boundary at delivery (#209)
 
@@ -146,12 +154,12 @@ Closes the "flagged, not changed" security item from the v0.1.25.21 audit.
 `WebhookUrlGuard` re-validates the subscription URL against the CURRENT
 admin webhook-security config (`config:webhook-security`) immediately
 before every outbound POST. Semantics are a line-for-line port of admin's
-create/update-time `WebhookUrlValidator` — same config key, same
-restrictive defaults when the key is absent/unreadable (private ranges
-blocked, HTTPS required; a config-read failure can only tighten, never
-loosen), same CIDR matching incl. IPv4-mapped IPv6, same glob dialect —
-so a URL admitted by admin under a given config is admitted here under
-the same config. Gaps closed: target drift/DNS rebinding after creation
+create/update-time `WebhookUrlValidator` — same config key, the same
+restrictive defaults when the key is absent at this release (private ranges
+blocked, HTTPS required), same CIDR matching incl. IPv4-mapped IPv6, and the
+same glob dialect. Read/parse failure is indeterminate, not a fallback. Under
+a stored config, a URL admitted by admin is admitted here under that same
+config. Gaps closed: target drift/DNS rebinding after creation
 (narrowed to a single request's resolve-then-connect window — full
 resolve-and-pin is not expressible with java.net.http; residual TOCTOU
 accepted and documented here), config tightened after creation, and
@@ -169,8 +177,9 @@ transient Redis blip into a permanent no-retry policy block for
 subscriptions relying on `allow_http`/custom CIDR config. Indeterminate is
 now distinct from denial — a read/parse failure throws, the handler leaves
 the delivery un-acked, and the stale-processing recovery retries it;
-defaults apply only to the legitimately-absent key (never stored), the
-same baseline admin validates against. Integration suite seeds the same permissive config the
+defaults apply only to the legitimately-absent key (never stored). That
+v0.1.25.22 fallback matched admin; v0.1.25.24 later hardened the delivery-side
+absent-key baseline with additional special-use ranges. Integration suite seeds the same permissive config the
 nightly workflow sets via the admin API; a dedicated integration test
 proves the restrictive defaults block an http/loopback target without
 contacting it.
@@ -479,7 +488,7 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 | Field | Value |
 |-------|-------|
 | Service | cycles-server-events |
-| Version | 0.1.25.25 |
+| Version | 0.1.25.24 |
 | Java | 21 |
 | Spring Boot | 3.5.16 |
 | Spec Authority | [cycles-governance-admin-v0.1.25.yaml](https://github.com/runcycles/cycles-protocol/blob/main/cycles-governance-admin-v0.1.25.yaml) and [cycles-evidence-v0.2.yaml](https://github.com/runcycles/cycles-protocol/blob/main/cycles-evidence-v0.2.yaml) |
@@ -491,9 +500,11 @@ security, atomicity, coverage, and multi-replica coordination gaps found in the
 2026-07-15 review are closed and verified. The remaining half-point is
 architectural rather than a correctness blocker for this release:
 
-- the global dispatch lease preserves one claim/send lane across replicas,
-  which trades horizontal webhook throughput for ordering safety; producer-side
-  tenant partitioning would permit both strict tenant order and parallelism;
+- the global dispatch lease preserves exactly one claim/send lane across the
+  fleet. This is an explicit ordering-over-throughput sign-off: replicas provide
+  failover but add no delivery throughput, and a target consuming the default
+  30-second timeout limits the fleet to roughly two webhook deliveries/minute.
+  Per-subscription or tenant-partitioned leases are the preferred future design;
 - delayed retry completion can still occur after a later event under
   at-least-once exponential backoff;
 - `java.net.http.HttpClient` resolves the hostname again after the delivery-time
@@ -505,6 +516,10 @@ architectural rather than a correctness blocker for this release:
   idempotently published, but intentionally not fanned out, avoiding recursive
   `system.webhook_delivery_failed` loops; a dedicated non-recursive alert fan-out
   path would be needed for webhook alerts;
+- policy-terminal paths (stale, ownership/SSRF policy, missing upstream records)
+  expose failure/stale metrics but do not emit `system.webhook_delivery_failed`;
+  the protocol mandates that meta-event after retry exhaustion, and expanding it
+  requires an upstream contract decision rather than an events-only wire change;
 - the evidence schema permits the full non-negative int64 range while RFC 8785
   canonicalization is binary64-based; this worker rejects values that would
   round rather than signing altered evidence, but producer/spec bounds should
@@ -517,16 +532,16 @@ architectural rather than a correctness blocker for this release:
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 522 in the 2026-07-15 clean verification |
-| Integration tests | 17 across webhook delivery, evidence signing/store, and Redis atomicity |
-| JaCoCo result | 97.69% line / 95.46% branch |
+| Total tests | 528 in the 2026-07-15 clean verification |
+| Integration tests | 21 across webhook delivery, evidence signing/store, and Redis atomicity |
+| JaCoCo result | 97.74% line / 95.44% branch |
 | JaCoCo minimum | 95% line / 95% branch (both enforced) |
 
 ## Source Inventory
 
 The current tree contains 55 production Java files and 42 Java test/support
 files. The inventory is derived from the tree rather than duplicated per class
-here, avoiding the stale hand-maintained counts that existed before v0.1.25.24.
+here, avoiding stale hand-maintained counts.
 `mvn verify` runs the fast suite; `mvn verify -Pintegration-tests` removes the
 `*IntegrationTest` exclusion and is blocking in CI.
 
@@ -543,6 +558,9 @@ here, avoiding the stale hand-maintained counts that existed before v0.1.25.24.
 | Random IV per encryption (12 bytes) | PASS |
 | Backward-compatible plaintext fallback | PASS |
 | Encrypted webhook secrets fail closed without the decrypt key | PASS |
+| Missing signing-secret write races remain recoverable and never send unsigned | PASS |
+| Delivery SSRF fallback covers unspecified, CGNAT, link-local, private, loopback, and unique-local ranges | PASS |
+| Malformed webhook security configuration fails closed with an alertable metric | PASS |
 | No TODO/FIXME/HACK in source | PASS |
 | Actuators isolated to separate management port (0.1.25.9) | PASS |
 
@@ -550,18 +568,24 @@ here, avoiding the stale hand-maintained counts that existed before v0.1.25.24.
 
 | Property | Default | Env Override | Status |
 |----------|---------|-------------|--------|
-| server.port | 7980 | - | OK |
+| server.port / spring.application.name | 7980 / cycles-server-events | - | OK |
 | redis.host | localhost | REDIS_HOST | OK |
 | redis.port | 6379 | REDIS_PORT | OK |
 | redis.username | (empty) | REDIS_USERNAME | OK |
 | redis.password | (empty) | REDIS_PASSWORD | OK |
 | redis.tls.enabled | false | REDIS_TLS_ENABLED | OK |
 | redis.connect-timeout-ms / socket-timeout-ms | 2000 / 5000 | REDIS_CONNECT_TIMEOUT_MS / REDIS_SOCKET_TIMEOUT_MS | OK |
+| redis.blocking-socket-timeout-ms | 10000 | REDIS_BLOCKING_SOCKET_TIMEOUT_MS | OK |
 | webhook.secret.encryption-key | (empty) | WEBHOOK_SECRET_ENCRYPTION_KEY | OK |
 | dispatch.pending.timeout-seconds | 5 | - | OK |
+| dispatch.loop.delay-ms | 25 | DISPATCH_LOOP_DELAY_MS | OK |
 | dispatch.ordering.lease-ms | 120000 | DISPATCH_ORDERING_LEASE_MS | OK |
-| dispatch.processing.recovery-idle-ms | 120000 | DISPATCH_PROCESSING_RECOVERY_IDLE_MS | OK |
+| dispatch.ordering.contention-backoff-ms | 500 | DISPATCH_ORDERING_CONTENTION_BACKOFF_MS | OK |
+| dispatch.processing.recovery-idle-ms | 180000 | DISPATCH_PROCESSING_RECOVERY_IDLE_MS | OK; startup requires > ordering lease |
 | dispatch.processing.recovery-interval-ms | 30000 | DISPATCH_PROCESSING_RECOVERY_INTERVAL_MS | OK |
+| dispatch.event-outbox.poll-interval-ms / batch-size | 1000 / 25 | DISPATCH_EVENT_OUTBOX_POLL_INTERVAL_MS / DISPATCH_EVENT_OUTBOX_BATCH_SIZE | OK |
+| dispatch.event-outbox.claim-lease-ms / retry-delay-ms | 30000 / 5000 | DISPATCH_EVENT_OUTBOX_CLAIM_LEASE_MS / DISPATCH_EVENT_OUTBOX_RETRY_DELAY_MS | OK |
+| dispatch.event-outbox.max-attempts / failed-max-len | 100 / 10000 | DISPATCH_EVENT_OUTBOX_MAX_ATTEMPTS / DISPATCH_EVENT_OUTBOX_FAILED_MAX_LEN | OK |
 | dispatch.retry.poll-interval-ms | 5000 | - | OK |
 | dispatch.retry.batch-size | 100 | RETRY_BATCH_SIZE | OK |
 | dispatch.http.timeout-seconds | 30 | - | OK |
@@ -571,15 +595,22 @@ here, avoiding the stale hand-maintained counts that existed before v0.1.25.24.
 | events.retention.delivery-ttl-days | 14 | DELIVERY_TTL_DAYS | OK |
 | events.retention.cleanup-interval-ms | 3600000 | RETENTION_CLEANUP_INTERVAL_MS | OK |
 | events.retention.lock-lease-ms | 300000 | RETENTION_LOCK_LEASE_MS | OK |
+| cycles.evidence.signing.private-key-hex / signer-did | (empty) / (empty) | EVIDENCE_SIGNING_PRIVATE_KEY_HEX / EVIDENCE_SIGNING_SIGNER_DID | OK |
+| cycles.evidence.signing.allow-ephemeral | false | EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY | OK |
+| cycles.evidence.server-id | (empty) | EVIDENCE_SERVER_ID | OK |
+| cycles.evidence.queue.pending-key / processing-key | evidence:pending / evidence:processing | EVIDENCE_PENDING_KEY / EVIDENCE_PROCESSING_KEY | OK |
+| cycles.evidence.queue.timeout-seconds / loop-delay-ms | 5 / 25 | EVIDENCE_POP_TIMEOUT_SECONDS / EVIDENCE_LOOP_DELAY_MS | OK |
+| cycles.evidence.queue.failure-backoff-ms / infrastructure-backoff-ms | 1000 / 30000 | EVIDENCE_QUEUE_FAILURE_BACKOFF_MS / EVIDENCE_INFRASTRUCTURE_BACKOFF_MS | OK |
 | cycles.evidence.queue.recovery-idle-ms / interval-ms | 120000 / 30000 | EVIDENCE_RECOVERY_IDLE_MS / EVIDENCE_RECOVERY_INTERVAL_MS | OK |
 | cycles.evidence.queue.recovery-batch-size | 100 | EVIDENCE_RECOVERY_BATCH_SIZE | OK |
-| cycles.evidence.queue.failed-max-len | 10000 | EVIDENCE_FAILED_MAX_LEN | OK |
+| cycles.evidence.queue.failed-key / failed-max-len | evidence:failed / 10000 | EVIDENCE_FAILED_KEY / EVIDENCE_FAILED_MAX_LEN | OK |
+| cycles.evidence.store.backend / key-prefix / ttl-seconds | redis / evidence:envelope: / 0 | EVIDENCE_STORE_BACKEND / EVIDENCE_STORE_KEY_PREFIX / EVIDENCE_STORE_TTL_SECONDS | OK |
 | spring.task.scheduling.pool.size | 5 | SCHEDULING_POOL_SIZE | OK |
 | cycles.metrics.tenant-tag.enabled | false | CYCLES_METRICS_TENANT_TAG_ENABLED | OK |
 | management.endpoints.web.exposure.include | health,info,prometheus | - | OK |
 | management.server.port | 9980 | MANAGEMENT_PORT | OK (0.1.25.9: actuators off public port) |
 | management.endpoint.health.group.readiness.include | readinessState,redis | - | OK |
-| cycles.evidence.signing.allow-ephemeral | false | EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY | OK |
+| management.endpoint.health.probes.enabled / liveness.include | true / livenessState | - | OK |
 
 ## Dependencies
 
@@ -603,10 +634,11 @@ here, avoiding the stale hand-maintained counts that existed before v0.1.25.24.
 | Pattern | Implementation |
 |---------|---------------|
 | Exponential backoff | `delay = min(initialDelay * multiplier^(attempts-1), maxDelay)` |
-| Auto-disable webhooks | After N consecutive failures (default 10) |
+| Auto-disable webhooks | When consecutive failures exceed the configured threshold (default 10) |
 | Stale delivery pruning | Deliveries > 24h auto-failed |
 | Redis connection errors | Caught and logged, schedulers continue |
-| Concurrent safety | BLMOVE claim + LREM ack; cross-replica claim/send lease; periodic stale recovery age-gated by `dispatch:processing:claimed_at` |
+| Concurrent safety | BLMOVE claim plus owner-token ack; global claim/send lease; periodic stale recovery age-gated by `dispatch:processing:claimed_at`; stale owners cannot erase successor claims |
+| Durable meta-events | Atomic terminal-state staging, deterministic event IDs, owner leases, bounded retries, and a bounded poison-task DLQ |
 | Evidence conformance | Full v0.2 nested payload and completed-envelope schema validation before durable storage |
 | TTL-based retention | Events 90d, deliveries 14d, ZSET indexes trimmed hourly |
 
@@ -691,10 +723,10 @@ Captured explicitly so a future reviewer doesn't re-litigate the gap analysis:
 ## Last Audited
 
 - **Date:** 2026-07-15
-- **Version:** 0.1.25.25
+- **Version:** 0.1.25.24
 - **Build:** PASS (`mvn -B clean verify -Pintegration-tests`)
-- **Coverage:** 97.69% line / 95.46% branch; 95% / 95% gates enforced
-- **Total:** 522 tests (505 unit + 17 Docker-backed integration), zero failures
+- **Coverage:** 97.74% line / 95.44% branch; 95% / 95% gates enforced
+- **Total:** 528 tests (507 unit + 21 Docker-backed integration), zero failures
 
 ## Cross-Repo Spec Drift Notes (informational)
 

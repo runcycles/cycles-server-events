@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.sun.net.httpserver.HttpServer;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.runcycles.events.metrics.CyclesMetrics;
 import org.junit.jupiter.api.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -60,6 +62,9 @@ class WebhookDeliveryIntegrationTest {
 
     @Autowired
     private JedisPool jedisPool;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     private static final ObjectMapper objectMapper = new ObjectMapper() {{
         registerModule(new JavaTimeModule());
@@ -240,8 +245,8 @@ class WebhookDeliveryIntegrationTest {
 
     @Test
     @Order(3)
-    @DisplayName("Delivery without signing secret fails closed before HTTP")
-    void noSigningSecret_failsClosed() throws Exception {
+    @DisplayName("Delivery without signing secret is retained and fails closed before HTTP")
+    void noSigningSecret_isRetainedForRecovery() throws Exception {
 
         try (Jedis jedis = jedisPool.getResource()) {
             String unsignedSubId = "whsub_unsigned_001";
@@ -270,17 +275,29 @@ class WebhookDeliveryIntegrationTest {
                     "attempts", 0)));
             jedis.lpush("dispatch:pending", deliveryId);
 
-            String persisted = null;
-            for (int i = 0; i < 40; i++) {
-                persisted = jedis.get("delivery:" + deliveryId);
-                if (persisted != null && persisted.contains("\"status\":\"FAILED\"")) break;
-                Thread.sleep(250);
-            }
+            org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(5))
+                    .untilAsserted(() -> {
+                        assertThat(jedis.lrange("dispatch:processing", 0, -1)).contains(deliveryId);
+                        assertThat(jedis.hget("dispatch:processing:claim_owner", deliveryId))
+                                .isNotBlank();
+                        io.micrometer.core.instrument.Counter missingSecret = meterRegistry
+                                .find(CyclesMetrics.DELIVERY_FAILED)
+                                .tags("event_type", "tenant.created",
+                                        "reason", "missing_signing_secret")
+                                .counter();
+                        assertThat(missingSecret).isNotNull();
+                        assertThat(missingSecret.count()).isGreaterThan(0.0);
+                    });
             assertThat(receivedWebhooks).isEmpty();
-            assertThat(persisted).contains("\"status\":\"FAILED\"")
-                    .contains("signing secret is missing");
+            assertThat(jedis.get("delivery:" + deliveryId))
+                    .contains("\"status\":\"PENDING\"")
+                    .contains("\"attempts\":0");
 
+            jedis.lrem("dispatch:processing", 0, deliveryId);
+            jedis.zrem("dispatch:processing:claimed_at", deliveryId);
+            jedis.hdel("dispatch:processing:claim_owner", deliveryId);
             jedis.srem("webhooks:" + TENANT_ID, unsignedSubId);
+            jedis.del("webhook:" + unsignedSubId, "event:" + eventId, "delivery:" + deliveryId);
         }
     }
 

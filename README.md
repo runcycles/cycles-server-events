@@ -106,12 +106,14 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `REDIS_BLOCKING_SOCKET_TIMEOUT_MS` | 10000 | Finite socket timeout for blocking Redis claims. Must exceed the longest configured BLMOVE timeout. |
 | `WEBHOOK_SECRET_ENCRYPTION_KEY` | (empty) | AES-256-GCM key for signing secret encryption (base64-encoded 32 bytes). If empty, secrets stored/read as plaintext (backward compatible). |
 | `dispatch.pending.timeout-seconds` | 5 | BLMOVE blocking timeout (seconds) |
-| `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | 120000 | Minimum age before an in-flight `dispatch:processing` delivery is considered stale and requeued. Keep above the max expected webhook HTTP + Redis write time. |
+| `DISPATCH_LOOP_DELAY_MS` | 25 | Delay between dispatch-loop invocations after a claim completes or times out. |
+| `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | 180000 | Minimum age before an in-flight `dispatch:processing` delivery is considered stale and requeued. Startup fails unless this is strictly greater than `DISPATCH_ORDERING_LEASE_MS`. |
 | `DISPATCH_PROCESSING_RECOVERY_INTERVAL_MS` | 30000 | Periodic stale-processing recovery interval; prevents quick-restart orphans from remaining stranded |
-| `DISPATCH_ORDERING_LEASE_MS` | 120000 | Cross-replica claim/send lease that prevents simultaneous sends. Must exceed BLMOVE plus HTTP timeouts; retain margin for Redis state writes |
+| `DISPATCH_ORDERING_LEASE_MS` | 120000 | Fleet-wide claim/send lease that preserves initial-claim FIFO order. Must exceed BLMOVE plus HTTP timeouts; replicas provide failover, not webhook throughput. |
 | `DISPATCH_ORDERING_CONTENTION_BACKOFF_MS` | 500 | Bounded randomized delay after a global dispatch-lease miss; prevents idle replicas from hammering Redis. |
 | `DISPATCH_EVENT_OUTBOX_POLL_INTERVAL_MS` / `DISPATCH_EVENT_OUTBOX_BATCH_SIZE` | 1000 / 25 | Poll interval and bounded batch for durable dispatcher-generated meta-events. |
 | `DISPATCH_EVENT_OUTBOX_CLAIM_LEASE_MS` / `DISPATCH_EVENT_OUTBOX_RETRY_DELAY_MS` | 30000 / 5000 | Per-task publication lease and retry deferral for dispatcher meta-events. |
+| `DISPATCH_EVENT_OUTBOX_MAX_ATTEMPTS` / `DISPATCH_EVENT_OUTBOX_FAILED_MAX_LEN` | 100 / 10000 | Attempts before a poison meta-event task moves to the bounded `dispatcher:event-outbox:failed` DLQ, and the maximum retained DLQ entries. |
 | `dispatch.retry.poll-interval-ms` | 5000 | Retry queue poll interval (ms) |
 | `RETRY_BATCH_SIZE` | 100 | Max retries to requeue per poll cycle |
 | `dispatch.http.timeout-seconds` | 30 | HTTP request timeout for webhook delivery |
@@ -132,6 +134,21 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `EVIDENCE_FAILED_MAX_LEN` | 10000 | Positive maximum length of the evidence poison-record DLQ |
 | `EVIDENCE_LOOP_DELAY_MS` / `EVIDENCE_QUEUE_FAILURE_BACKOFF_MS` | 25 / 1000 | Scheduler delay and Redis claim/ack outage backoff; prevents tight retry/log loops. |
 | `EVIDENCE_INFRASTRUCTURE_BACKOFF_MS` | 30000 | Claim pause after identity, signing, or store failures; limits in-flight growth during systemic outages. |
+
+The delivery-time URL guard reads `config:webhook-security`. If that key is
+absent, its hardened fallback blocks private, loopback, link-local,
+carrier-grade NAT, unspecified IPv4, and unique-local IPv6 ranges, including
+`0.0.0.0/8`, `100.64.0.0/10`, and `fe80::/10`. A malformed configured CIDR is
+treated as indeterminate rather than silently skipped: the delivery remains
+in-flight for recovery and `cycles_webhook_security_config_indeterminate_total`
+increments. Host resolution is checked immediately before delivery, but the JDK
+HTTP client performs its own connection-time DNS lookup; deployments requiring
+DNS-rebinding resistance must enforce the same egress policy in a proxy or
+network firewall.
+
+The Redis client sets the connection name `cycles-server-events`; a
+least-privilege Redis ACL therefore needs `+client|setname` in addition to the
+commands and key patterns used by this worker.
 
 ### Generating the encryption key
 
@@ -154,7 +171,8 @@ The same key must be configured in both `cycles-server-admin` and `cycles-server
 3. Events service reads + decrypts secret on each delivery
    └── CryptoService.decrypt(redis.get("webhook:secret:{id}"))
    └── Backward compatible: plaintext secrets (no "enc:" prefix) returned as-is
-   └── Fail closed: encrypted secrets without the correct key are not delivered unsigned
+   └── Missing secrets are treated as transient and left for stale-claim recovery
+   └── Fail closed: missing or undecryptable secrets are never delivered unsigned
 
 4. PayloadSigner computes HMAC-SHA256(JSON payload, decrypted secret)
    └── Sent as X-Cycles-Signature: sha256=<hex> header
@@ -185,7 +203,7 @@ def verify(body: bytes, secret: str, signature: str) -> bool:
 | Header | Value | Description |
 |--------|-------|-------------|
 | `Content-Type` | `application/json` | Always JSON |
-| `X-Cycles-Signature` | `sha256=<hex>` | HMAC-SHA256 of body (if signing secret configured) |
+| `X-Cycles-Signature` | `sha256=<hex>` | HMAC-SHA256 of body; a delivery is deferred or failed closed if the secret cannot be loaded |
 | `X-Cycles-Event-Id` | `evt_abc123...` | For deduplication (at-least-once delivery) |
 | `X-Cycles-Event-Type` | `budget.exhausted` | Event type for routing |
 | `User-Agent` | `cycles-server-events/<build-version>` | Service identifier |
@@ -230,6 +248,7 @@ PENDING ──HTTP 2xx──► SUCCESS (reset consecutive_failures)
 | `dispatch:pending` | LIST | Admin (LPUSH), Events retry scheduler (LPUSH) | Events (BLMOVE) | Delivery IDs awaiting processing |
 | `dispatch:processing` | LIST | Events (BLMOVE) | Events (LREM/recovery) | In-flight delivery IDs claimed but not yet acked |
 | `dispatch:processing:claimed_at` | ZSET | Events (ZADD/ZREM) | Events recovery | Claim timestamps used to recover only stale in-flight deliveries |
+| `dispatch:processing:claim_owner` | HASH | Events claim Lua | Events ack/recovery Lua | Per-delivery claim generation; a stale worker cannot ack a successor's claim |
 | `dispatch:retry` | ZSET | Events (ZADD) | Events (ZRANGEBYSCORE) | Retry queue (score = timestamp) |
 | `delivery:{id}` | STRING | Admin (SET) | Events (GET/SET) | Delivery record JSON |
 | `event:{id}` | STRING | Admin (SET) | Events (GET) | Event record JSON |
@@ -238,10 +257,12 @@ PENDING ──HTTP 2xx──► SUCCESS (reset consecutive_failures)
 | `dispatcher:event-outbox:pending` | ZSET | Events terminal-state Lua | Events outbox publisher | Due dispatcher meta-event task IDs (score = next attempt time) |
 | `dispatcher:event-outbox:task:{id}` | STRING | Events terminal-state Lua | Events outbox publisher | Durable `webhook.disabled` or `system.webhook_delivery_failed` publication task |
 | `dispatcher:event-outbox:lock:{id}` | STRING | Events outbox publisher | Events outbox publisher | Short owner-token publication lease; removed on ack or expiry |
+| `dispatcher:event-outbox:attempts` | HASH | Events outbox publisher | Events outbox publisher | Publish-failure count used for bounded poison-task retries |
+| `dispatcher:event-outbox:failed` | LIST | Events outbox publisher | Operators | Bounded DLQ of `{task_id,payload}` wrappers for malformed or repeatedly unpublishable tasks |
 
 ### Concurrent safety
 
-Multiple events service instances can safely share `dispatch:pending`. A short Redis lease serializes claim/send sections across replicas, preventing simultaneous sends while preserving FIFO order for initial claims. Delayed retries can still complete after later events, as expected for at-least-once delivery with backoff. Each claim atomically moves one delivery ID to `dispatch:processing`, and the worker removes it only after delivery, subscription, and retry state is durable. Recovery is age-gated and periodic: only entries older than `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` are moved back to pending, so rolling deploys do not steal active work and a quick-restart orphan is reconsidered without another restart.
+Multiple events service instances can safely share `dispatch:pending`. One global Redis lease deliberately serializes the complete claim/send section across the fleet, preventing simultaneous sends while preserving FIFO order for initial claims. This caps webhook throughput at one in-flight HTTP request (about two deliveries/minute when every endpoint consumes the 30-second timeout); extra replicas provide failover, not throughput. Delayed retries can still complete after later events, as expected for at-least-once delivery with backoff. Each claim receives a unique owner token, and ack removes the processing entry only when that token still owns it, so a worker waking after stale recovery cannot erase a successor's claim. Recovery is age-gated and periodic: only entries older than `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` are moved back to pending, and startup validates that threshold is above the ordering lease.
 
 Final retry exhaustion uses one Redis transaction to persist the failed delivery, increment/disable the subscription, and stage both required dispatcher meta-events. A background publisher uses deterministic event IDs and per-task leases, so a crash or Redis error can replay safely without losing or multiplying the logical event. Meta-events are persisted for observation but are not recursively fanned out as webhook deliveries.
 
@@ -256,7 +277,8 @@ Final retry exhaustion uses one Redis transaction to persist the failed delivery
 | `dispatch:pending` | Self-draining | Claimed by BLMOVE into `dispatch:processing` |
 | `dispatch:processing` | Self-draining | Acked by LREM; stale entries recovered to pending after the idle window |
 | `dispatch:retry` | Self-draining | Entries move to pending when ready |
-| `dispatcher:event-outbox:*` | Self-draining | Deterministic tasks remain until their event record is durably saved and acknowledged |
+| `dispatcher:event-outbox:pending`, `task:*`, `lock:*`, `attempts` | Self-draining | Deterministic tasks remain until durably saved, acknowledged, or moved to the bounded DLQ after retry exhaustion |
+| `dispatcher:event-outbox:failed` | Bounded to 10000 by default | Operators inspect and replay or discard poison meta-event tasks |
 
 ### Resilience: events service down
 

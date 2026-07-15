@@ -5,6 +5,7 @@ import io.runcycles.events.metrics.CyclesMetrics;
 import io.runcycles.events.model.DispatcherEventTask;
 import io.runcycles.events.model.Event;
 import io.runcycles.events.repository.EventRepository;
+import io.runcycles.events.repository.EventRepository.OutboxFailureResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -33,7 +34,8 @@ class DispatcherEventOutboxPublisherTest {
     void setUp() {
         registry = new SimpleMeterRegistry();
         metrics = new CyclesMetrics(registry, false);
-        publisher = new DispatcherEventOutboxPublisher(eventRepository, metrics, 10, 30_000, 5_000);
+        publisher = new DispatcherEventOutboxPublisher(
+                eventRepository, metrics, 10, 30_000, 5_000, 100, 10_000);
     }
 
     @Test
@@ -59,11 +61,15 @@ class DispatcherEventOutboxPublisherTest {
         when(eventRepository.tryClaimDispatcherEvent(eq("task-2"), anyString(), eq(30_000L))).thenReturn(true);
         when(eventRepository.findDispatcherEventTask("task-2")).thenReturn(task);
         doThrow(new IllegalStateException("redis unavailable")).when(eventRepository).save(task.event());
+        when(eventRepository.recordDispatcherEventFailure(
+                eq("task-2"), anyString(), anyLong(), eq(100), eq(10_000)))
+                .thenReturn(new OutboxFailureResult(true, false, 1));
 
         assertThatCode(publisher::publishDue).doesNotThrowAnyException();
 
-        verify(eventRepository).deferDispatcherEvent(eq("task-2"), anyLong());
-        verify(eventRepository).releaseDispatcherEventClaim(eq("task-2"), anyString());
+        verify(eventRepository).recordDispatcherEventFailure(
+                eq("task-2"), anyString(), anyLong(), eq(100), eq(10_000));
+        verify(eventRepository, never()).releaseDispatcherEventClaim(eq("task-2"), anyString());
         verify(eventRepository, never()).ackClaimedDispatcherEvent(anyString(), anyString());
         assertThat(registry.find(CyclesMetrics.DISPATCHER_EVENT_DEFERRED)
                 .tags("event_type", "system.webhook_delivery_failed", "reason", "publish_failure")
@@ -71,7 +77,7 @@ class DispatcherEventOutboxPublisherTest {
     }
 
     @Test
-    void concurrentInlineAckDoesNotRecreateOrDoubleCountTask() {
+    void expiredClaimDoesNotRecreateOrDoubleCountTask() {
         DispatcherEventTask task = task("task-race", "webhook.disabled");
         when(eventRepository.findDueDispatcherEvents(anyLong(), eq(10))).thenReturn(List.of("task-race"));
         when(eventRepository.tryClaimDispatcherEvent(eq("task-race"), anyString(), eq(30_000L)))
@@ -83,9 +89,27 @@ class DispatcherEventOutboxPublisherTest {
         publisher.publishDue();
 
         verify(eventRepository).save(task.event());
-        verify(eventRepository, never()).deferDispatcherEvent(anyString(), anyLong());
+        verify(eventRepository, never()).recordDispatcherEventFailure(
+                anyString(), anyString(), anyLong(), anyInt(), anyInt());
         verify(eventRepository).releaseDispatcherEventClaim(eq("task-race"), anyString());
         assertThat(registry.find(CyclesMetrics.DISPATCHER_EVENT_PUBLISHED).counter()).isNull();
+    }
+
+    @Test
+    void lostClaimDuringFailureTransitionFallsBackToOwnedRelease() {
+        DispatcherEventTask task = task("task-lost", "webhook.disabled");
+        when(eventRepository.findDueDispatcherEvents(anyLong(), eq(10))).thenReturn(List.of("task-lost"));
+        when(eventRepository.tryClaimDispatcherEvent(eq("task-lost"), anyString(), eq(30_000L)))
+                .thenReturn(true);
+        when(eventRepository.findDispatcherEventTask("task-lost")).thenReturn(task);
+        doThrow(new IllegalStateException("redis unavailable")).when(eventRepository).save(task.event());
+        when(eventRepository.recordDispatcherEventFailure(
+                eq("task-lost"), anyString(), anyLong(), eq(100), eq(10_000)))
+                .thenReturn(new OutboxFailureResult(false, false, 0));
+
+        publisher.publishDue();
+
+        verify(eventRepository).releaseDispatcherEventClaim(eq("task-lost"), anyString());
     }
 
     @Test
@@ -148,8 +172,9 @@ class DispatcherEventOutboxPublisherTest {
                 .thenReturn(true);
         when(eventRepository.findDispatcherEventTask("task-broken"))
                 .thenThrow(new IllegalStateException("corrupt task"));
-        doThrow(new IllegalStateException("cannot defer"))
-                .when(eventRepository).deferDispatcherEvent(eq("task-broken"), anyLong());
+        when(eventRepository.recordDispatcherEventFailure(
+                eq("task-broken"), anyString(), anyLong(), eq(100), eq(10_000)))
+                .thenThrow(new IllegalStateException("cannot defer"));
         doThrow(new IllegalStateException("cannot release"))
                 .when(eventRepository).releaseDispatcherEventClaim(eq("task-broken"), anyString());
 
@@ -157,6 +182,26 @@ class DispatcherEventOutboxPublisherTest {
 
         assertThat(registry.find(CyclesMetrics.DISPATCHER_EVENT_DEFERRED)
                 .tags("event_type", CyclesMetrics.TAG_UNKNOWN, "reason", "publish_failure")
+                .counter().count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void poisonTaskIsDeadLetteredAfterBoundedAttempts() {
+        DispatcherEventTask task = task("task-poison", "webhook.disabled");
+        when(eventRepository.findDueDispatcherEvents(anyLong(), eq(10))).thenReturn(List.of("task-poison"));
+        when(eventRepository.tryClaimDispatcherEvent(eq("task-poison"), anyString(), eq(30_000L)))
+                .thenReturn(true);
+        when(eventRepository.findDispatcherEventTask("task-poison")).thenReturn(task);
+        doThrow(new IllegalArgumentException("poison event")).when(eventRepository).save(task.event());
+        when(eventRepository.recordDispatcherEventFailure(
+                eq("task-poison"), anyString(), anyLong(), eq(100), eq(10_000)))
+                .thenReturn(new OutboxFailureResult(true, true, 100));
+
+        publisher.publishDue();
+
+        verify(eventRepository, never()).releaseDispatcherEventClaim(eq("task-poison"), anyString());
+        assertThat(registry.find(CyclesMetrics.DISPATCHER_EVENT_DEAD_LETTERED)
+                .tags("event_type", "webhook.disabled", "reason", "attempts_exhausted")
                 .counter().count()).isEqualTo(1.0);
     }
 
@@ -177,13 +222,19 @@ class DispatcherEventOutboxPublisherTest {
     @Test
     void constructorRejectsInvalidLimits() {
         assertThatThrownBy(() -> new DispatcherEventOutboxPublisher(
-                eventRepository, metrics, 0, 30_000, 5_000))
+                eventRepository, metrics, 0, 30_000, 5_000, 100, 10_000))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new DispatcherEventOutboxPublisher(
-                eventRepository, metrics, 10, 0, 5_000))
+                eventRepository, metrics, 10, 0, 5_000, 100, 10_000))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new DispatcherEventOutboxPublisher(
-                eventRepository, metrics, 10, 30_000, 0))
+                eventRepository, metrics, 10, 30_000, 0, 100, 10_000))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new DispatcherEventOutboxPublisher(
+                eventRepository, metrics, 10, 30_000, 5_000, 0, 10_000))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new DispatcherEventOutboxPublisher(
+                eventRepository, metrics, 10, 30_000, 5_000, 100, 0))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 

@@ -284,16 +284,52 @@ class EventRepositoryTest {
 
     @Test
     void claimedOutboxAckReportsOwnershipAndMaintenanceMethodsUseExpectedKeys() {
-        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(1L, 0L);
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(1L, 0L, 2L);
 
         assertThat(repository.ackClaimedDispatcherEvent("task-1", "owner-1")).isTrue();
         assertThat(repository.ackClaimedDispatcherEvent("task-1", "owner-2")).isFalse();
-        repository.deferDispatcherEvent("task-1", 123L);
+        EventRepository.OutboxFailureResult deferred = repository.recordDispatcherEventFailure(
+                "task-1", "owner-1", 123L, 100, 10_000);
         repository.releaseDispatcherEventClaim("task-1", "owner-1");
 
-        verify(jedis).zadd(EventRepository.DISPATCHER_OUTBOX_PENDING_KEY, 123L, "task-1");
+        assertThat(deferred.claimResolved()).isTrue();
+        assertThat(deferred.deadLettered()).isFalse();
+        assertThat(deferred.attempts()).isEqualTo(2);
         verify(jedis).eval(anyString(),
                 eq(List.of("dispatcher:event-outbox:lock:task-1")), eq(List.of("owner-1")));
+    }
+
+    @Test
+    void outboxFailureTransitionReportsLostOwnershipAndDeadLetter() {
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(0L, -100L, "unexpected");
+
+        EventRepository.OutboxFailureResult lost = repository.recordDispatcherEventFailure(
+                "task-1", "owner-1", 123L, 100, 10_000);
+        EventRepository.OutboxFailureResult dead = repository.recordDispatcherEventFailure(
+                "task-1", "owner-1", 123L, 100, 10_000);
+        EventRepository.OutboxFailureResult unexpected = repository.recordDispatcherEventFailure(
+                "task-1", "owner-1", 123L, 100, 10_000);
+
+        assertThat(lost.claimResolved()).isFalse();
+        assertThat(dead.deadLettered()).isTrue();
+        assertThat(dead.attempts()).isEqualTo(100);
+        assertThat(unexpected.claimResolved()).isFalse();
+    }
+
+    @Test
+    void invalidOutboxFailureArgumentsFailBeforeRedis() {
+        assertThatThrownBy(() -> repository.recordDispatcherEventFailure(null, "owner", 1, 1, 1))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.recordDispatcherEventFailure("", "owner", 1, 1, 1))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.recordDispatcherEventFailure("task", null, 1, 1, 1))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.recordDispatcherEventFailure("task", "", 1, 1, 1))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.recordDispatcherEventFailure("task", "owner", 1, 0, 1))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.recordDispatcherEventFailure("task", "owner", 1, 1, 0))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
 }

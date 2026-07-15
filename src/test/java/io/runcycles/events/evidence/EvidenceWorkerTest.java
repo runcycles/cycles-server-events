@@ -372,7 +372,35 @@ class EvidenceWorkerTest {
         EvidenceWorker worker = worker(mock(EvidenceQueueConsumer.class), envelope -> { });
 
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> worker.build(record))
-                .isInstanceOf(Exception.class);
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsRawFractionThatBinary64WouldRoundBeforeSigning() throws Exception {
+        ObjectNode record = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        record.withObject("payload").withObject("request").withObject("metadata")
+                .put("precise_fraction", "RAW_FRACTION");
+        String raw = mapper.writeValueAsString(record)
+                .replace("\"RAW_FRACTION\"", "0.10000000000000001");
+
+        assertThatThrownBy(() -> worker(mock(EvidenceQueueConsumer.class), envelope -> { }).build(raw))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("cannot be represented losslessly")
+                .hasMessageContaining("precise_fraction");
+    }
+
+    @Test
+    void acceptsRawFractionThatBinary64RepresentsExactly() throws Exception {
+        ObjectNode record = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        record.withObject("payload").withObject("request").withObject("metadata")
+                .put("exact_fraction", "RAW_FRACTION");
+        String raw = mapper.writeValueAsString(record)
+                .replace("\"RAW_FRACTION\"", "0.5");
+
+        assertThat(worker(mock(EvidenceQueueConsumer.class), envelope -> { }).build(raw).envelope()
+                .path("payload").path("reserve").path("request").path("metadata")
+                .path("exact_fraction").decimalValue())
+                .isEqualByComparingTo("0.5");
     }
 
     @Test

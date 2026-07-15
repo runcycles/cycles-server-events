@@ -20,7 +20,7 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
-## [0.1.25.25] — 2026-07-15
+## [0.1.25.24] — 2026-07-15
 
 ### Fixed
 
@@ -40,7 +40,19 @@ breaking.
   the evidence fetch endpoint.
 - Terminal delivery state records the final attempt and clears obsolete retry
   and error fields.
-- Missing webhook signing secrets fail closed before HTTP delivery.
+- Missing webhook signing secrets created by a subscription/secret write race
+  are retained for recovery instead of being permanently failed. Missing or
+  undecryptable secrets fail closed before HTTP and are never sent unsigned.
+- Delivery acknowledgements carry an owner token, closing the stale-worker
+  window where a recovered predecessor could remove its successor's in-flight
+  entry. Startup also rejects a recovery idle threshold at or below the global
+  ordering lease.
+- Fractional evidence numbers are parsed as arbitrary-precision decimals before
+  binary64 safety validation, so excess precision is rejected rather than
+  silently rounded and signed.
+- Dispatcher outbox acknowledgement is owner-aware and counted once. Repeatedly
+  unpublishable tasks now exhaust a bounded retry budget and move to a bounded
+  operator DLQ instead of retrying forever.
 - Recovered `RETRYING` deliveries restore their Redis retry schedule when the
   backoff has not elapsed, closing the persist-before-ZSET crash window without
   sending early.
@@ -61,6 +73,9 @@ breaking.
   silent mathematical changes in signed evidence.
 - Webhook CIDR configuration uses a strict literal-only parser and rejects
   malformed prefixes, extra path segments, hostnames, and IPv6 zone identifiers.
+- The absent-config webhook egress fallback now also blocks `0.0.0.0/8`,
+  `100.64.0.0/10`, and `fe80::/10`. Indeterminate security configuration emits
+  a dedicated alertable metric while deliveries remain recoverable.
 - Evidence lifecycle metrics now constrain `artifact_type` to the five-value
   protocol vocabulary, and malformed source JSON is logged without payload
   excerpts.
@@ -71,6 +86,9 @@ breaking.
   above 95%, including Redis CAS outcomes, terminal delivery transactions,
   evidence source validation, webhook transport failures, CIDR parsing, and
   retention error handling.
+- Real-Redis tests now execute delivery owner acknowledgement, dispatcher outbox
+  ownership/DLQ scripts, evidence ack/DLQ scripts, and the production terminal
+  failure transaction under contention.
 
 ## [0.1.25.23] — 2026-07-11
 

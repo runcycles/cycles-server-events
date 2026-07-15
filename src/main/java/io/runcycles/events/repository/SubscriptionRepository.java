@@ -29,10 +29,6 @@ public class SubscriptionRepository {
             if not current then return -1 end
             if current ~= ARGV[1] then return 0 end
             redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
-            if ARGV[3] == '1' then
-              redis.call('SET', KEYS[2], ARGV[4], 'NX')
-              redis.call('ZADD', KEYS[3], ARGV[5], ARGV[6])
-            end
             return 1
             """;
 
@@ -126,73 +122,6 @@ public class SubscriptionRepository {
             LOG.error("Failed to update webhook subscription delivery state: subscription_id={} status={} consecutive_failures={} last_triggered_at={} last_success_at={} last_failure_at={}",
                     safe(subscriptionId), status, consecutiveFailures, lastTriggeredAt, lastSuccessAt, lastFailureAt, e);
             throw new IllegalStateException("Failed to update webhook subscription delivery state", e);
-        }
-    }
-
-    /**
-     * Atomically increments the authoritative Redis failure count and performs
-     * the ACTIVE/PAUSED-to-DISABLED transition exactly once. The returned transition
-     * decides whether the caller emits the disable event.
-     */
-    public FailureUpdate recordDeliveryFailure(String subscriptionId, Instant occurredAt,
-                                                int defaultDisableAfter,
-                                                DispatcherEventTask disableEventTask) {
-        if (subscriptionId == null || subscriptionId.isBlank() || occurredAt == null
-                || defaultDisableAfter <= 0 || disableEventTask == null) {
-            throw new IllegalArgumentException(
-                    "subscription id, occurrence time, positive disable threshold, and disable event task are required");
-        }
-        try (Jedis jedis = jedisPool.getResource()) {
-            String key = "webhook:" + subscriptionId;
-            for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
-                String current = jedis.get(key);
-                if (current == null) return new FailureUpdate(false, 0, false, null);
-                ObjectNode sub = requireObject(current);
-                JsonNode failureNode = sub.path("consecutive_failures");
-                long currentFailures = failureNode.isIntegralNumber() && failureNode.canConvertToLong()
-                        ? Math.max(0, failureNode.longValue()) : 0;
-                int failures = currentFailures >= Integer.MAX_VALUE
-                        ? Integer.MAX_VALUE : (int) currentFailures + 1;
-                JsonNode thresholdNode = sub.path("disable_after_failures");
-                int threshold = thresholdNode.isIntegralNumber() && thresholdNode.canConvertToInt()
-                        && thresholdNode.intValue() > 0
-                        ? thresholdNode.intValue() : defaultDisableAfter;
-                String previous = sub.path("status").asText("");
-                boolean disableEligible = "ACTIVE".equals(previous) || "PAUSED".equals(previous);
-                // Spec wording is explicit: disable only after the count EXCEEDS
-                // disable_after_failures, not merely when it reaches the value.
-                boolean disabledNow = disableEligible && failures > threshold;
-                sub.put("consecutive_failures", failures);
-                sub.put("last_triggered_at", occurredAt.toString());
-                sub.put("last_failure_at", occurredAt.toString());
-                if (disabledNow) sub.put("status", WebhookStatus.DISABLED.name());
-                String updated = objectMapper.writeValueAsString(sub);
-                if (disabledNow && disableEventTask.event().getData() != null) {
-                    disableEventTask.event().getData().put("previous_status", previous);
-                }
-                String taskJson = disabledNow ? objectMapper.writeValueAsString(disableEventTask) : "";
-                java.util.List<String> keys = new java.util.ArrayList<>();
-                keys.add(key);
-                if (disabledNow) {
-                    keys.add(EventRepository.dispatcherOutboxTaskKey(disableEventTask.taskId()));
-                    keys.add(EventRepository.DISPATCHER_OUTBOX_PENDING_KEY);
-                }
-                Object result = jedis.eval(COMPARE_AND_SET_LUA,
-                        keys, java.util.List.of(current, updated, disabledNow ? "1" : "0", taskJson,
-                                Long.toString(disableEventTask.createdAt().toEpochMilli()),
-                                disableEventTask.taskId()));
-                if (Long.valueOf(-1L).equals(result)) {
-                    return new FailureUpdate(false, 0, false, null);
-                }
-                if (Long.valueOf(1L).equals(result)) {
-                    return new FailureUpdate(true, failures, disabledNow, parseStatus(previous));
-                }
-            }
-            throw new IllegalStateException("subscription changed too frequently to record delivery failure");
-        } catch (Exception e) {
-            LOG.error("Failed to atomically record webhook subscription failure: subscription_id={} occurred_at={} default_disable_after={}",
-                    safe(subscriptionId), occurredAt, defaultDisableAfter, e);
-            throw new IllegalStateException("Failed to record webhook subscription failure", e);
         }
     }
 
@@ -315,10 +244,6 @@ public class SubscriptionRepository {
         } catch (IllegalArgumentException unknownFutureStatus) {
             return null;
         }
-    }
-
-    public record FailureUpdate(boolean found, int consecutiveFailures,
-                                boolean disabledNow, WebhookStatus previousStatus) {
     }
 
     public record TerminalFailureUpdate(boolean deliveryFound, boolean subscriptionFound,

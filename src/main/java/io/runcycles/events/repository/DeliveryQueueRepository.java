@@ -7,6 +7,7 @@ import redis.clients.jedis.args.ListDirection;
 import redis.clients.jedis.params.SetParams;
 
 import java.util.List;
+import java.util.UUID;
 
 @Repository
 public class DeliveryQueueRepository {
@@ -14,6 +15,7 @@ public class DeliveryQueueRepository {
     static final String PENDING_KEY = "dispatch:pending";
     static final String PROCESSING_KEY = "dispatch:processing";
     static final String PROCESSING_CLAIMED_AT_KEY = "dispatch:processing:claimed_at";
+    static final String PROCESSING_CLAIM_OWNER_KEY = "dispatch:processing:claim_owner";
     static final String RETRY_KEY = "dispatch:retry";
     static final String ORDERING_LOCK_KEY = "dispatch:ordering:lock";
     private static final int RECOVERY_SCAN_LIMIT = 1_000;
@@ -31,10 +33,20 @@ public class DeliveryQueueRepository {
             return moved
             """;
 
-    private static final String ACK_PROCESSING_LUA =
-            "redis.call('LREM', KEYS[1], 1, ARGV[1])\n" +
-            "redis.call('ZREM', KEYS[2], ARGV[1])\n" +
-            "return 1\n";
+    private static final String RECORD_PROCESSING_CLAIM_LUA = """
+            if not redis.call('LPOS', KEYS[1], ARGV[1]) then return 0 end
+            redis.call('ZADD', KEYS[2], ARGV[2], ARGV[1])
+            redis.call('HSET', KEYS[3], ARGV[1], ARGV[3])
+            return 1
+            """;
+
+    private static final String ACK_PROCESSING_LUA = """
+            if redis.call('HGET', KEYS[3], ARGV[1]) ~= ARGV[2] then return 0 end
+            local removed = redis.call('LREM', KEYS[1], 1, ARGV[1])
+            redis.call('ZREM', KEYS[2], ARGV[1])
+            redis.call('HDEL', KEYS[3], ARGV[1])
+            return removed
+            """;
 
     private static final String RELEASE_ORDERING_LOCK_LUA =
             "if redis.call('GET', KEYS[1]) == ARGV[1] then\n" +
@@ -51,11 +63,14 @@ public class DeliveryQueueRepository {
               local id = redis.call('LMOVE', KEYS[1], KEYS[1], 'RIGHT', 'LEFT')
               if not id then break end
               local claimed_at = redis.call('ZSCORE', KEYS[2], id)
-              if not claimed_at then
+              local owner = redis.call('HGET', KEYS[4], id)
+              if not claimed_at or not owner then
                 redis.call('ZADD', KEYS[2], now, id)
+                if not owner then redis.call('HSET', KEYS[4], id, '__orphan__') end
               elseif tonumber(claimed_at) <= cutoff then
                 if redis.call('LREM', KEYS[1], 1, id) > 0 then
                   redis.call('ZREM', KEYS[2], id)
+                  redis.call('HDEL', KEYS[4], id)
                   redis.call('LPUSH', KEYS[3], id)
                   moved = moved + 1
                 end
@@ -99,24 +114,43 @@ public class DeliveryQueueRepository {
     }
 
     /**
-     * Atomically claim one delivery by moving it from pending to processing.
-     * The delivery stays in processing until {@link #ack(String)} succeeds.
+     * Atomically move one delivery from pending to processing, then attach a
+     * unique claim generation before returning it. Recovery can move the list
+     * entry between those operations, so the claim-recording Lua verifies the
+     * entry is still in processing. A failed verification means the delivery is
+     * already recoverable elsewhere and this invocation owns no work.
      */
-    public String claimPending(int timeoutSeconds) {
+    public ClaimedDelivery claimPending(int timeoutSeconds) {
+        String claimToken = UUID.randomUUID().toString();
         try (Jedis jedis = jedisPool.getResource()) {
             String deliveryId = jedis.blmove(PENDING_KEY, PROCESSING_KEY,
                     ListDirection.RIGHT, ListDirection.LEFT, timeoutSeconds);
-            if (deliveryId != null) {
-                jedis.zadd(PROCESSING_CLAIMED_AT_KEY, System.currentTimeMillis(), deliveryId);
+            if (deliveryId == null) {
+                return null;
             }
-            return deliveryId;
+            Object recorded = jedis.eval(RECORD_PROCESSING_CLAIM_LUA,
+                    List.of(PROCESSING_KEY, PROCESSING_CLAIMED_AT_KEY, PROCESSING_CLAIM_OWNER_KEY),
+                    List.of(deliveryId, Long.toString(System.currentTimeMillis()), claimToken));
+            return Long.valueOf(1L).equals(recorded)
+                    ? new ClaimedDelivery(deliveryId, claimToken)
+                    : null;
         }
     }
 
-    /** Acknowledge a processed delivery by removing it from processing. */
-    public void ack(String deliveryId) {
+    /**
+     * Acknowledge only the caller's claim generation. A worker resuming after
+     * stale recovery cannot remove a successor's processing marker.
+     */
+    public boolean ack(ClaimedDelivery claim) {
+        if (claim == null || claim.deliveryId() == null || claim.deliveryId().isBlank()
+                || claim.claimToken() == null || claim.claimToken().isBlank()) {
+            throw new IllegalArgumentException("delivery claim id and token are required");
+        }
         try (Jedis jedis = jedisPool.getResource()) {
-            jedis.eval(ACK_PROCESSING_LUA, List.of(PROCESSING_KEY, PROCESSING_CLAIMED_AT_KEY), List.of(deliveryId));
+            Object result = jedis.eval(ACK_PROCESSING_LUA,
+                    List.of(PROCESSING_KEY, PROCESSING_CLAIMED_AT_KEY, PROCESSING_CLAIM_OWNER_KEY),
+                    List.of(claim.deliveryId(), claim.claimToken()));
+            return Long.valueOf(1L).equals(result);
         }
     }
 
@@ -125,15 +159,16 @@ public class DeliveryQueueRepository {
      *
      * <p>Recovery is age-gated so a newly-started replica does not requeue work
      * another live replica just claimed from the shared processing list. Entries
-     * without a claim timestamp are first marked with {@code nowMillis} and get
-     * a full idle window before recovery; this closes the BLMOVE-to-ZADD race
-     * without duplicating another worker's active delivery.
+     * without a timestamp or owner token are first completed with recovery
+     * metadata at {@code nowMillis} and get a full idle window; this closes the
+     * BLMOVE-to-claim-record race without duplicating active work.
      */
     public long recoverStaleProcessing(long nowMillis, long idleMillis) {
         long cutoff = nowMillis - Math.max(0, idleMillis);
         try (Jedis jedis = jedisPool.getResource()) {
             Object result = jedis.eval(RECOVER_STALE_BATCH_LUA,
-                    List.of(PROCESSING_KEY, PROCESSING_CLAIMED_AT_KEY, PENDING_KEY),
+                    List.of(PROCESSING_KEY, PROCESSING_CLAIMED_AT_KEY, PENDING_KEY,
+                            PROCESSING_CLAIM_OWNER_KEY),
                     List.of(Integer.toString(RECOVERY_SCAN_LIMIT), Long.toString(nowMillis), Long.toString(cutoff)));
             return result instanceof Long count ? count : 0L;
         }
@@ -164,5 +199,8 @@ public class DeliveryQueueRepository {
                             : String.valueOf(value))
                     .toList();
         }
+    }
+
+    public record ClaimedDelivery(String deliveryId, String claimToken) {
     }
 }

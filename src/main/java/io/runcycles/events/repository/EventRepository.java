@@ -23,15 +23,37 @@ public class EventRepository {
     private static final Logger LOG = LoggerFactory.getLogger(EventRepository.class);
 
     public static final String DISPATCHER_OUTBOX_PENDING_KEY = "dispatcher:event-outbox:pending";
+    public static final String DISPATCHER_OUTBOX_FAILED_KEY = "dispatcher:event-outbox:failed";
     private static final String DISPATCHER_OUTBOX_TASK_PREFIX = "dispatcher:event-outbox:task:";
     private static final String DISPATCHER_OUTBOX_LOCK_PREFIX = "dispatcher:event-outbox:lock:";
+    private static final String DISPATCHER_OUTBOX_ATTEMPTS_KEY = "dispatcher:event-outbox:attempts";
 
     private static final String ACK_CLAIMED_OUTBOX_TASK_LUA = """
             if redis.call('GET', KEYS[3]) ~= ARGV[2] then return 0 end
             redis.call('ZREM', KEYS[1], ARGV[1])
             redis.call('DEL', KEYS[2])
+            redis.call('HDEL', KEYS[4], ARGV[1])
             redis.call('DEL', KEYS[3])
             return 1
+            """;
+
+    private static final String RECORD_OUTBOX_FAILURE_LUA = """
+            if redis.call('GET', KEYS[3]) ~= ARGV[2] then return 0 end
+            local attempts = redis.call('HINCRBY', KEYS[4], ARGV[1], 1)
+            if attempts >= tonumber(ARGV[4]) then
+              local payload = redis.call('GET', KEYS[2])
+              redis.call('ZREM', KEYS[1], ARGV[1])
+              redis.call('DEL', KEYS[2])
+              redis.call('HDEL', KEYS[4], ARGV[1])
+              local dead_letter = cjson.encode({task_id=ARGV[1], payload=payload or ''})
+              redis.call('LPUSH', KEYS[5], dead_letter)
+              redis.call('LTRIM', KEYS[5], 0, tonumber(ARGV[5]) - 1)
+              redis.call('DEL', KEYS[3])
+              return -attempts
+            end
+            redis.call('ZADD', KEYS[1], ARGV[3], ARGV[1])
+            redis.call('DEL', KEYS[3])
+            return attempts
             """;
 
     private static final String RELEASE_OUTBOX_LOCK_LUA = """
@@ -111,11 +133,14 @@ public class EventRepository {
     public boolean ackDispatcherEvent(String taskId) {
         try (Jedis jedis = jedisPool.getResource()) {
             Object result = jedis.eval("""
+                    if redis.call('EXISTS', KEYS[3]) == 1 then return 0 end
                     local pending = redis.call('ZREM', KEYS[1], ARGV[1])
                     local task = redis.call('DEL', KEYS[2])
+                    redis.call('HDEL', KEYS[4], ARGV[1])
                     if pending > 0 or task > 0 then return 1 end
                     return 0
-                    """, List.of(DISPATCHER_OUTBOX_PENDING_KEY, dispatcherOutboxTaskKey(taskId)),
+                    """, List.of(DISPATCHER_OUTBOX_PENDING_KEY, dispatcherOutboxTaskKey(taskId),
+                            DISPATCHER_OUTBOX_LOCK_PREFIX + taskId, DISPATCHER_OUTBOX_ATTEMPTS_KEY),
                     List.of(taskId));
             return Long.valueOf(1L).equals(result);
         }
@@ -152,9 +177,24 @@ public class EventRepository {
         }
     }
 
-    public void deferDispatcherEvent(String taskId, long nextAttemptAtMillis) {
+    public OutboxFailureResult recordDispatcherEventFailure(
+            String taskId, String owner, long nextAttemptAtMillis,
+            int maxAttempts, int failedMaxLen) {
+        if (taskId == null || taskId.isBlank() || owner == null || owner.isBlank()
+                || maxAttempts <= 0 || failedMaxLen <= 0) {
+            throw new IllegalArgumentException(
+                    "outbox failure transition requires task, owner, and positive bounds");
+        }
         try (Jedis jedis = jedisPool.getResource()) {
-            jedis.zadd(DISPATCHER_OUTBOX_PENDING_KEY, nextAttemptAtMillis, taskId);
+            Object result = jedis.eval(RECORD_OUTBOX_FAILURE_LUA,
+                    List.of(DISPATCHER_OUTBOX_PENDING_KEY, dispatcherOutboxTaskKey(taskId),
+                            DISPATCHER_OUTBOX_LOCK_PREFIX + taskId, DISPATCHER_OUTBOX_ATTEMPTS_KEY,
+                            DISPATCHER_OUTBOX_FAILED_KEY),
+                    List.of(taskId, owner, Long.toString(nextAttemptAtMillis),
+                            Integer.toString(maxAttempts), Integer.toString(failedMaxLen)));
+            long code = result instanceof Long value ? value : 0L;
+            if (code == 0) return new OutboxFailureResult(false, false, 0);
+            return new OutboxFailureResult(true, code < 0, Math.abs(code));
         }
     }
 
@@ -162,7 +202,7 @@ public class EventRepository {
         try (Jedis jedis = jedisPool.getResource()) {
             Object result = jedis.eval(ACK_CLAIMED_OUTBOX_TASK_LUA,
                     List.of(DISPATCHER_OUTBOX_PENDING_KEY, dispatcherOutboxTaskKey(taskId),
-                            DISPATCHER_OUTBOX_LOCK_PREFIX + taskId),
+                            DISPATCHER_OUTBOX_LOCK_PREFIX + taskId, DISPATCHER_OUTBOX_ATTEMPTS_KEY),
                     List.of(taskId, owner));
             return Long.valueOf(1L).equals(result);
         }
@@ -184,5 +224,8 @@ public class EventRepository {
             LOG.error("Failed to read event: event_id={}", safe(eventId), e);
             throw new IllegalStateException("Failed to read event", e);
         }
+    }
+
+    public record OutboxFailureResult(boolean claimResolved, boolean deadLettered, long attempts) {
     }
 }

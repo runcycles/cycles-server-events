@@ -505,12 +505,18 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
 
-        handler.handle("del-1");
+        assertThatThrownBy(() -> handler.handle("del-1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not yet available");
 
-        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
-        assertThat(delivery.getErrorMessage()).contains("signing secret is missing");
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.PENDING);
+        assertThat(delivery.getErrorMessage()).isNull();
         assertThat(delivery.getTraceId()).isEqualTo("0123456789abcdef0123456789abcdef");
+        verify(deliveryRepository, never()).update(any());
         verify(transport, never()).deliver(any(), any(), any(), any());
+        assertThat(counter(CyclesMetrics.DELIVERY_FAILED,
+                "tenant", "t-1", "event_type", "tenant.created",
+                "reason", "missing_signing_secret")).isEqualTo(1.0);
     }
 
     @Test
@@ -1049,6 +1055,7 @@ class DeliveryHandlerTest {
         verify(queueRepository, never()).scheduleRetry(anyString(), anyLong());
         verify(subscriptionRepository, never()).updateDeliveryState(
                 anyString(), anyInt(), any(), any(), any(), any());
+        assertThat(counter(CyclesMetrics.SECURITY_CONFIG_INDETERMINATE)).isEqualTo(1.0);
     }
 
     @Test
@@ -1397,9 +1404,12 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(" ");
 
-        handler.handle("del-1");
+        assertThatThrownBy(() -> handler.handle("del-1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("not yet available");
 
-        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.PENDING);
+        verify(deliveryRepository, never()).update(any());
         verify(transport, never()).deliver(any(), any(), any(), any());
     }
 
