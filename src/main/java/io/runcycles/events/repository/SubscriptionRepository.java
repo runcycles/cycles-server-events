@@ -7,9 +7,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.runcycles.events.config.CryptoService;
 import io.runcycles.events.model.Delivery;
+import io.runcycles.events.model.DeliveryStatus;
 import io.runcycles.events.model.DispatcherEventTask;
 import io.runcycles.events.model.Subscription;
 import io.runcycles.events.model.WebhookStatus;
+import io.runcycles.events.repository.DeliveryQueueRepository.ClaimedDelivery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Repository;
@@ -24,15 +26,8 @@ public class SubscriptionRepository {
     private static final Logger LOG = LoggerFactory.getLogger(SubscriptionRepository.class);
     private static final int MAX_CAS_ATTEMPTS = 128;
 
-    private static final String COMPARE_AND_SET_LUA = """
-            local current = redis.call('GET', KEYS[1])
-            if not current then return -1 end
-            if current ~= ARGV[1] then return 0 end
-            redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
-            return 1
-            """;
-
     private static final String FINALIZE_DELIVERY_FAILURE_LUA = """
+            if redis.call('HGET', KEYS[6], ARGV[13]) ~= ARGV[14] then return -3 end
             local delivery = redis.call('GET', KEYS[1])
             if not delivery then return -2 end
             if delivery ~= ARGV[1] then return 0 end
@@ -55,6 +50,25 @@ public class SubscriptionRepository {
               return 1
             end
             return 3
+            """;
+
+    private static final String FINALIZE_DELIVERY_SUCCESS_LUA = """
+            if redis.call('HGET', KEYS[3], ARGV[6]) ~= ARGV[7] then return -3 end
+            local delivery = redis.call('GET', KEYS[1])
+            if not delivery then return -2 end
+            if delivery ~= ARGV[1] then return 0 end
+            local subscription = redis.call('GET', KEYS[2])
+            if ARGV[3] == '0' then
+              if subscription then return 0 end
+            elseif not subscription or subscription ~= ARGV[4] then
+              return 0
+            end
+            redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')
+            if ARGV[3] == '1' then
+              redis.call('SET', KEYS[2], ARGV[5], 'KEEPTTL')
+              return 1
+            end
+            return 2
             """;
 
     private final JedisPool jedisPool;
@@ -89,42 +103,6 @@ public class SubscriptionRepository {
         }
     }
 
-    /** Atomically merges only events-owned operational fields in Redis. */
-    public boolean updateDeliveryState(String subscriptionId, int consecutiveFailures,
-                                       Instant lastTriggeredAt, Instant lastSuccessAt,
-                                       Instant lastFailureAt, WebhookStatus status) {
-        if (subscriptionId == null || subscriptionId.isBlank() || consecutiveFailures < 0) {
-            throw new IllegalArgumentException("subscription id and non-negative failure count are required");
-        }
-        try (Jedis jedis = jedisPool.getResource()) {
-            String key = "webhook:" + subscriptionId;
-            for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
-                String current = jedis.get(key);
-                if (current == null) {
-                    LOG.warn("Webhook subscription not found during delivery-state update: subscription_id={} status={} consecutive_failures={} last_triggered_at={} last_success_at={} last_failure_at={}",
-                            safe(subscriptionId), status, consecutiveFailures, lastTriggeredAt, lastSuccessAt, lastFailureAt);
-                    return false;
-                }
-                ObjectNode sub = requireObject(current);
-                sub.put("consecutive_failures", consecutiveFailures);
-                putInstant(sub, "last_triggered_at", lastTriggeredAt);
-                putInstant(sub, "last_success_at", lastSuccessAt);
-                putInstant(sub, "last_failure_at", lastFailureAt);
-                if (status != null) sub.put("status", status.name());
-                String updated = objectMapper.writeValueAsString(sub);
-                Object result = jedis.eval(COMPARE_AND_SET_LUA,
-                        java.util.List.of(key), java.util.List.of(current, updated));
-                if (Long.valueOf(1L).equals(result)) return true;
-                if (Long.valueOf(-1L).equals(result)) return false;
-            }
-            throw new IllegalStateException("subscription changed too frequently to update delivery state");
-        } catch (Exception e) {
-            LOG.error("Failed to update webhook subscription delivery state: subscription_id={} status={} consecutive_failures={} last_triggered_at={} last_success_at={} last_failure_at={}",
-                    safe(subscriptionId), status, consecutiveFailures, lastTriggeredAt, lastSuccessAt, lastFailureAt, e);
-            throw new IllegalStateException("Failed to update webhook subscription delivery state", e);
-        }
-    }
-
     /**
      * Atomically commits the exhausted-retry delivery state, subscription
      * failure counter/optional disable transition, and every mandatory
@@ -133,6 +111,7 @@ public class SubscriptionRepository {
      */
     public TerminalFailureUpdate finalizeDeliveryFailure(
             String subscriptionId,
+            ClaimedDelivery claim,
             Delivery failedDelivery,
             Instant occurredAt,
             int defaultDisableAfter,
@@ -140,6 +119,9 @@ public class SubscriptionRepository {
             DispatcherEventTask deliveryFailedEventTask) {
         if (subscriptionId == null || subscriptionId.isBlank() || failedDelivery == null
                 || failedDelivery.getDeliveryId() == null || failedDelivery.getDeliveryId().isBlank()
+                || failedDelivery.getStatus() != DeliveryStatus.FAILED
+                || !subscriptionId.equals(failedDelivery.getSubscriptionId())
+                || !validClaimFor(claim, failedDelivery.getDeliveryId())
                 || occurredAt == null || defaultDisableAfter <= 0
                 || disableEventTask == null || deliveryFailedEventTask == null) {
             throw new IllegalArgumentException("terminal delivery failure transaction inputs are required");
@@ -152,7 +134,10 @@ public class SubscriptionRepository {
             for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
                 String currentDelivery = jedis.get(deliveryKey);
                 if (currentDelivery == null) {
-                    return new TerminalFailureUpdate(false, false, 0, false, null);
+                    return new TerminalFailureUpdate(false, false, false, 0, false, null);
+                }
+                if (!isTransitionableDelivery(currentDelivery)) {
+                    return new TerminalFailureUpdate(false, true, false, 0, false, null);
                 }
                 String currentSubscription = jedis.get(subscriptionKey);
                 boolean subscriptionFound = currentSubscription != null;
@@ -194,7 +179,8 @@ public class SubscriptionRepository {
                         subscriptionKey,
                         EventRepository.dispatcherOutboxTaskKey(deliveryFailedEventTask.taskId()),
                         EventRepository.DISPATCHER_OUTBOX_PENDING_KEY,
-                        EventRepository.dispatcherOutboxTaskKey(disableEventTask.taskId()));
+                        EventRepository.dispatcherOutboxTaskKey(disableEventTask.taskId()),
+                        DeliveryQueueRepository.PROCESSING_CLAIM_OWNER_KEY);
                 java.util.List<String> args = java.util.List.of(
                         currentDelivery,
                         failedDeliveryJson,
@@ -207,13 +193,18 @@ public class SubscriptionRepository {
                         disabledNow ? "1" : "0",
                         disableTaskJson,
                         Long.toString(disableEventTask.createdAt().toEpochMilli()),
-                        disableEventTask.taskId());
+                        disableEventTask.taskId(),
+                        claim.deliveryId(),
+                        claim.claimToken());
                 Object result = jedis.eval(FINALIZE_DELIVERY_FAILURE_LUA, keys, args);
                 if (Long.valueOf(-2L).equals(result)) {
-                    return new TerminalFailureUpdate(false, subscriptionFound, 0, false, null);
+                    return new TerminalFailureUpdate(false, false, subscriptionFound, 0, false, null);
+                }
+                if (Long.valueOf(-3L).equals(result)) {
+                    return new TerminalFailureUpdate(false, true, subscriptionFound, 0, false, null);
                 }
                 if (result instanceof Long code && code >= 1L && code <= 3L) {
-                    return new TerminalFailureUpdate(true, subscriptionFound, failures,
+                    return new TerminalFailureUpdate(true, true, subscriptionFound, failures,
                             disabledNow, previousStatus);
                 }
             }
@@ -225,6 +216,71 @@ public class SubscriptionRepository {
         }
     }
 
+    /**
+     * Atomically commits SUCCESS and resets the subscription's operational
+     * delivery fields while the caller still owns the processing claim.
+     */
+    public DeliverySuccessUpdate finalizeDeliverySuccess(
+            String subscriptionId,
+            ClaimedDelivery claim,
+            Delivery successfulDelivery,
+            Instant occurredAt) {
+        if (subscriptionId == null || subscriptionId.isBlank() || successfulDelivery == null
+                || successfulDelivery.getDeliveryId() == null
+                || successfulDelivery.getDeliveryId().isBlank()
+                || successfulDelivery.getStatus() != DeliveryStatus.SUCCESS
+                || !subscriptionId.equals(successfulDelivery.getSubscriptionId())
+                || !validClaimFor(claim, successfulDelivery.getDeliveryId())
+                || occurredAt == null) {
+            throw new IllegalArgumentException("successful delivery transaction inputs are required");
+        }
+        try (Jedis jedis = jedisPool.getResource()) {
+            String deliveryKey = "delivery:" + successfulDelivery.getDeliveryId();
+            String subscriptionKey = "webhook:" + subscriptionId;
+            String successfulDeliveryJson = objectMapper.writeValueAsString(successfulDelivery);
+            for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+                String currentDelivery = jedis.get(deliveryKey);
+                if (currentDelivery == null) {
+                    return new DeliverySuccessUpdate(false, false, false);
+                }
+                if (!isTransitionableDelivery(currentDelivery)) {
+                    return new DeliverySuccessUpdate(false, true, false);
+                }
+                String currentSubscription = jedis.get(subscriptionKey);
+                boolean subscriptionFound = currentSubscription != null;
+                String updatedSubscription = "";
+                if (subscriptionFound) {
+                    ObjectNode sub = requireObject(currentSubscription);
+                    sub.put("consecutive_failures", 0);
+                    sub.put("last_triggered_at", occurredAt.toString());
+                    sub.put("last_success_at", occurredAt.toString());
+                    updatedSubscription = objectMapper.writeValueAsString(sub);
+                }
+                Object result = jedis.eval(FINALIZE_DELIVERY_SUCCESS_LUA,
+                        java.util.List.of(deliveryKey, subscriptionKey,
+                                DeliveryQueueRepository.PROCESSING_CLAIM_OWNER_KEY),
+                        java.util.List.of(currentDelivery, successfulDeliveryJson,
+                                subscriptionFound ? "1" : "0",
+                                subscriptionFound ? currentSubscription : "",
+                                updatedSubscription, claim.deliveryId(), claim.claimToken()));
+                if (Long.valueOf(-2L).equals(result)) {
+                    return new DeliverySuccessUpdate(false, false, subscriptionFound);
+                }
+                if (Long.valueOf(-3L).equals(result)) {
+                    return new DeliverySuccessUpdate(false, true, subscriptionFound);
+                }
+                if (Long.valueOf(1L).equals(result) || Long.valueOf(2L).equals(result)) {
+                    return new DeliverySuccessUpdate(true, true, subscriptionFound);
+                }
+            }
+            throw new IllegalStateException("delivery or subscription changed too frequently to finalize success");
+        } catch (Exception e) {
+            LOG.error("Failed to atomically finalize webhook delivery success: delivery_id={} subscription_id={} occurred_at={}",
+                    safe(successfulDelivery.getDeliveryId()), safe(subscriptionId), occurredAt, e);
+            throw new IllegalStateException("Failed to finalize webhook delivery success", e);
+        }
+    }
+
     private ObjectNode requireObject(String json) throws Exception {
         JsonNode node = objectMapper.readTree(json);
         if (!(node instanceof ObjectNode object)) {
@@ -233,8 +289,22 @@ public class SubscriptionRepository {
         return object;
     }
 
-    private static void putInstant(ObjectNode node, String field, Instant value) {
-        if (value != null) node.put(field, value.toString());
+    private boolean isTransitionableDelivery(String json) throws Exception {
+        JsonNode node = objectMapper.readTree(json);
+        if (!node.isObject() || !node.path("status").isTextual()) {
+            throw new IllegalStateException("webhook delivery must be an object with a valid status");
+        }
+        DeliveryStatus status;
+        try {
+            status = DeliveryStatus.valueOf(node.path("status").textValue());
+        } catch (IllegalArgumentException invalidStatus) {
+            throw new IllegalStateException("webhook delivery has an unknown status", invalidStatus);
+        }
+        return status == DeliveryStatus.PENDING || status == DeliveryStatus.RETRYING;
+    }
+
+    private static boolean validClaimFor(ClaimedDelivery claim, String deliveryId) {
+        return claim != null && claim.deliveryId().equals(deliveryId);
     }
 
     private static WebhookStatus parseStatus(String value) {
@@ -246,8 +316,13 @@ public class SubscriptionRepository {
         }
     }
 
-    public record TerminalFailureUpdate(boolean deliveryFound, boolean subscriptionFound,
+    public record TerminalFailureUpdate(boolean applied, boolean deliveryFound,
+                                        boolean subscriptionFound,
                                         int consecutiveFailures, boolean disabledNow,
                                         WebhookStatus previousStatus) {
+    }
+
+    public record DeliverySuccessUpdate(boolean applied, boolean deliveryFound,
+                                        boolean subscriptionFound) {
     }
 }

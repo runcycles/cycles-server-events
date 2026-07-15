@@ -13,7 +13,8 @@ import static org.mockito.Mockito.when;
 class DispatchRecoveryTest {
 
     private final DeliveryQueueRepository queueRepository = mock(DeliveryQueueRepository.class);
-    private final DispatchRecovery recovery = new DispatchRecovery(queueRepository, 180_000L, 120_000L);
+    private final DispatchRecovery recovery = new DispatchRecovery(
+            queueRepository, 180_000L, 120_000L, 5, 30);
 
     @Test
     void recoverOnStartup_recoversProcessingQueue() {
@@ -45,11 +46,17 @@ class DispatchRecoveryTest {
 
     @Test
     void rejectsInvalidRecoveryTiming() {
-        assertThatThrownBy(() -> new DispatchRecovery(queueRepository, 0, 120_000L))
+        assertThatThrownBy(() -> new DispatchRecovery(queueRepository, 0, 120_000L, 5, 30))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new DispatchRecovery(queueRepository, 120_000L, 120_000L))
+        assertThatThrownBy(() -> new DispatchRecovery(queueRepository, 120_000L, 120_000L, 5, 30))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new DispatchRecovery(queueRepository, 180_000L, 0))
+        assertThatThrownBy(() -> new DispatchRecovery(queueRepository, 180_000L, 0, 5, 30))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new DispatchRecovery(queueRepository, 180_000L, 120_000L, 0, 30))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new DispatchRecovery(queueRepository, 180_000L, 120_000L, 5, 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new DispatchRecovery(queueRepository, 35_000L, 30_000L, 5, 30))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 }

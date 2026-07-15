@@ -97,7 +97,11 @@ class DeliveryQueueRepositoryTest {
 
     @Test
     void ackRejectsInvalidClaimAndReportsSupersededOwner() {
-        assertThatThrownBy(() -> repository.ack(null)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.ack(null)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new ClaimedDelivery(null, "token"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new ClaimedDelivery("del-1", null))
+                .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> repository.ack(new ClaimedDelivery("", "token")))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> repository.ack(new ClaimedDelivery("del-1", "")))
@@ -151,10 +155,21 @@ class DeliveryQueueRepositoryTest {
     }
 
     @Test
-    void scheduleRetry() {
-        repository.scheduleRetry("del-1", 1700000000000L);
+    void scheduleRetryRequiresCurrentClaimOwner() {
+        ClaimedDelivery claim = new ClaimedDelivery("del-1", "token");
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(1L);
+        assertThat(repository.scheduleRetryOwned(claim, 1700000000000L)).isTrue();
 
-        verify(jedis).zadd("dispatch:retry", 1700000000000L, "del-1");
+        verify(jedis).eval(anyString(),
+                eq(List.of("dispatch:processing:claim_owner", "dispatch:retry")),
+                eq(List.of("del-1", "token", "1700000000000")));
+        assertThatThrownBy(() -> repository.scheduleRetryOwned(null, 1L))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> repository.scheduleRetryOwned(claim, -1L))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(0L);
+        assertThat(repository.scheduleRetryOwned(claim, 1L)).isFalse();
     }
 
     @Test

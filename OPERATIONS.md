@@ -90,7 +90,7 @@ The `tenant` tag listed here is emitted only when
 | `cycles_evidence_claimed_total` | `artifact_type` | Evidence source records claimed from the reliable queue. |
 | `cycles_evidence_stored_total` | `artifact_type` | Canonical signed envelopes durably stored. |
 | `cycles_evidence_dead_lettered_total` | `artifact_type`, `reason` | Deterministically invalid source records atomically moved to the DLQ. |
-| `cycles_evidence_retry_deferred_total` | `artifact_type`, `reason` | Work retained for recovery (`identity_mismatch`, `build_failure`, `store_failure`, `ack_failure`, `queue_unavailable`, `claim_failure`, `dlq_move_conflict`, or `dlq_move_failure`). Identity/signing/store failures also pause new claims for `EVIDENCE_INFRASTRUCTURE_BACKOFF_MS` (30 seconds by default) to limit in-flight growth. |
+| `cycles_evidence_retry_deferred_total` | `artifact_type`, `reason` | Work retained for recovery (`identity_mismatch`, `build_failure`, `store_failure`, `ack_failure`, `ack_conflict`, `queue_unavailable`, `claim_failure`, `dlq_move_conflict`, or `dlq_move_failure`). Identity/signing/store failures also pause new claims for `EVIDENCE_INFRASTRUCTURE_BACKOFF_MS` (30 seconds by default) to limit in-flight growth. |
 
 ### Reason codes
 
@@ -574,7 +574,7 @@ don't fit.
 | `dispatch.http.timeout-seconds` | `30` | Lower if one slow subscriber is blocking the queue and you can tolerate more retries. Raise if you have legitimately slow subscribers that need more time. |
 | `dispatch.http.connect-timeout-seconds` | `5` | Rarely needs tuning. Lower if your egress is fast and you want to fail faster on unreachable DNS. |
 | `DISPATCH_LOOP_DELAY_MS` | `25` | Pause after each dispatch invocation. This is not the empty-queue wait; BLMOVE can block for `dispatch.pending.timeout-seconds`. |
-| `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | `180000` | Minimum age before an in-flight delivery is requeued. It must be strictly greater than `DISPATCH_ORDERING_LEASE_MS`; startup rejects unsafe combinations. |
+| `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | `180000` | Minimum age before an in-flight delivery is requeued. It must exceed both `DISPATCH_ORDERING_LEASE_MS` and the configured pending-plus-HTTP timeout duration; startup rejects unsafe combinations. |
 | `DISPATCH_PROCESSING_RECOVERY_INTERVAL_MS` | `30000` | How often replicas recheck for stale in-flight deliveries. |
 | `DISPATCH_ORDERING_LEASE_MS` | `120000` | Global claim/send critical-section TTL. It preserves initial-claim order but caps fleet throughput at one in-flight send; replicas are standby/failover. It must exceed BLMOVE plus HTTP and Redis state-write time. |
 | `DISPATCH_ORDERING_CONTENTION_BACKOFF_MS` | `500` | Randomized half-to-full backoff after a global ordering-lease miss or Redis error. Raise if idle replicas create noticeable lease traffic. |
@@ -597,11 +597,14 @@ don't fit.
 | `EVIDENCE_SIGNING_SIGNER_DID` | (empty) | Public Ed25519 key (64 hex) stamped as `signer_did`. Must be the public half of `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` **and** identical to `cycles-server`'s value. |
 | `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | (empty) | **Secret** — Ed25519 seed (64 hex) this worker signs with. Lives **only** here, never on `cycles-server`. Required when evidence is enabled unless `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY=true`. Setting only one of the signing pair fails startup. |
 | `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY` | `false` | Development-only escape hatch. When `true`, evidence can start without a configured signing pair and will generate a per-process ephemeral signer. Keep `false` in production. |
+| `EVIDENCE_PENDING_KEY` / `EVIDENCE_PROCESSING_KEY` / `EVIDENCE_FAILED_KEY` | `evidence:pending` / `evidence:processing` / `evidence:failed` | Source, in-flight, and bounded poison-record queue keys. Change only for coordinated migrations or isolated environments. |
+| `EVIDENCE_POP_TIMEOUT_SECONDS` | `5` | Evidence BLMOVE timeout. It must remain below `REDIS_BLOCKING_SOCKET_TIMEOUT_MS`. |
 | `EVIDENCE_RECOVERY_IDLE_MS` / `EVIDENCE_RECOVERY_INTERVAL_MS` | `120000` / `30000` | Minimum age and polling interval for returning stale evidence work from processing to pending. Keep the idle threshold above normal schema-validation, signing, and store latency. |
 | `EVIDENCE_RECOVERY_BATCH_SIZE` | `100` | Bounded number of in-flight evidence records inspected per recovery pass. |
 | `EVIDENCE_FAILED_MAX_LEN` | `10000` | Positive DLQ bound; poison records beyond the bound evict the oldest entries. |
 | `EVIDENCE_LOOP_DELAY_MS` / `EVIDENCE_QUEUE_FAILURE_BACKOFF_MS` | `25` / `1000` | Scheduler cadence and claim pause after Redis queue/ack failures. Raise the backoff if a Redis outage still produces excessive connection logs. |
 | `EVIDENCE_INFRASTRUCTURE_BACKOFF_MS` | `30000` | Claim pause after identity, signing, or store failures. This bounds how quickly a systemic outage can move pending records into processing. |
+| `EVIDENCE_STORE_BACKEND` / `EVIDENCE_STORE_KEY_PREFIX` / `EVIDENCE_STORE_TTL_SECONDS` | `redis` / `evidence:envelope:` / `0` | Content-addressed envelope backend, Redis key namespace, and TTL. Keep `0` for archival evidence unless a separate durable archive exists. |
 
 Turning CyclesEvidence **on** (the shared identity across `cycles-server` + this
 worker, key generation, coherence rules, and end-to-end verification) is documented
@@ -695,13 +698,21 @@ it to the sink. Operational notes:
   restart and multiple un-configured replicas would each sign with a different
   `signer_did`. Provision the key once and set it identically on every replica.
 - **Reliable queue.** The worker claims records with `BLMOVE evidence:pending →
-  evidence:processing` and only `LREM`s them from `evidence:processing` after the
-  envelope is stored (or atomically dead-lettered). Idle in-flight records are
+  evidence:processing`, replaces the raw list member with a unique claim ID, and
+  retains the raw payload in `evidence:processing:payload`. Ack and DLQ scripts
+  remove only the owned claim ID after the envelope is stored (or atomically
+  dead-lettered). This keeps byte-identical source records independent and fences
+  workers that resume after recovery. Idle in-flight records are
   periodically moved back to `evidence:pending` and reprocessed (safe — envelopes
   are content-addressed/idempotent). A non-empty
   `evidence:processing` on a healthy steady-state service is a smell (stuck
   worker); a brief spike after a crash is normal recovery. Claim timestamps prevent
   a starting replica from requeueing another healthy replica's active work.
+- **Rolling upgrade into 0.1.25.24.** The processing-list member changed from raw
+  JSON to an internal claim ID. Drain `evidence:processing` and stop or disable
+  evidence signing on every older replica before starting 0.1.25.24 workers;
+  do not run old and new evidence consumers concurrently. Pending raw records are
+  unchanged and can remain queued during the rollout.
 - **Identity drift is recoverable.** If the producer-stamped `evidence_id` does
   not match the worker's result, the record stays in `evidence:processing` and
   new claims pause for 30 seconds. Reconcile `EVIDENCE_SERVER_ID` and

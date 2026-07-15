@@ -82,7 +82,7 @@ public class DispatchLoop {
             try {
                 ClaimedDelivery claim = queueRepository.claimPending(timeoutSeconds);
                 if (claim != null) {
-                    deliveryHandler.handle(claim.deliveryId());
+                    deliveryHandler.handle(claim);
                     if (!queueRepository.ack(claim)) {
                         LOG.warn("Webhook delivery claim was superseded before ack: delivery_id={} claim_token={}",
                                 safe(claim.deliveryId()), safe(claim.claimToken()));

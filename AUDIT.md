@@ -15,6 +15,15 @@ owner-token delivery acknowledgement, a recovery/lease startup invariant,
 lossless decimal parsing before the RFC 8785 guard, real-Redis execution of
 the evidence ack/DLQ scripts, bounded dispatcher-outbox poison handling, and
 deduplicated outbox publication metrics.
+The final ownership-fencing review extended the delivery claim generation from
+acknowledgement to every state mutation: terminal success/failure, subscription
+health counters, retry persistence, and retry scheduling are rejected for stale
+owners. Evidence claims replace raw processing-list payloads with unique claim
+IDs and retain payloads in a side hash, eliminating both stale ack/DLQ races and
+identical-JSON ZSET/HASH aliasing. Real-Redis adversarial tests exercise
+same-delivery terminal contention, stale success/failure/retry races, stale
+evidence owners, and identical evidence payloads. IPv6 unspecified destinations
+are blocked by both the default `::/128` range and a semantic any-local check.
 The final hardening pass also made terminal delivery failure plus both mandatory
 dispatcher meta-events one atomic Redis transition backed by a deterministic,
 leased publication outbox; corrected auto-disable to the spec's strict
@@ -384,7 +393,7 @@ The worker now separates store from ack: if storage succeeds but ack fails, the 
 
 ### 2026-06-12 — reliable evidence queue
 
-Replaces destructive BRPOP consumption with a BLMOVE reliable-queue pattern. `EvidenceQueueConsumer.claim` atomically moves a record from `evidence:pending` to `evidence:processing`, and the worker `ack`s only after the envelope is durably stored or dead-lettered. A crash between claim and store leaves the record recoverable.
+Replaces destructive BRPOP consumption with a BLMOVE reliable-queue pattern. `EvidenceQueueConsumer.claim` moves a record from `evidence:pending`, atomically replaces its processing-list member with a unique claim ID, and stores the raw payload in a side hash. The worker owner-checks ack/DLQ after durable storage, so identical records do not alias processing metadata and a stale worker cannot remove its successor. A crash between claim and store leaves the record recoverable. Because older binaries treat processing members as raw JSON, the 0.1.25.24 rollout must drain processing and stop older evidence consumers before new workers start.
 
 `EvidenceRecovery` returns orphaned in-flight records to pending on startup. Reprocessing is safe because envelopes are content-addressed and idempotent. Adds `cycles.evidence.queue.processing-key`, updates operations docs, and covers claim/ack/recover/dead-letter plus worker ack behavior and Redis round trips. No wire or spec change.
 
@@ -532,9 +541,9 @@ architectural rather than a correctness blocker for this release:
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 528 in the 2026-07-15 clean verification |
-| Integration tests | 21 across webhook delivery, evidence signing/store, and Redis atomicity |
-| JaCoCo result | 97.74% line / 95.44% branch |
+| Total tests | 540 in the 2026-07-15 clean verification |
+| Integration tests | 25 across webhook delivery, evidence signing/store, and Redis atomicity |
+| JaCoCo result | 97.89% line / 95.72% branch |
 | JaCoCo minimum | 95% line / 95% branch (both enforced) |
 
 ## Source Inventory
@@ -725,8 +734,8 @@ Captured explicitly so a future reviewer doesn't re-litigate the gap analysis:
 - **Date:** 2026-07-15
 - **Version:** 0.1.25.24
 - **Build:** PASS (`mvn -B clean verify -Pintegration-tests`)
-- **Coverage:** 97.74% line / 95.44% branch; 95% / 95% gates enforced
-- **Total:** 528 tests (507 unit + 21 Docker-backed integration), zero failures
+- **Coverage:** 97.89% line / 95.72% branch; 95% / 95% gates enforced
+- **Total:** 540 tests (515 unit + 25 Docker-backed integration), zero failures
 
 ## Cross-Repo Spec Drift Notes (informational)
 

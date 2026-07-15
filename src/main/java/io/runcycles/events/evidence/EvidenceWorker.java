@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.runcycles.events.evidence.CyclesEvidenceEnvelopeBuilder.BuiltEvidenceEnvelope;
+import io.runcycles.events.evidence.EvidenceQueueConsumer.ClaimedEvidence;
 import io.runcycles.events.metrics.CyclesMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -89,9 +90,9 @@ public class EvidenceWorker {
         if (System.currentTimeMillis() < claimRetryNotBeforeMs) {
             return;
         }
-        String record;
+        ClaimedEvidence claim;
         try {
-            record = consumer.claim(timeoutSeconds);
+            claim = consumer.claim(timeoutSeconds);
         } catch (JedisConnectionException unavailable) {
             deferClaims(queueFailureBackoffMs);
             LOG.warn("Evidence queue Redis connection failure: pending_queue=evidence:pending processing_queue=evidence:processing timeout_seconds={} error={}",
@@ -105,9 +106,10 @@ public class EvidenceWorker {
             metrics.recordEvidenceRetryDeferred(null, "claim_failure");
             return;
         }
-        if (record == null) {
+        if (claim == null) {
             return;
         }
+        String record = claim.recordJson();
         EvidenceSourceLogContext claimedContext = sourceContext(record);
         metrics.recordEvidenceClaimed(claimedContext.artifactType());
         BuiltEvidenceEnvelope envelope;
@@ -125,7 +127,7 @@ public class EvidenceWorker {
             metrics.recordEvidenceRetryDeferred(ctx.artifactType(), "identity_mismatch");
             return;
         } catch (JsonProcessingException | IllegalArgumentException invalidSource) {
-            deadLetterInvalidSource(record, invalidSource);
+            deadLetterInvalidSource(claim, invalidSource);
             return;
         } catch (Exception buildFailure) {
             deferClaims(infrastructureBackoffMs);
@@ -155,7 +157,14 @@ public class EvidenceWorker {
         // idempotent: the store is content-addressed (same evidence_id → same key),
         // so a re-store overwrites identical bytes.
         try {
-            consumer.ack(record);
+            if (!consumer.ack(claim)) {
+                deferClaims(queueFailureBackoffMs);
+                EvidenceSourceLogContext ctx = sourceContext(record);
+                LOG.warn("Evidence envelope stored but processing claim was superseded before ack: artifact_type={} evidence_id={} stored_evidence_id={} trace_id={} issued_at_ms={}",
+                        safe(ctx.artifactType()), safe(ctx.evidenceId()), safe(envelope.evidenceId()),
+                        safe(ctx.traceId()), ctx.issuedAtMs());
+                metrics.recordEvidenceRetryDeferred(ctx.artifactType(), "ack_conflict");
+            }
         } catch (RuntimeException ackEx) {
             deferClaims(queueFailureBackoffMs);
             EvidenceSourceLogContext ctx = sourceContext(record);
@@ -166,7 +175,8 @@ public class EvidenceWorker {
         }
     }
 
-    private void deadLetterInvalidSource(String record, Exception invalidSource) {
+    private void deadLetterInvalidSource(ClaimedEvidence claim, Exception invalidSource) {
+        String record = claim.recordJson();
         EvidenceSourceLogContext ctx = sourceContext(record);
         String errorSummary = invalidSource instanceof JsonProcessingException
                 ? "malformed JSON"
@@ -175,7 +185,7 @@ public class EvidenceWorker {
                 safe(ctx.artifactType()), safe(ctx.evidenceId()), safe(ctx.traceId()), ctx.issuedAtMs(), ctx.parseable(),
                 invalidSource.getClass().getSimpleName(), errorSummary);
         try {
-            if (consumer.deadLetterAndAck(record)) {
+            if (consumer.deadLetterAndAck(claim)) {
                 metrics.recordEvidenceDeadLettered(ctx.artifactType(), "invalid_source");
             } else {
                 LOG.warn("Evidence poison record was no longer in-flight during DLQ move; deferring to queue recovery: artifact_type={} evidence_id={} trace_id={} issued_at_ms={}",

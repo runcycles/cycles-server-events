@@ -73,7 +73,7 @@ class RecoveredDeliveryBoundaryTest {
                 urlGuard, 86400000L);
         dispatchLoop = new DispatchLoop(queueRepository, handler, 5, 120_000L, 30, 500);
         when(queueRepository.tryAcquireOrderingLock(anyString(), anyLong())).thenReturn(true);
-        recovery = new DispatchRecovery(queueRepository, 180_000L, 120_000L);
+        recovery = new DispatchRecovery(queueRepository, 180_000L, 120_000L, 5, 30);
     }
 
     private double counter(String name, String... tags) {
@@ -89,6 +89,8 @@ class RecoveredDeliveryBoundaryTest {
         ClaimedDelivery claim = new ClaimedDelivery("del-1", "claim-1");
         when(queueRepository.claimPending(5)).thenReturn(claim);
         when(queueRepository.ack(claim)).thenReturn(true);
+        when(deliveryRepository.updateOwned(any(Delivery.class),
+                org.mockito.ArgumentMatchers.eq(claim))).thenReturn(true);
 
         Delivery delivery = Delivery.builder()
                 .deliveryId("del-1")
@@ -127,12 +129,12 @@ class RecoveredDeliveryBoundaryTest {
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("ownership boundary");
         verify(transport, never()).deliver(any(), any(), any(), any());
-        verify(queueRepository, never()).scheduleRetry(anyString(), anyLong());
+        verify(deliveryRepository, never()).updateOwnedAndScheduleRetry(any(), any(), anyLong());
         // Terminal handling still acks the recovered delivery so it leaves the queue.
         verify(queueRepository).ack(claim);
         // Never contacts endpoint health machinery.
-        verify(subscriptionRepository, never()).updateDeliveryState(
-                anyString(), org.mockito.ArgumentMatchers.anyInt(), any(), any(), any(), any());
+        verify(subscriptionRepository, never()).finalizeDeliveryFailure(
+                anyString(), any(), any(), any(), org.mockito.ArgumentMatchers.anyInt(), any(), any());
         assertThat(counter(CyclesMetrics.DELIVERY_BOUNDARY_SKIPPED,
                 "tenant", "t-1", "event_type", "api_key.revoked", "category", "api_key"))
                 .isEqualTo(1.0);

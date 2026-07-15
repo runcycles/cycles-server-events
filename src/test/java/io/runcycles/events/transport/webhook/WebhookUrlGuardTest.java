@@ -105,8 +105,15 @@ class WebhookUrlGuardTest {
 
     @Test
     void ipv6Loopback_blockedByDefaults() {
+        assertThat(guard.check("https://[::]/hook")).startsWith("Resolves to unspecified IP:");
         assertThat(guard.check("https://[::1]/hook")).startsWith("Resolves to blocked IP:");
         assertThat(guard.check("https://[fe80::1]/hook")).startsWith("Resolves to blocked IP:");
+    }
+
+    @Test
+    void unspecifiedIpv6IsAlwaysBlockedEvenWhenConfiguredRangesAreEmpty() {
+        when(configRepository.get()).thenReturn(permissive());
+        assertThat(guard.check("https://[::]/hook")).startsWith("Resolves to unspecified IP:");
     }
 
     @Test

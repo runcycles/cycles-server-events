@@ -24,11 +24,18 @@ public class DispatchRecovery {
 
     public DispatchRecovery(DeliveryQueueRepository queueRepository,
                             @Value("${dispatch.processing.recovery-idle-ms:180000}") long recoveryIdleMs,
-                            @Value("${dispatch.ordering.lease-ms:120000}") long orderingLeaseMs) {
+                            @Value("${dispatch.ordering.lease-ms:120000}") long orderingLeaseMs,
+                            @Value("${dispatch.pending.timeout-seconds:5}") int pendingTimeoutSeconds,
+                            @Value("${dispatch.http.timeout-seconds:30}") int httpTimeoutSeconds) {
         this.queueRepository = queueRepository;
-        if (orderingLeaseMs <= 0 || recoveryIdleMs <= orderingLeaseMs) {
+        if (pendingTimeoutSeconds <= 0 || httpTimeoutSeconds <= 0) {
+            throw new IllegalArgumentException("dispatch pending and HTTP timeouts must be positive");
+        }
+        long worstCaseClaimAndSendMs = (pendingTimeoutSeconds + (long) httpTimeoutSeconds) * 1_000L;
+        if (orderingLeaseMs <= 0 || recoveryIdleMs <= orderingLeaseMs
+                || recoveryIdleMs <= worstCaseClaimAndSendMs) {
             throw new IllegalArgumentException(
-                    "dispatch recovery idle time must exceed the ordering lease");
+                    "dispatch recovery idle time must exceed the ordering lease and worst-case claim/send duration");
         }
         this.recoveryIdleMs = recoveryIdleMs;
     }

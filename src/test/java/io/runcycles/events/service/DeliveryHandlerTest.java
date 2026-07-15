@@ -4,9 +4,11 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.runcycles.events.metrics.CyclesMetrics;
 import io.runcycles.events.model.*;
 import io.runcycles.events.repository.DeliveryQueueRepository;
+import io.runcycles.events.repository.DeliveryQueueRepository.ClaimedDelivery;
 import io.runcycles.events.repository.DeliveryRepository;
 import io.runcycles.events.repository.EventRepository;
 import io.runcycles.events.repository.SubscriptionRepository;
+import io.runcycles.events.repository.SubscriptionRepository.DeliverySuccessUpdate;
 import io.runcycles.events.repository.SubscriptionRepository.TerminalFailureUpdate;
 import io.runcycles.events.transport.Transport;
 import io.runcycles.events.transport.TransportResult;
@@ -50,12 +52,20 @@ class DeliveryHandlerTest {
         handler = new DeliveryHandler(deliveryRepository, eventRepository,
                 subscriptionRepository, queueRepository, transport, metrics, validator,
                 urlGuard, 86400000L);
-        lenient().when(subscriptionRepository.updateDeliveryState(
-                anyString(), anyInt(), any(), any(), any(), any()))
+        lenient().when(deliveryRepository.updateOwned(any(Delivery.class), any(ClaimedDelivery.class)))
                 .thenReturn(true);
+        lenient().when(deliveryRepository.updateOwnedAndScheduleRetry(
+                any(Delivery.class), any(ClaimedDelivery.class), anyLong())).thenReturn(true);
+        lenient().when(queueRepository.scheduleRetryOwned(any(ClaimedDelivery.class), anyLong()))
+                .thenReturn(true);
+        lenient().when(subscriptionRepository.finalizeDeliverySuccess(
+                        anyString(), any(ClaimedDelivery.class), any(Delivery.class), any()))
+                .thenReturn(new DeliverySuccessUpdate(true, true, true));
         lenient().when(subscriptionRepository.finalizeDeliveryFailure(
-                        anyString(), any(Delivery.class), any(), anyInt(), any(), any()))
-                .thenReturn(new TerminalFailureUpdate(true, true, 1, false, WebhookStatus.ACTIVE));
+                        anyString(), any(ClaimedDelivery.class), any(Delivery.class), any(),
+                        anyInt(), any(), any()))
+                .thenReturn(new TerminalFailureUpdate(true, true, true, 1, false,
+                        WebhookStatus.ACTIVE));
         // Mockito's default null return = "URL allowed"; individual tests
         // stub a violation reason to exercise the blocked path.
     }
@@ -109,6 +119,72 @@ class DeliveryHandlerTest {
                 .errorMessage("HTTP 500").build();
     }
 
+    @Test
+    void supersededSuccessIsNotCounted() {
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
+        when(subscriptionRepository.finalizeDeliverySuccess(anyString(), any(), any(), any()))
+                .thenReturn(new DeliverySuccessUpdate(false, true, true));
+
+        handler.handle(claimed("del-1"));
+
+        assertThat(counter(CyclesMetrics.DELIVERY_SUCCESS,
+                "tenant", "t-1", "event_type", "tenant.created",
+                "status_code_family", "2xx")).isZero();
+    }
+
+    @Test
+    void supersededRetryWithNullPolicyFieldsIsNotCountedOrScheduled() {
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription sub = activeSubscription();
+        sub.setRetryPolicy(RetryPolicy.builder().maxRetries(null).initialDelayMs(null)
+                .backoffMultiplier(null).maxDelayMs(null).build());
+        when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
+        when(deliveryRepository.updateOwnedAndScheduleRetry(any(), any(), anyLong()))
+                .thenReturn(false);
+
+        handler.handle(claimed("del-1"));
+
+        assertThat(counter(CyclesMetrics.DELIVERY_RETRIED,
+                "tenant", "t-1", "event_type", "tenant.created")).isZero();
+    }
+
+    @Test
+    void supersededRetryScheduleRestorationIsIgnored() {
+        Delivery delivery = pendingDelivery();
+        delivery.setStatus(DeliveryStatus.RETRYING);
+        delivery.setNextRetryAt(Instant.now().plusSeconds(60));
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(queueRepository.scheduleRetryOwned(any(), anyLong())).thenReturn(false);
+
+        handler.handle(claimed("del-1"));
+
+        verify(eventRepository, never()).findById(anyString());
+    }
+
+    @Test
+    void supersededPolicyFailureDoesNotIncrementOutcomeMetric() {
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(null);
+        when(deliveryRepository.updateOwned(any(), any())).thenReturn(false);
+
+        handler.handle(claimed("del-1"));
+
+        assertThat(counter(CyclesMetrics.DELIVERY_FAILED,
+                "tenant", CyclesMetrics.TAG_UNKNOWN, "event_type", "tenant.created",
+                "reason", DeliveryHandler.REASON_EVENT_NOT_FOUND)).isZero();
+    }
+
     // --- Happy path ---
 
     @Test
@@ -121,16 +197,14 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), eq("secret"), any())).thenReturn(successResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
         assertThat(delivery.getAttempts()).isEqualTo(1);
         assertThat(delivery.getCompletedAt()).isNotNull();
         assertThat(delivery.getResponseStatus()).isEqualTo(200);
-        verify(deliveryRepository).update(delivery);
-        // Partial update: resets consecutive failures, sets success timestamps
-        verify(subscriptionRepository).updateDeliveryState(
-                eq("sub-1"), eq(0), any(Instant.class), any(Instant.class), isNull(), isNull());
+        verify(subscriptionRepository).finalizeDeliverySuccess(
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(Instant.class));
     }
 
     @Test
@@ -147,12 +221,16 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), eq("secret"), any())).thenReturn(successResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
         assertThat(delivery.getAttempts()).isEqualTo(3);
         assertThat(delivery.getErrorMessage()).isNull();
         assertThat(delivery.getNextRetryAt()).isNull();
+    }
+
+    private static ClaimedDelivery claimed(String deliveryId) {
+        return new ClaimedDelivery(deliveryId, "claim-token");
     }
 
     @Test
@@ -164,9 +242,9 @@ class DeliveryHandlerTest {
         long retryAt = delivery.getNextRetryAt().toEpochMilli();
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
-        verify(queueRepository).scheduleRetry("del-1", retryAt);
+        verify(queueRepository).scheduleRetryOwned(claimed("del-1"), retryAt);
         verify(eventRepository, never()).findById(anyString());
         verify(transport, never()).deliver(any(), any(), any(), any());
         assertThat(delivery.getAttempts()).isEqualTo(2);
@@ -189,15 +267,15 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), eq("secret"), any())).thenReturn(successResult());
-        when(subscriptionRepository.updateDeliveryState(
-                eq("sub-1"), eq(0), any(), any(), isNull(), isNull()))
+        when(subscriptionRepository.finalizeDeliverySuccess(
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any()))
                 .thenThrow(new IllegalStateException("redis down"));
 
-        assertThatThrownBy(() -> handler.handle("del-1"))
+        assertThatThrownBy(() -> handler.handle(claimed("del-1")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("redis down");
 
-        verify(deliveryRepository, never()).update(any());
+        verify(deliveryRepository, never()).updateOwned(any(), any());
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.PENDING);
     }
 
@@ -207,7 +285,7 @@ class DeliveryHandlerTest {
     void handle_deliveryNotFound() {
         when(deliveryRepository.findById("del-missing")).thenReturn(null);
 
-        handler.handle("del-missing");
+        handler.handle(claimed("del-missing"));
 
         verify(eventRepository, never()).findById(anyString());
         verify(transport, never()).deliver(any(), any(), any(), any());
@@ -219,7 +297,7 @@ class DeliveryHandlerTest {
         delivery.setStatus(DeliveryStatus.SUCCESS);
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         verify(eventRepository, never()).findById(anyString());
         verify(transport, never()).deliver(any(), any(), any(), any());
@@ -231,7 +309,7 @@ class DeliveryHandlerTest {
         delivery.setStatus(DeliveryStatus.FAILED);
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         verify(transport, never()).deliver(any(), any(), any(), any());
     }
@@ -244,11 +322,11 @@ class DeliveryHandlerTest {
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
         when(eventRepository.findById("evt-1")).thenReturn(null);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("Event not found");
-        verify(deliveryRepository).update(delivery);
+        verify(deliveryRepository).updateOwned(eq(delivery), eq(claimed("del-1")));
     }
 
     @Test
@@ -258,7 +336,7 @@ class DeliveryHandlerTest {
         when(eventRepository.findById("evt-1")).thenReturn(testEvent());
         when(subscriptionRepository.findById("sub-1")).thenReturn(null);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("Subscription not found");
@@ -273,7 +351,7 @@ class DeliveryHandlerTest {
         sub.setStatus(WebhookStatus.PAUSED);
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("not active");
@@ -288,7 +366,7 @@ class DeliveryHandlerTest {
         sub.setStatus(WebhookStatus.DISABLED);
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
     }
@@ -305,12 +383,12 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.RETRYING);
         assertThat(delivery.getAttempts()).isEqualTo(1);
         assertThat(delivery.getNextRetryAt()).isNotNull();
-        verify(queueRepository).scheduleRetry(eq("del-1"), anyLong());
+        verify(deliveryRepository).updateOwnedAndScheduleRetry(eq(delivery), eq(claimed("del-1")), anyLong());
     }
 
     @Test
@@ -331,11 +409,11 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         // After increment: attempts=3, delay = 1000 * 2^(3-1) = 4000
         ArgumentCaptor<Long> captor = ArgumentCaptor.forClass(Long.class);
-        verify(queueRepository).scheduleRetry(eq("del-1"), captor.capture());
+        verify(deliveryRepository).updateOwnedAndScheduleRetry(eq(delivery), eq(claimed("del-1")), captor.capture());
         long scheduledAt = captor.getValue();
         long now = System.currentTimeMillis();
         // delay should be ~4000ms (1000 * 2^2)
@@ -360,10 +438,10 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         ArgumentCaptor<Long> captor = ArgumentCaptor.forClass(Long.class);
-        verify(queueRepository).scheduleRetry(eq("del-1"), captor.capture());
+        verify(deliveryRepository).updateOwnedAndScheduleRetry(eq(delivery), eq(claimed("del-1")), captor.capture());
         long scheduledAt = captor.getValue();
         long now = System.currentTimeMillis();
         // delay capped at maxDelayMs=5000
@@ -384,14 +462,14 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getCompletedAt()).isNotNull();
         assertThat(delivery.getResponseStatus()).isEqualTo(500);
         assertThat(delivery.getResponseTimeMs()).isEqualTo(100);
         assertThat(delivery.getNextRetryAt()).isNull();
-        verify(queueRepository, never()).scheduleRetry(anyString(), anyLong());
+        verify(deliveryRepository, never()).updateOwnedAndScheduleRetry(any(), any(), anyLong());
     }
 
     @Test
@@ -405,10 +483,10 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.RETRYING);
-        verify(queueRepository).scheduleRetry(eq("del-1"), anyLong());
+        verify(deliveryRepository).updateOwnedAndScheduleRetry(eq(delivery), eq(claimed("del-1")), anyLong());
     }
 
     // --- Auto-disable ---
@@ -425,10 +503,10 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         verify(subscriptionRepository).finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(Instant.class), eq(10), any(), any());
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(Instant.class), eq(10), any(), any());
     }
 
     @Test
@@ -440,16 +518,16 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         sub.setConsecutiveFailures(10); // will become 11 > disableAfterFailures
         when(subscriptionRepository.finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(), eq(10), any(), any()))
-                .thenReturn(new TerminalFailureUpdate(true, true, 11, true, WebhookStatus.ACTIVE));
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(), eq(10), any(), any()))
+                .thenReturn(new TerminalFailureUpdate(true, true, true, 11, true, WebhookStatus.ACTIVE));
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         verify(subscriptionRepository).finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(Instant.class), eq(10), any(), any());
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(Instant.class), eq(10), any(), any());
     }
 
     @Test
@@ -462,16 +540,16 @@ class DeliveryHandlerTest {
         sub.setDisableAfterFailures(null); // defaults to 10
         sub.setConsecutiveFailures(9);
         when(subscriptionRepository.finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(), eq(10), any(), any()))
-                .thenReturn(new TerminalFailureUpdate(true, true, 11, true, WebhookStatus.ACTIVE));
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(), eq(10), any(), any()))
+                .thenReturn(new TerminalFailureUpdate(true, true, true, 11, true, WebhookStatus.ACTIVE));
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         verify(subscriptionRepository).finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(Instant.class), eq(10), any(), any());
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(Instant.class), eq(10), any(), any());
     }
 
     @Test
@@ -486,10 +564,10 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         verify(subscriptionRepository).finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(Instant.class), eq(10), any(), any());
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(Instant.class), eq(10), any(), any());
     }
 
     // --- Signing secret ---
@@ -505,14 +583,14 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(null);
 
-        assertThatThrownBy(() -> handler.handle("del-1"))
+        assertThatThrownBy(() -> handler.handle(claimed("del-1")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("not yet available");
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.PENDING);
         assertThat(delivery.getErrorMessage()).isNull();
         assertThat(delivery.getTraceId()).isEqualTo("0123456789abcdef0123456789abcdef");
-        verify(deliveryRepository, never()).update(any());
+        verify(deliveryRepository, never()).updateOwned(any(), any());
         verify(transport, never()).deliver(any(), any(), any(), any());
         assertThat(counter(CyclesMetrics.DELIVERY_FAILED,
                 "tenant", "t-1", "event_type", "tenant.created",
@@ -529,7 +607,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1"))
                 .thenThrow(new IllegalStateException("decrypt failed"));
 
-        assertThatThrownBy(() -> handler.handle("del-1"))
+        assertThatThrownBy(() -> handler.handle(claimed("del-1")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("decrypt failed");
         verify(transport, never()).deliver(any(), any(), any(), any());
@@ -548,7 +626,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getAttempts()).isEqualTo(1);
     }
@@ -561,7 +639,7 @@ class DeliveryHandlerTest {
         delivery.setAttemptedAt(Instant.now().minusMillis(86400001)); // 24h + 1ms ago
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("expired");
@@ -579,7 +657,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
     }
@@ -596,7 +674,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("s");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(counter(CyclesMetrics.DELIVERY_ATTEMPTS,
                 "tenant", "t-1", "event_type", "tenant.created")).isEqualTo(1.0);
@@ -617,7 +695,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult()); // 500
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(counter(CyclesMetrics.DELIVERY_FAILED,
                 "tenant", "t-1", "event_type", "tenant.created", "reason", "http_5xx"))
@@ -638,7 +716,7 @@ class DeliveryHandlerTest {
                 .errorMessage("unprocessable").build();
         when(transport.deliver(any(), any(), any(), any())).thenReturn(r);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(counter(CyclesMetrics.DELIVERY_FAILED,
                 "tenant", "t-1", "event_type", "tenant.created", "reason", "http_4xx"))
@@ -657,7 +735,7 @@ class DeliveryHandlerTest {
                 .errorMessage("connection refused").build();
         when(transport.deliver(any(), any(), any(), any())).thenReturn(r);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(counter(CyclesMetrics.DELIVERY_FAILED,
                 "tenant", "t-1", "event_type", "tenant.created", "reason", "transport_error"))
@@ -670,7 +748,7 @@ class DeliveryHandlerTest {
         delivery.setAttemptedAt(Instant.now().minusMillis(86400001));
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(counter(CyclesMetrics.DELIVERY_STALE,
                 "tenant", CyclesMetrics.TAG_UNKNOWN)).isEqualTo(1.0);
@@ -684,7 +762,7 @@ class DeliveryHandlerTest {
         when(deliveryRepository.findById("del-1")).thenReturn(delivery);
         when(eventRepository.findById("evt-1")).thenReturn(null);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(counter(CyclesMetrics.DELIVERY_FAILED,
                 "tenant", CyclesMetrics.TAG_UNKNOWN,
@@ -699,7 +777,7 @@ class DeliveryHandlerTest {
         when(eventRepository.findById("evt-1")).thenReturn(testEvent());
         when(subscriptionRepository.findById("sub-1")).thenReturn(null);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(counter(CyclesMetrics.DELIVERY_FAILED,
                 "tenant", CyclesMetrics.TAG_UNKNOWN,
@@ -716,7 +794,7 @@ class DeliveryHandlerTest {
         sub.setStatus(WebhookStatus.PAUSED);
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(counter(CyclesMetrics.DELIVERY_FAILED,
                 "tenant", "t-1",
@@ -733,13 +811,13 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         sub.setConsecutiveFailures(10); // will become 11 > disableAfterFailures
         when(subscriptionRepository.finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(), eq(10), any(), any()))
-                .thenReturn(new TerminalFailureUpdate(true, true, 11, true, WebhookStatus.ACTIVE));
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(), eq(10), any(), any()))
+                .thenReturn(new TerminalFailureUpdate(true, true, true, 11, true, WebhookStatus.ACTIVE));
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(counter(CyclesMetrics.SUBSCRIPTION_AUTO_DISABLED,
                 "tenant", "t-1", "reason", "consecutive_failures")).isEqualTo(1.0);
@@ -762,7 +840,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         // Delivery still succeeded (validation never blocks)
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
@@ -784,7 +862,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(registry.find(CyclesMetrics.SUBSCRIPTION_AUTO_DISABLED).counters()).isEmpty();
     }
@@ -806,10 +884,11 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getTraceId()).isEqualTo("0123456789abcdef0123456789abcdef");
-        verify(deliveryRepository).update(delivery);
+        verify(subscriptionRepository).finalizeDeliverySuccess(
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any());
     }
 
     @Test
@@ -827,7 +906,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getTraceId()).isEqualTo("admin-stamped-aaaaaaaaaaaaaaaaaaa0");
     }
@@ -843,13 +922,13 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         sub.setConsecutiveFailures(10); // becomes 11 > disableAfterFailures
         when(subscriptionRepository.finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(), eq(10), any(), any()))
-                .thenReturn(new TerminalFailureUpdate(true, true, 11, true, WebhookStatus.ACTIVE));
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(), eq(10), any(), any()))
+                .thenReturn(new TerminalFailureUpdate(true, true, true, 11, true, WebhookStatus.ACTIVE));
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         // Two emits on this path: webhook.disabled (auto-disable) and
         // system.webhook_delivery_failed (retries exhausted).
@@ -887,13 +966,13 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         sub.setConsecutiveFailures(9);
         when(subscriptionRepository.finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(), eq(10), any(), any()))
-                .thenReturn(new TerminalFailureUpdate(true, true, 11, true, WebhookStatus.ACTIVE));
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(), eq(10), any(), any()))
+                .thenReturn(new TerminalFailureUpdate(true, true, true, 11, true, WebhookStatus.ACTIVE));
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
         verify(eventRepository, times(2)).save(captor.capture());
@@ -914,7 +993,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         // Retries exhausted still emits the delivery-failed meta-alert,
         // but no webhook.disabled below the auto-disable threshold.
@@ -939,7 +1018,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
@@ -985,13 +1064,13 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         sub.setConsecutiveFailures(10); // becomes 11 → auto-disable too
         when(subscriptionRepository.finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(), eq(10), any(), any()))
-                .thenReturn(new TerminalFailureUpdate(true, true, 11, true, WebhookStatus.ACTIVE));
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(), eq(10), any(), any()))
+                .thenReturn(new TerminalFailureUpdate(true, true, true, 11, true, WebhookStatus.ACTIVE));
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
         verify(eventRepository, times(2)).save(captor.capture());
@@ -1011,19 +1090,19 @@ class DeliveryHandlerTest {
         when(urlGuard.check("https://example.com/webhook"))
                 .thenReturn("Resolves to blocked IP: 10.0.0.5");
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage())
                 .isEqualTo("Delivery blocked by webhook security policy: Resolves to blocked IP: 10.0.0.5");
-        verify(deliveryRepository).update(delivery);
+        verify(deliveryRepository).updateOwned(eq(delivery), eq(claimed("del-1")));
         // Never contacted the endpoint, never scheduled a retry
         verify(transport, never()).deliver(any(), any(), any(), any());
-        verify(queueRepository, never()).scheduleRetry(anyString(), anyLong());
+        verify(deliveryRepository, never()).updateOwnedAndScheduleRetry(any(), any(), anyLong());
         // Policy block says nothing about endpoint health — no consecutive-failure
         // increment, no auto-disable side effect from a config tightening.
-        verify(subscriptionRepository, never()).updateDeliveryState(
-                anyString(), anyInt(), any(), any(), any(), any());
+        verify(subscriptionRepository, never()).finalizeDeliveryFailure(
+                anyString(), any(), any(), any(), anyInt(), any(), any());
         assertThat(counter(CyclesMetrics.DELIVERY_FAILED,
                 "tenant", "t-1", "event_type", "tenant.created", "reason", "ssrf_blocked"))
                 .isEqualTo(1.0);
@@ -1043,18 +1122,18 @@ class DeliveryHandlerTest {
         when(urlGuard.check("https://example.com/webhook"))
                 .thenThrow(new IllegalStateException("Webhook security config indeterminate"));
 
-        assertThatThrownBy(() -> handler.handle("del-1"))
+        assertThatThrownBy(() -> handler.handle(claimed("del-1")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("indeterminate");
 
         // Delivery untouched: no FAILED write, no transport contact, no retry
         // scheduling, no consecutive-failure accounting.
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.PENDING);
-        verify(deliveryRepository, never()).update(any());
+        verify(deliveryRepository, never()).updateOwned(any(), any());
         verify(transport, never()).deliver(any(), any(), any(), any());
-        verify(queueRepository, never()).scheduleRetry(anyString(), anyLong());
-        verify(subscriptionRepository, never()).updateDeliveryState(
-                anyString(), anyInt(), any(), any(), any(), any());
+        verify(deliveryRepository, never()).updateOwnedAndScheduleRetry(any(), any(), anyLong());
+        verify(subscriptionRepository, never()).finalizeDeliveryFailure(
+                anyString(), any(), any(), any(), anyInt(), any(), any());
         assertThat(counter(CyclesMetrics.SECURITY_CONFIG_INDETERMINATE)).isEqualTo(1.0);
     }
 
@@ -1069,7 +1148,7 @@ class DeliveryHandlerTest {
         when(urlGuard.check("https://example.com/webhook")).thenReturn(null);
         when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
         verify(transport).deliver(any(), any(), any(), any());
@@ -1086,7 +1165,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.RETRYING);
         verify(eventRepository, never()).save(any());
@@ -1107,11 +1186,11 @@ class DeliveryHandlerTest {
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
         doThrow(new RuntimeException("Redis down")).when(eventRepository).save(any());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         verify(subscriptionRepository).finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(Instant.class), eq(10), any(), any());
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(Instant.class), eq(10), any(), any());
     }
 
     @Test
@@ -1124,18 +1203,18 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription();
         sub.setConsecutiveFailures(9);
         when(subscriptionRepository.finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(), eq(10), any(), any()))
-                .thenReturn(new TerminalFailureUpdate(true, true, 11, true, WebhookStatus.ACTIVE));
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(), eq(10), any(), any()))
+                .thenReturn(new TerminalFailureUpdate(true, true, true, 11, true, WebhookStatus.ACTIVE));
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
         doThrow(new RuntimeException("Redis down")).when(eventRepository).save(any());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         // Atomic increment/transition still reached the repository
         verify(subscriptionRepository).finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(Instant.class), eq(10), any(), any());
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(Instant.class), eq(10), any(), any());
         // Metric still incremented
         assertThat(counter(CyclesMetrics.SUBSCRIPTION_AUTO_DISABLED,
                 "tenant", "t-1", "reason", "consecutive_failures")).isEqualTo(1.0);
@@ -1153,15 +1232,15 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
         when(subscriptionRepository.finalizeDeliveryFailure(
-                eq("sub-1"), eq(delivery), any(), eq(10), any(), any()))
+                eq("sub-1"), eq(claimed("del-1")), eq(delivery), any(), eq(10), any(), any()))
                 .thenThrow(new IllegalStateException("redis down"));
 
-        assertThatThrownBy(() -> handler.handle("del-1"))
+        assertThatThrownBy(() -> handler.handle(claimed("del-1")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("redis down");
 
         verify(eventRepository, never()).save(any());
-        verify(deliveryRepository, never()).update(any());
+        verify(deliveryRepository, never()).updateOwned(any(), any());
         assertThat(counter(CyclesMetrics.SUBSCRIPTION_AUTO_DISABLED,
                 "tenant", "t-1", "reason", "consecutive_failures")).isZero();
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.PENDING);
@@ -1181,7 +1260,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getTraceId()).isNull();
     }
@@ -1217,17 +1296,17 @@ class DeliveryHandlerTest {
         Subscription sub = activeSubscription(); // tenant_id = "t-1" (concrete)
         when(subscriptionRepository.findById("sub-1")).thenReturn(sub);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("ownership boundary");
-        verify(deliveryRepository).update(delivery);
+        verify(deliveryRepository).updateOwned(eq(delivery), eq(claimed("del-1")));
         // Never contacted the endpoint, never scheduled a retry, never touched
         // subscription health (a policy skip says nothing about endpoint health).
         verify(transport, never()).deliver(any(), any(), any(), any());
-        verify(queueRepository, never()).scheduleRetry(anyString(), anyLong());
-        verify(subscriptionRepository, never()).updateDeliveryState(
-                anyString(), anyInt(), any(), any(), any(), any());
+        verify(deliveryRepository, never()).updateOwnedAndScheduleRetry(any(), any(), anyLong());
+        verify(subscriptionRepository, never()).finalizeDeliveryFailure(
+                anyString(), any(), any(), any(), anyInt(), any(), any());
         // Signing secret is never even fetched — no I/O before the drop.
         verify(subscriptionRepository, never()).getSigningSecret(anyString());
         assertThat(counter(CyclesMetrics.DELIVERY_BOUNDARY_SKIPPED,
@@ -1246,11 +1325,11 @@ class DeliveryHandlerTest {
         when(eventRepository.findById("evt-1")).thenReturn(adminOnlyEvent());
         when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         verify(transport, never()).deliver(any(), any(), any(), any());
-        verify(queueRepository, never()).scheduleRetry(anyString(), anyLong());
+        verify(deliveryRepository, never()).updateOwnedAndScheduleRetry(any(), any(), anyLong());
     }
 
     @Test
@@ -1270,7 +1349,7 @@ class DeliveryHandlerTest {
         when(eventRepository.findById("evt-1")).thenReturn(event);
         when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("ownership boundary");
@@ -1288,7 +1367,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
         verify(transport).deliver(any(), any(), any(), any());
@@ -1310,7 +1389,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
         verify(transport).deliver(any(), any(), any(), any());
@@ -1328,7 +1407,7 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(successResult());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.SUCCESS);
         verify(transport).deliver(any(), any(), any(), any());
@@ -1343,7 +1422,7 @@ class DeliveryHandlerTest {
         when(eventRepository.findById("evt-1")).thenReturn(adminOnlyEvent());
         when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         verify(urlGuard, never()).check(anyString());
     }
@@ -1361,7 +1440,7 @@ class DeliveryHandlerTest {
         when(eventRepository.findById("evt-1")).thenReturn(reloaded);
         when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         assertThat(delivery.getErrorMessage()).contains("ownership boundary");
@@ -1390,7 +1469,7 @@ class DeliveryHandlerTest {
         when(eventRepository.findById("evt-1")).thenReturn(event);
         when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         verify(transport, never()).deliver(any(), any(), any(), any());
@@ -1404,12 +1483,12 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(" ");
 
-        assertThatThrownBy(() -> handler.handle("del-1"))
+        assertThatThrownBy(() -> handler.handle(claimed("del-1")))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("not yet available");
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.PENDING);
-        verify(deliveryRepository, never()).update(any());
+        verify(deliveryRepository, never()).updateOwned(any(), any());
         verify(transport, never()).deliver(any(), any(), any(), any());
     }
 
@@ -1426,7 +1505,7 @@ class DeliveryHandlerTest {
                 .success(false).statusCode(0).latencyMs(-1).errorMessage(null).build());
         when(eventRepository.ackDispatcherEvent(anyString())).thenReturn(true);
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getResponseStatus()).isNull();
         assertThat(delivery.getResponseTimeMs()).isNull();
@@ -1445,10 +1524,10 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
         when(subscriptionRepository.finalizeDeliveryFailure(
-                anyString(), any(), any(), anyInt(), any(), any()))
-                .thenReturn(new TerminalFailureUpdate(false, true, 1, false, WebhookStatus.ACTIVE));
+                anyString(), any(ClaimedDelivery.class), any(), any(), anyInt(), any(), any()))
+                .thenReturn(new TerminalFailureUpdate(false, false, true, 1, false, WebhookStatus.ACTIVE));
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         verify(eventRepository, never()).save(any());
     }
@@ -1463,10 +1542,10 @@ class DeliveryHandlerTest {
         when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
         when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
         when(subscriptionRepository.finalizeDeliveryFailure(
-                anyString(), any(), any(), anyInt(), any(), any()))
-                .thenReturn(new TerminalFailureUpdate(true, true, 11, true, null));
+                anyString(), any(ClaimedDelivery.class), any(), any(), anyInt(), any(), any()))
+                .thenReturn(new TerminalFailureUpdate(true, true, true, 11, true, null));
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         verify(eventRepository, times(2)).save(any());
     }
@@ -1488,12 +1567,12 @@ class DeliveryHandlerTest {
         when(transport.deliver(any(), any(), any(), any())).thenReturn(TransportResult.builder()
                 .success(false).statusCode(600).latencyMs(1).errorMessage("HTTP 600").build());
 
-        handler.handle("del-1");
+        handler.handle(claimed("del-1"));
 
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.RETRYING);
         assertThat(counter(CyclesMetrics.DELIVERY_FAILED,
                 "tenant", "t-1", "event_type", "tenant.created", "reason", "transport_error"))
                 .isEqualTo(1.0);
-        verify(queueRepository).scheduleRetry(eq("del-1"), anyLong());
+        verify(deliveryRepository).updateOwnedAndScheduleRetry(eq(delivery), eq(claimed("del-1")), anyLong());
     }
 }

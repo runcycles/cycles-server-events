@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.runcycles.events.config.CryptoService;
 import io.runcycles.events.evidence.EvidenceQueueConsumer;
+import io.runcycles.events.evidence.EvidenceQueueConsumer.ClaimedEvidence;
 import io.runcycles.events.model.Delivery;
 import io.runcycles.events.model.DeliveryStatus;
 import io.runcycles.events.model.DispatcherEventTask;
@@ -79,6 +80,7 @@ class RedisAtomicityIntegrationTest {
                         .status(DeliveryStatus.PENDING)
                         .attempts(5)
                         .build()));
+                jedis.hset("dispatch:processing:claim_owner", id, "claim-" + id);
             }
         }
 
@@ -100,7 +102,8 @@ class RedisAtomicityIntegrationTest {
                         .completedAt(Instant.now())
                         .build();
                 return repository.finalizeDeliveryFailure(
-                        "concurrent", failed, Instant.now(), 10,
+                        "concurrent", new ClaimedDelivery(id, "claim-" + id), failed,
+                        Instant.now(), 10,
                         DispatcherEventTask.create("disable-" + id, Event.builder()
                                 .eventType("webhook.disabled")
                                 .data(new java.util.LinkedHashMap<>())
@@ -148,18 +151,21 @@ class RedisAtomicityIntegrationTest {
     @Test
     void deliveryUpdatePreservesTtlAndNeverResurrectsDeletedRecord() throws Exception {
         DeliveryRepository repository = new DeliveryRepository(pool, mapper);
-        Delivery delivery = Delivery.builder().deliveryId("ttl").status(DeliveryStatus.SUCCESS).build();
+        Delivery delivery = Delivery.builder().deliveryId("ttl").status(DeliveryStatus.FAILED).build();
         try (Jedis jedis = pool.getResource()) {
             jedis.psetex("delivery:ttl", 60_000, "{\"delivery_id\":\"ttl\",\"status\":\"PENDING\"}");
+            jedis.hset("dispatch:processing:claim_owner", "ttl", "claim-ttl");
         }
 
-        repository.update(delivery);
+        assertThat(repository.updateOwned(delivery,
+                new ClaimedDelivery("ttl", "claim-ttl"))).isTrue();
 
         try (Jedis jedis = pool.getResource()) {
             assertThat(jedis.pttl("delivery:ttl")).isBetween(1L, 60_000L);
             jedis.del("delivery:ttl");
         }
-        repository.update(delivery);
+        assertThat(repository.updateOwned(delivery,
+                new ClaimedDelivery("ttl", "claim-ttl"))).isFalse();
         try (Jedis jedis = pool.getResource()) {
             assertThat(jedis.exists("delivery:ttl")).isFalse();
         }
@@ -191,10 +197,12 @@ class RedisAtomicityIntegrationTest {
                     {"subscription_id":"paused-sub","status":"PAUSED",
                      "consecutive_failures":10,"disable_after_failures":10}
                     """);
+            jedis.hset("dispatch:processing:claim_owner", "terminal-atomic", "claim-terminal");
         }
 
         SubscriptionRepository.TerminalFailureUpdate result = repository.finalizeDeliveryFailure(
-                "paused-sub", failed, Instant.parse("2026-07-15T12:00:00Z"), 10,
+                "paused-sub", new ClaimedDelivery("terminal-atomic", "claim-terminal"), failed,
+                Instant.parse("2026-07-15T12:00:00Z"), 10,
                 disableTask, failureTask);
 
         assertThat(result.deliveryFound()).isTrue();
@@ -364,6 +372,108 @@ class RedisAtomicityIntegrationTest {
     }
 
     @Test
+    void sameDeliveryTerminalTransitionAppliesExactlyOnceUnderContention() throws Exception {
+        SubscriptionRepository repository = new SubscriptionRepository(pool, mapper, new CryptoService(""));
+        String deliveryId = "same-terminal";
+        ClaimedDelivery claim = new ClaimedDelivery(deliveryId, "same-owner");
+        try (Jedis jedis = pool.getResource()) {
+            jedis.set("delivery:" + deliveryId, mapper.writeValueAsString(Delivery.builder()
+                    .deliveryId(deliveryId).subscriptionId("same-sub").eventId("same-event")
+                    .eventType("tenant.created").status(DeliveryStatus.PENDING).attempts(5).build()));
+            jedis.set("webhook:same-sub", """
+                    {"subscription_id":"same-sub","status":"ACTIVE",
+                     "consecutive_failures":0,"disable_after_failures":10}
+                    """);
+            jedis.hset("dispatch:processing:claim_owner", deliveryId, claim.claimToken());
+        }
+
+        int calls = 32;
+        ExecutorService executor = Executors.newFixedThreadPool(8);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<SubscriptionRepository.TerminalFailureUpdate>> futures = new ArrayList<>();
+        for (int i = 0; i < calls; i++) {
+            futures.add(executor.submit(() -> {
+                start.await();
+                Delivery failed = Delivery.builder().deliveryId(deliveryId)
+                        .subscriptionId("same-sub").eventId("same-event")
+                        .eventType("tenant.created").status(DeliveryStatus.FAILED)
+                        .attempts(6).completedAt(Instant.now()).build();
+                return repository.finalizeDeliveryFailure("same-sub", claim, failed,
+                        Instant.now(), 10,
+                        DispatcherEventTask.create("same-disable", Event.builder()
+                                .eventType("webhook.disabled")
+                                .data(new java.util.LinkedHashMap<>()).build()),
+                        DispatcherEventTask.create("same-failure", Event.builder()
+                                .eventType("system.webhook_delivery_failed").build()));
+            }));
+        }
+        start.countDown();
+        int applied = 0;
+        for (Future<SubscriptionRepository.TerminalFailureUpdate> future : futures) {
+            if (future.get().applied()) applied++;
+        }
+        executor.shutdownNow();
+
+        assertThat(applied).isEqualTo(1);
+        try (Jedis jedis = pool.getResource()) {
+            assertThat(mapper.readTree(jedis.get("delivery:" + deliveryId)).path("status").asText())
+                    .isEqualTo("FAILED");
+            assertThat(mapper.readTree(jedis.get("webhook:same-sub"))
+                    .path("consecutive_failures").asInt()).isEqualTo(1);
+            assertThat(jedis.zscore(EventRepository.DISPATCHER_OUTBOX_PENDING_KEY,
+                    "same-failure")).isNotNull();
+        }
+    }
+
+    @Test
+    void staleDeliveryOwnerCannotOverwriteSuccessorOrScheduleRetry() throws Exception {
+        SubscriptionRepository subscriptions = new SubscriptionRepository(pool, mapper, new CryptoService(""));
+        DeliveryRepository deliveries = new DeliveryRepository(pool, mapper);
+        String deliveryId = "successor-fence";
+        ClaimedDelivery stale = new ClaimedDelivery(deliveryId, "old-owner");
+        ClaimedDelivery successor = new ClaimedDelivery(deliveryId, "new-owner");
+        try (Jedis jedis = pool.getResource()) {
+            jedis.set("delivery:" + deliveryId, mapper.writeValueAsString(Delivery.builder()
+                    .deliveryId(deliveryId).subscriptionId("successor-sub").eventId("source")
+                    .eventType("tenant.created").status(DeliveryStatus.PENDING).attempts(1).build()));
+            jedis.set("webhook:successor-sub", """
+                    {"subscription_id":"successor-sub","status":"ACTIVE",
+                     "consecutive_failures":0,"disable_after_failures":10}
+                    """);
+            jedis.hset("dispatch:processing:claim_owner", deliveryId, successor.claimToken());
+            jedis.zrem("dispatch:retry", deliveryId);
+        }
+
+        Delivery staleSuccess = Delivery.builder().deliveryId(deliveryId)
+                .subscriptionId("successor-sub").eventId("source")
+                .eventType("tenant.created").status(DeliveryStatus.SUCCESS).attempts(2).build();
+        assertThat(subscriptions.finalizeDeliverySuccess("successor-sub", stale,
+                staleSuccess, Instant.now()).applied()).isFalse();
+        Delivery staleRetry = Delivery.builder().deliveryId(deliveryId)
+                .subscriptionId("successor-sub").eventId("source")
+                .eventType("tenant.created").status(DeliveryStatus.RETRYING).attempts(2).build();
+        assertThat(deliveries.updateOwnedAndScheduleRetry(staleRetry, stale, 1234L)).isFalse();
+
+        Delivery failed = Delivery.builder().deliveryId(deliveryId)
+                .subscriptionId("successor-sub").eventId("source")
+                .eventType("tenant.created").status(DeliveryStatus.FAILED).attempts(2).build();
+        assertThat(subscriptions.finalizeDeliveryFailure("successor-sub", successor, failed,
+                Instant.now(), 10,
+                DispatcherEventTask.create("successor-disable", Event.builder()
+                        .eventType("webhook.disabled").data(new java.util.LinkedHashMap<>()).build()),
+                DispatcherEventTask.create("successor-failure", Event.builder()
+                        .eventType("system.webhook_delivery_failed").build())).applied()).isTrue();
+
+        try (Jedis jedis = pool.getResource()) {
+            assertThat(mapper.readTree(jedis.get("delivery:" + deliveryId)).path("status").asText())
+                    .isEqualTo("FAILED");
+            assertThat(jedis.zscore("dispatch:retry", deliveryId)).isNull();
+            assertThat(mapper.readTree(jedis.get("webhook:successor-sub"))
+                    .path("consecutive_failures").asInt()).isEqualTo(1);
+        }
+    }
+
+    @Test
     void evidenceRecoveryDoesNotStealFreshReplicaWork() {
         EvidenceQueueConsumer evidence = new EvidenceQueueConsumer(
                 pool, "evidence:test:pending", "evidence:test:processing", "evidence:test:failed", 100);
@@ -371,9 +481,11 @@ class RedisAtomicityIntegrationTest {
         long now = 200_000L;
         try (Jedis jedis = pool.getResource()) {
             jedis.del("evidence:test:pending", "evidence:test:processing",
-                    "evidence:test:processing:claimed_at");
+                    "evidence:test:processing:claimed_at", "evidence:test:processing:claim_owner",
+                    "evidence:test:processing:payload");
             jedis.lpush("evidence:test:processing", record);
             jedis.zadd("evidence:test:processing:claimed_at", now, record);
+            jedis.hset("evidence:test:processing:claim_owner", record, "legacy-owner");
         }
 
         assertThat(evidence.recoverStale(now + 10, 100, 10)).isZero();
@@ -388,25 +500,92 @@ class RedisAtomicityIntegrationTest {
         String poison = "{ not valid json";
         try (Jedis jedis = pool.getResource()) {
             jedis.del("evidence:lua:pending", "evidence:lua:processing",
-                    "evidence:lua:processing:claimed_at", "evidence:lua:failed");
+                    "evidence:lua:processing:claimed_at", "evidence:lua:processing:claim_owner",
+                    "evidence:lua:processing:payload", "evidence:lua:failed");
             jedis.lpush("evidence:lua:pending", valid);
         }
 
-        assertThat(evidence.claim(1)).isEqualTo(valid);
-        evidence.ack(valid);
+        ClaimedEvidence validClaim = evidence.claim(1);
+        assertThat(validClaim.recordJson()).isEqualTo(valid);
+        assertThat(evidence.ack(validClaim)).isTrue();
         try (Jedis jedis = pool.getResource()) {
             assertThat(jedis.llen("evidence:lua:processing")).isZero();
-            assertThat(jedis.zscore("evidence:lua:processing:claimed_at", valid)).isNull();
+            assertThat(jedis.zscore("evidence:lua:processing:claimed_at",
+                    validClaim.claimToken())).isNull();
             jedis.lpush("evidence:lua:pending", poison);
         }
 
-        assertThat(evidence.claim(1)).isEqualTo(poison);
-        assertThat(evidence.deadLetterAndAck(poison)).isTrue();
+        ClaimedEvidence poisonClaim = evidence.claim(1);
+        assertThat(poisonClaim.recordJson()).isEqualTo(poison);
+        assertThat(evidence.deadLetterAndAck(poisonClaim)).isTrue();
         try (Jedis jedis = pool.getResource()) {
             assertThat(jedis.lrange("evidence:lua:failed", 0, -1)).containsExactly(poison);
             assertThat(jedis.llen("evidence:lua:processing")).isZero();
-            assertThat(jedis.zscore("evidence:lua:processing:claimed_at", poison)).isNull();
+            assertThat(jedis.zscore("evidence:lua:processing:claimed_at",
+                    poisonClaim.claimToken())).isNull();
         }
+    }
+
+    @Test
+    void staleEvidenceOwnerCannotAckOrDeadLetterSuccessorClaim() {
+        EvidenceQueueConsumer evidence = new EvidenceQueueConsumer(
+                pool, "evidence:fence:pending", "evidence:fence:processing",
+                "evidence:fence:failed", 10);
+        String record = "{\"artifact_type\":\"reserve\",\"sequence\":7}";
+        try (Jedis jedis = pool.getResource()) {
+            jedis.del("evidence:fence:pending", "evidence:fence:processing",
+                    "evidence:fence:processing:claimed_at", "evidence:fence:processing:claim_owner",
+                    "evidence:fence:processing:payload", "evidence:fence:failed");
+            jedis.lpush("evidence:fence:pending", record);
+        }
+
+        ClaimedEvidence stale = evidence.claim(1);
+        assertThat(evidence.recoverStale(System.currentTimeMillis() + 1_000, 100, 10))
+                .isEqualTo(1);
+        ClaimedEvidence successor = evidence.claim(1);
+        assertThat(successor.claimToken()).isNotEqualTo(stale.claimToken());
+
+        assertThat(evidence.ack(stale)).isFalse();
+        assertThat(evidence.deadLetterAndAck(stale)).isFalse();
+        try (Jedis jedis = pool.getResource()) {
+            assertThat(jedis.lrange("evidence:fence:processing", 0, -1))
+                    .containsExactly(successor.claimToken());
+            assertThat(jedis.lrange("evidence:fence:failed", 0, -1)).isEmpty();
+        }
+        assertThat(evidence.ack(successor)).isTrue();
+    }
+
+    @Test
+    void identicalEvidencePayloadsReceiveIndependentProcessingIdentities() {
+        EvidenceQueueConsumer evidence = new EvidenceQueueConsumer(
+                pool, "evidence:duplicate:pending", "evidence:duplicate:processing",
+                "evidence:duplicate:failed", 10);
+        String record = "{\"artifact_type\":\"reserve\",\"same\":true}";
+        try (Jedis jedis = pool.getResource()) {
+            jedis.del("evidence:duplicate:pending", "evidence:duplicate:processing",
+                    "evidence:duplicate:processing:claimed_at",
+                    "evidence:duplicate:processing:claim_owner",
+                    "evidence:duplicate:processing:payload", "evidence:duplicate:failed");
+            jedis.lpush("evidence:duplicate:pending", record, record);
+            // Simulate recovery observing the BLMOVE member before claim-ID
+            // installation; the claim script must not leak these raw-key entries.
+            jedis.zadd("evidence:duplicate:processing:claimed_at", 1, record);
+            jedis.hset("evidence:duplicate:processing:claim_owner", record, "__orphan__");
+        }
+
+        ClaimedEvidence first = evidence.claim(1);
+        ClaimedEvidence second = evidence.claim(1);
+        assertThat(first.recordJson()).isEqualTo(record);
+        assertThat(second.recordJson()).isEqualTo(record);
+        assertThat(first.claimToken()).isNotEqualTo(second.claimToken());
+        try (Jedis jedis = pool.getResource()) {
+            assertThat(jedis.lrange("evidence:duplicate:processing", 0, -1))
+                    .containsExactlyInAnyOrder(first.claimToken(), second.claimToken());
+            assertThat(jedis.zscore("evidence:duplicate:processing:claimed_at", record)).isNull();
+            assertThat(jedis.hget("evidence:duplicate:processing:claim_owner", record)).isNull();
+        }
+        assertThat(evidence.ack(first)).isTrue();
+        assertThat(evidence.ack(second)).isTrue();
     }
 
     @Test

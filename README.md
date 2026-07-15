@@ -124,21 +124,27 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `RETENTION_CLEANUP_INTERVAL_MS` | 3600000 | How often to trim expired ZSET index entries (ms). Default: 1 hour. |
 | `RETENTION_LOCK_LEASE_MS` | 300000 | Cross-replica retention-cleanup lease; keep above the expected cleanup duration |
 | `CYCLES_METRICS_TENANT_TAG_ENABLED` | false | Include tenant IDs as Prometheus metric labels. Keep false in production unless per-tenant drill-down is worth the cardinality. |
+| `SCHEDULING_POOL_SIZE` | 5 | Scheduled-task executor size. Do not lower below 5 when evidence signing is enabled. |
 | `JAVA_OPTS` | (empty) | Extra JVM options appended after image defaults by the Docker entrypoint. |
 | `EVIDENCE_SERVER_ID` | (empty) | CyclesEvidence `server_id`. Blank disables the evidence signer. When set, it must be an absolute URI and **byte-identical to `cycles-server`'s** value (incl. the `/v1` base), or the worker retains the mismatched record in-flight and pauses new claims. See the [enablement runbook](docs/evidence-identity-enablement.md). |
 | `EVIDENCE_SIGNING_SIGNER_DID` | (empty) | Public Ed25519 key (64 hex), the public half of `EVIDENCE_SIGNING_PRIVATE_KEY_HEX`, **identical to `cycles-server`'s** value. |
 | `EVIDENCE_SIGNING_PRIVATE_KEY_HEX` | (empty) | **Secret** — Ed25519 seed (64 hex) this service signs with; lives **only** here. Required when `EVIDENCE_SERVER_ID` is set unless ephemeral dev mode is explicitly allowed; setting only one of the signing pair fails startup. |
 | `EVIDENCE_ALLOW_EPHEMERAL_SIGNING_KEY` | false | Development-only escape hatch. When `true` and evidence is enabled without a signing pair, generates an ephemeral key that will not verify across restarts. Keep `false` in production. |
+| `EVIDENCE_PENDING_KEY` / `EVIDENCE_PROCESSING_KEY` / `EVIDENCE_FAILED_KEY` | evidence:pending / evidence:processing / evidence:failed | Source, in-flight, and bounded poison-record queue keys. |
+| `EVIDENCE_POP_TIMEOUT_SECONDS` | 5 | Evidence BLMOVE blocking timeout; keep below `REDIS_BLOCKING_SOCKET_TIMEOUT_MS`. |
 | `EVIDENCE_RECOVERY_IDLE_MS` / `EVIDENCE_RECOVERY_INTERVAL_MS` | 120000 / 30000 | Age threshold and polling interval for recovering evidence work orphaned in `evidence:processing` |
 | `EVIDENCE_RECOVERY_BATCH_SIZE` | 100 | Maximum processing records inspected per recovery pass |
 | `EVIDENCE_FAILED_MAX_LEN` | 10000 | Positive maximum length of the evidence poison-record DLQ |
 | `EVIDENCE_LOOP_DELAY_MS` / `EVIDENCE_QUEUE_FAILURE_BACKOFF_MS` | 25 / 1000 | Scheduler delay and Redis claim/ack outage backoff; prevents tight retry/log loops. |
 | `EVIDENCE_INFRASTRUCTURE_BACKOFF_MS` | 30000 | Claim pause after identity, signing, or store failures; limits in-flight growth during systemic outages. |
+| `EVIDENCE_STORE_BACKEND` / `EVIDENCE_STORE_KEY_PREFIX` / `EVIDENCE_STORE_TTL_SECONDS` | redis / evidence:envelope: / 0 | Content-addressed evidence storage backend, Redis key prefix, and archival TTL (`0` means no expiry). |
 
 The delivery-time URL guard reads `config:webhook-security`. If that key is
 absent, its hardened fallback blocks private, loopback, link-local,
-carrier-grade NAT, unspecified IPv4, and unique-local IPv6 ranges, including
-`0.0.0.0/8`, `100.64.0.0/10`, and `fe80::/10`. A malformed configured CIDR is
+carrier-grade NAT, unspecified IPv4 and IPv6, and unique-local IPv6 ranges,
+including `0.0.0.0/8`, `::/128`, `100.64.0.0/10`, and `fe80::/10`. The
+unspecified address is also rejected semantically even if a stored blocklist
+omits it. A malformed configured CIDR is
 treated as indeterminate rather than silently skipped: the delivery remains
 in-flight for recovery and `cycles_webhook_security_config_indeterminate_total`
 increments. Host resolution is checked immediately before delivery, but the JDK
@@ -250,6 +256,10 @@ PENDING ──HTTP 2xx──► SUCCESS (reset consecutive_failures)
 | `dispatch:processing:claimed_at` | ZSET | Events (ZADD/ZREM) | Events recovery | Claim timestamps used to recover only stale in-flight deliveries |
 | `dispatch:processing:claim_owner` | HASH | Events claim Lua | Events ack/recovery Lua | Per-delivery claim generation; a stale worker cannot ack a successor's claim |
 | `dispatch:retry` | ZSET | Events (ZADD) | Events (ZRANGEBYSCORE) | Retry queue (score = timestamp) |
+| `evidence:processing` | LIST | Events evidence claim Lua | Events evidence ack/recovery Lua | Unique evidence claim IDs; raw payloads are not used as processing identities |
+| `evidence:processing:claimed_at` | ZSET | Events evidence claim Lua | Events evidence recovery Lua | Evidence claim timestamps keyed by unique claim ID |
+| `evidence:processing:claim_owner` | HASH | Events evidence claim Lua | Events evidence ack/DLQ/recovery Lua | Evidence claim generations used to fence stale workers |
+| `evidence:processing:payload` | HASH | Events evidence claim Lua | Events evidence ack/DLQ/recovery Lua | Raw source payload retained by claim ID so identical records remain independent |
 | `delivery:{id}` | STRING | Admin (SET) | Events (GET/SET) | Delivery record JSON |
 | `event:{id}` | STRING | Admin (SET) | Events (GET) | Event record JSON |
 | `webhook:{id}` | STRING | Admin (SET) | Events (GET/SET) | Subscription JSON |
@@ -262,7 +272,7 @@ PENDING ──HTTP 2xx──► SUCCESS (reset consecutive_failures)
 
 ### Concurrent safety
 
-Multiple events service instances can safely share `dispatch:pending`. One global Redis lease deliberately serializes the complete claim/send section across the fleet, preventing simultaneous sends while preserving FIFO order for initial claims. This caps webhook throughput at one in-flight HTTP request (about two deliveries/minute when every endpoint consumes the 30-second timeout); extra replicas provide failover, not throughput. Delayed retries can still complete after later events, as expected for at-least-once delivery with backoff. Each claim receives a unique owner token, and ack removes the processing entry only when that token still owns it, so a worker waking after stale recovery cannot erase a successor's claim. Recovery is age-gated and periodic: only entries older than `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` are moved back to pending, and startup validates that threshold is above the ordering lease.
+Multiple events service instances can safely share `dispatch:pending`. One global Redis lease deliberately serializes the complete claim/send section across the fleet, preventing simultaneous sends while preserving FIFO order for initial claims. This caps webhook throughput at one in-flight HTTP request (about two deliveries/minute when every endpoint consumes the 30-second timeout); extra replicas provide failover, not throughput. Delayed retries can still complete after later events, as expected for at-least-once delivery with backoff. Each claim receives a unique owner token, and every delivery state write, retry enqueue, and ack verifies that token atomically, so a worker waking after stale recovery cannot alter or erase its successor's work. Recovery is age-gated and periodic: only entries older than `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` are moved back to pending, and startup validates that threshold is above both the ordering lease and the worst-case claim/send duration.
 
 Final retry exhaustion uses one Redis transaction to persist the failed delivery, increment/disable the subscription, and stage both required dispatcher meta-events. A background publisher uses deterministic event IDs and per-task leases, so a crash or Redis error can replay safely without losing or multiplying the logical event. Meta-events are persisted for observation but are not recursively fanned out as webhook deliveries.
 
@@ -384,10 +394,10 @@ The webhook POST body is the full event JSON. Null fields are omitted.
 ## Build & Test
 
 ```bash
-# Run the fast unit suite (505 tests in the current suite)
+# Run the fast unit suite (515 tests in the current suite)
 mvn test
 
-# Run all 522 tests including integration; enforces 95% line / 95% branch coverage
+# Run all 540 tests including integration; enforces 95% line / 95% branch coverage
 # (requires Docker for Testcontainers Redis)
 mvn verify -Pintegration-tests
 

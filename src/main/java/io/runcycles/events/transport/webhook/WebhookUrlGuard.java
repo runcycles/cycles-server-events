@@ -86,17 +86,23 @@ public class WebhookUrlGuard {
             return "No host in URL";
         }
         List<CidrRange> blockedRanges = parseCidrRanges(config.getBlockedCidrRanges());
-        if (!blockedRanges.isEmpty()) {
-            try {
-                InetAddress[] addresses = InetAddress.getAllByName(host);
-                for (InetAddress addr : addresses) {
-                    for (CidrRange range : blockedRanges) {
-                        if (range.contains(addr)) {
-                            return "Resolves to blocked IP: " + addr.getHostAddress();
-                        }
+        try {
+            InetAddress[] addresses = InetAddress.getAllByName(host);
+            for (InetAddress addr : addresses) {
+                // The unspecified address is never a valid remote webhook
+                // destination. Enforce this semantic invariant even if a
+                // stored config accidentally omits ::/128 or 0.0.0.0/32.
+                if (addr.isAnyLocalAddress()) {
+                    return "Resolves to unspecified IP: " + addr.getHostAddress();
+                }
+                for (CidrRange range : blockedRanges) {
+                    if (range.contains(addr)) {
+                        return "Resolves to blocked IP: " + addr.getHostAddress();
                     }
                 }
-            } catch (UnknownHostException e) {
+            }
+        } catch (UnknownHostException e) {
+            if (!blockedRanges.isEmpty()) {
                 return "Cannot resolve hostname: " + host;
             }
         }

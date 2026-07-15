@@ -1,5 +1,6 @@
 package io.runcycles.events.evidence;
 
+import io.runcycles.events.evidence.EvidenceQueueConsumer.ClaimedEvidence;
 import org.junit.jupiter.api.Test;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
@@ -28,10 +29,20 @@ class EvidenceQueueConsumerTest {
         when(jedis.blmove("evidence:pending", "evidence:processing",
                 ListDirection.RIGHT, ListDirection.LEFT, 5.0))
                 .thenReturn("{\"artifact_type\":\"reserve\"}");
+        when(jedis.eval(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyList(),
+                org.mockito.ArgumentMatchers.anyList())).thenReturn(1L);
         String record = "{\"artifact_type\":\"reserve\"}";
-        assertThat(consumer().claim(5)).isEqualTo(record);
-        verify(jedis).zadd(org.mockito.ArgumentMatchers.eq("evidence:processing:claimed_at"),
-                org.mockito.ArgumentMatchers.anyDouble(), org.mockito.ArgumentMatchers.eq(record));
+        ClaimedEvidence claim = consumer().claim(5);
+        assertThat(claim.recordJson()).isEqualTo(record);
+        assertThat(claim.claimToken()).isNotBlank();
+        verify(jedis).eval(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.eq(List.of("evidence:processing",
+                        "evidence:processing:claimed_at", "evidence:processing:claim_owner",
+                        "evidence:processing:payload")),
+                org.mockito.ArgumentMatchers.argThat(args -> args.size() == 3
+                        && record.equals(args.get(0))
+                        && claim.claimToken().equals(args.get(1))));
     }
 
     @Test
@@ -42,17 +53,34 @@ class EvidenceQueueConsumerTest {
     }
 
     @Test
+    void claimReturnsNullWhenRecoveryWinsBeforeClaimIdentityIsInstalled() {
+        when(jedis.blmove("evidence:pending", "evidence:processing",
+                ListDirection.RIGHT, ListDirection.LEFT, 5.0)).thenReturn("record");
+        when(jedis.eval(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyList(),
+                org.mockito.ArgumentMatchers.anyList())).thenReturn(0L);
+        assertThat(consumer().claim(5)).isNull();
+    }
+
+    @Test
     void ackRemovesRecordFromProcessing() {
-        consumer().ack("rec");
+        ClaimedEvidence claim = new ClaimedEvidence("rec", "token");
+        when(jedis.eval(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.anyList(),
+                org.mockito.ArgumentMatchers.anyList())).thenReturn(1L);
+        assertThat(consumer().ack(claim)).isTrue();
         verify(jedis).eval(org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.eq(List.of("evidence:processing", "evidence:processing:claimed_at")),
-                org.mockito.ArgumentMatchers.eq(List.of("rec")));
+                org.mockito.ArgumentMatchers.eq(List.of("evidence:processing",
+                        "evidence:processing:claimed_at", "evidence:processing:claim_owner",
+                        "evidence:processing:payload")),
+                org.mockito.ArgumentMatchers.eq(List.of("token")));
     }
 
     @Test
     void recoverMovesOnlyStaleInFlightRecordsBackToPending() {
         when(jedis.eval(org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.eq(List.of("evidence:processing", "evidence:processing:claimed_at", "evidence:pending")),
+                org.mockito.ArgumentMatchers.eq(List.of("evidence:processing", "evidence:processing:claimed_at",
+                        "evidence:pending", "evidence:processing:claim_owner", "evidence:processing:payload")),
                 org.mockito.ArgumentMatchers.eq(List.of("100", "10000", "5000")))).thenReturn(1L);
 
         assertThat(consumer().recoverStale(10_000L, 5_000L, 100)).isEqualTo(1L);
@@ -61,7 +89,8 @@ class EvidenceQueueConsumerTest {
     @Test
     void recoveryMarksUntrackedClaimBeforeConsideringItStale() {
         when(jedis.eval(org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.eq(List.of("evidence:processing", "evidence:processing:claimed_at", "evidence:pending")),
+                org.mockito.ArgumentMatchers.eq(List.of("evidence:processing", "evidence:processing:claimed_at",
+                        "evidence:pending", "evidence:processing:claim_owner", "evidence:processing:payload")),
                 org.mockito.ArgumentMatchers.eq(List.of("100", "10000", "-110000")))).thenReturn(0L);
 
         assertThat(consumer().recoverStale(10_000L, 120_000L, 100)).isZero();
@@ -71,15 +100,18 @@ class EvidenceQueueConsumerTest {
     void deadLetterAndAckIsOneAtomicRedisTransition() {
         when(jedis.eval(org.mockito.ArgumentMatchers.anyString(),
                 org.mockito.ArgumentMatchers.eq(List.of(
-                        "evidence:failed", "evidence:processing", "evidence:processing:claimed_at")),
-                org.mockito.ArgumentMatchers.eq(List.of("rec", "10000")))).thenReturn(1L);
+                        "evidence:failed", "evidence:processing", "evidence:processing:claimed_at",
+                        "evidence:processing:claim_owner", "evidence:processing:payload")),
+                org.mockito.ArgumentMatchers.anyList())).thenReturn(1L);
 
-        assertThat(consumer().deadLetterAndAck("rec")).isTrue();
+        ClaimedEvidence claim = new ClaimedEvidence("rec", "token");
+        assertThat(consumer().deadLetterAndAck(claim)).isTrue();
 
         verify(jedis).eval(org.mockito.ArgumentMatchers.anyString(),
                 org.mockito.ArgumentMatchers.eq(List.of(
-                        "evidence:failed", "evidence:processing", "evidence:processing:claimed_at")),
-                org.mockito.ArgumentMatchers.eq(List.of("rec", "10000")));
+                        "evidence:failed", "evidence:processing", "evidence:processing:claimed_at",
+                        "evidence:processing:claim_owner", "evidence:processing:payload")),
+                org.mockito.ArgumentMatchers.eq(List.of("token", "rec", "10000")));
     }
 
     @Test
@@ -88,11 +120,17 @@ class EvidenceQueueConsumerTest {
                 org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.anyList()))
                 .thenReturn(0L);
 
-        assertThat(consumer().deadLetterAndAck("rec")).isFalse();
+        assertThat(consumer().deadLetterAndAck(new ClaimedEvidence("rec", "token"))).isFalse();
     }
 
     @Test
     void rejectsUnboundedDlqBlankKeysAndInvalidRecoveryLimit() {
+        assertThatThrownBy(() -> new ClaimedEvidence(null, "token"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new ClaimedEvidence("record", null))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new ClaimedEvidence("record", " "))
+                .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new EvidenceQueueConsumer(pool, null, "processing", "failed", 100))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new EvidenceQueueConsumer(pool, "", "processing", "failed", 100))
@@ -115,7 +153,8 @@ class EvidenceQueueConsumerTest {
     void recoverClampsNegativeIdleAndTreatsUnexpectedLuaResultAsNoMove() {
         when(jedis.eval(org.mockito.ArgumentMatchers.anyString(),
                 org.mockito.ArgumentMatchers.eq(List.of(
-                        "evidence:processing", "evidence:processing:claimed_at", "evidence:pending")),
+                        "evidence:processing", "evidence:processing:claimed_at", "evidence:pending",
+                        "evidence:processing:claim_owner", "evidence:processing:payload")),
                 org.mockito.ArgumentMatchers.eq(List.of("1", "10000", "10000"))))
                 .thenReturn("unexpected");
 

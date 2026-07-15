@@ -48,6 +48,12 @@ public class DeliveryQueueRepository {
             return removed
             """;
 
+    private static final String SCHEDULE_RETRY_OWNED_LUA = """
+            if redis.call('HGET', KEYS[1], ARGV[1]) ~= ARGV[2] then return 0 end
+            redis.call('ZADD', KEYS[2], ARGV[3], ARGV[1])
+            return 1
+            """;
+
     private static final String RELEASE_ORDERING_LOCK_LUA =
             "if redis.call('GET', KEYS[1]) == ARGV[1] then\n" +
             "  return redis.call('DEL', KEYS[1])\n" +
@@ -142,10 +148,7 @@ public class DeliveryQueueRepository {
      * stale recovery cannot remove a successor's processing marker.
      */
     public boolean ack(ClaimedDelivery claim) {
-        if (claim == null || claim.deliveryId() == null || claim.deliveryId().isBlank()
-                || claim.claimToken() == null || claim.claimToken().isBlank()) {
-            throw new IllegalArgumentException("delivery claim id and token are required");
-        }
+        java.util.Objects.requireNonNull(claim, "delivery claim is required");
         try (Jedis jedis = jedisPool.getResource()) {
             Object result = jedis.eval(ACK_PROCESSING_LUA,
                     List.of(PROCESSING_KEY, PROCESSING_CLAIMED_AT_KEY, PROCESSING_CLAIM_OWNER_KEY),
@@ -174,10 +177,18 @@ public class DeliveryQueueRepository {
         }
     }
 
-    /** Add delivery to retry queue with score = next_retry_at millis. */
-    public void scheduleRetry(String deliveryId, long nextRetryAtMillis) {
+    /** Restore a retry schedule only while the caller owns the processing claim. */
+    public boolean scheduleRetryOwned(ClaimedDelivery claim, long nextRetryAtMillis) {
+        requireClaim(claim);
+        if (nextRetryAtMillis < 0) {
+            throw new IllegalArgumentException("next retry time must be non-negative");
+        }
         try (Jedis jedis = jedisPool.getResource()) {
-            jedis.zadd(RETRY_KEY, nextRetryAtMillis, deliveryId);
+            Object result = jedis.eval(SCHEDULE_RETRY_OWNED_LUA,
+                    List.of(PROCESSING_CLAIM_OWNER_KEY, RETRY_KEY),
+                    List.of(claim.deliveryId(), claim.claimToken(),
+                            Long.toString(nextRetryAtMillis)));
+            return Long.valueOf(1L).equals(result);
         }
     }
 
@@ -202,5 +213,15 @@ public class DeliveryQueueRepository {
     }
 
     public record ClaimedDelivery(String deliveryId, String claimToken) {
+        public ClaimedDelivery {
+            if (deliveryId == null || deliveryId.isBlank()
+                    || claimToken == null || claimToken.isBlank()) {
+                throw new IllegalArgumentException("delivery claim id and token are required");
+            }
+        }
+    }
+
+    private static void requireClaim(ClaimedDelivery claim) {
+        java.util.Objects.requireNonNull(claim, "delivery claim is required");
     }
 }

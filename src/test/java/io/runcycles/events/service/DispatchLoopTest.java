@@ -39,7 +39,7 @@ class DispatchLoopTest {
 
         dispatchLoop.processNext();
 
-        verify(deliveryHandler).handle("del-1");
+        verify(deliveryHandler).handle(claim);
         verify(queueRepository).ack(claim);
         verify(queueRepository).releaseOrderingLock(anyString());
     }
@@ -52,7 +52,7 @@ class DispatchLoopTest {
 
         dispatchLoop.processNext();
 
-        verify(deliveryHandler).handle("del-stale");
+        verify(deliveryHandler).handle(claim);
         verify(queueRepository).ack(claim);
         verify(queueRepository).releaseOrderingLock(anyString());
     }
@@ -63,7 +63,7 @@ class DispatchLoopTest {
 
         dispatchLoop.processNext();
 
-        verify(deliveryHandler, never()).handle(anyString());
+        verify(deliveryHandler, never()).handle(any(ClaimedDelivery.class));
         verify(queueRepository, never()).ack(any());
     }
 
@@ -71,7 +71,7 @@ class DispatchLoopTest {
     void processNext_handlerException_caughtAndNotAcked() {
         ClaimedDelivery claim = new ClaimedDelivery("del-1", "claim-1");
         when(queueRepository.claimPending(5)).thenReturn(claim);
-        doThrow(new RuntimeException("handler error")).when(deliveryHandler).handle("del-1");
+        doThrow(new RuntimeException("handler error")).when(deliveryHandler).handle(claim);
 
         // Should not throw
         dispatchLoop.processNext();
@@ -86,7 +86,7 @@ class DispatchLoopTest {
         // Should not throw
         dispatchLoop.processNext();
 
-        verify(deliveryHandler, never()).handle(anyString());
+        verify(deliveryHandler, never()).handle(any(ClaimedDelivery.class));
     }
 
     @Test

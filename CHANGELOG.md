@@ -45,8 +45,14 @@ breaking.
   undecryptable secrets fail closed before HTTP and are never sent unsigned.
 - Delivery acknowledgements carry an owner token, closing the stale-worker
   window where a recovered predecessor could remove its successor's in-flight
-  entry. Startup also rejects a recovery idle threshold at or below the global
-  ordering lease.
+  entry. The same generation now fences success/failure writes, subscription
+  counters, retry enqueue, and retry-schedule restoration. Startup also rejects
+  recovery thresholds at or below the global lease or worst-case send duration.
+- Evidence processing entries use unique claim IDs with owner-checked ack and
+  DLQ transitions, so stale workers and byte-identical source records cannot
+  collide in processing metadata or remove a successor's work. For the
+  0.1.25.24 rollout, drain `evidence:processing` and stop older evidence
+  consumers before starting upgraded workers; pending records are unchanged.
 - Fractional evidence numbers are parsed as arbitrary-precision decimals before
   binary64 safety validation, so excess precision is rejected rather than
   silently rounded and signed.
@@ -74,7 +80,8 @@ breaking.
 - Webhook CIDR configuration uses a strict literal-only parser and rejects
   malformed prefixes, extra path segments, hostnames, and IPv6 zone identifiers.
 - The absent-config webhook egress fallback now also blocks `0.0.0.0/8`,
-  `100.64.0.0/10`, and `fe80::/10`. Indeterminate security configuration emits
+  `::/128`, `100.64.0.0/10`, and `fe80::/10`; unspecified destinations are also
+  rejected semantically. Indeterminate security configuration emits
   a dedicated alertable metric while deliveries remain recoverable.
 - Evidence lifecycle metrics now constrain `artifact_type` to the five-value
   protocol vocabulary, and malformed source JSON is logged without payload
