@@ -138,6 +138,19 @@ class WebhookTransportTest {
     }
 
     @Test
+    void deliver_redirectIsOutsideSuccessRange() {
+        server.createContext("/redirect", exchange -> {
+            exchange.sendResponseHeaders(300, -1);
+            exchange.close();
+        });
+
+        TransportResult result = transport.deliver(testEvent(), testSubscription("/redirect"), null, null);
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(result.getStatusCode()).isEqualTo(300);
+    }
+
+    @Test
     void deliver_withSigningSecret_validSignature() {
         String secret = "test-secret";
         AtomicReference<String> capturedSignature = new AtomicReference<>();
@@ -382,6 +395,44 @@ class WebhookTransportTest {
         transport.deliver(testEvent(), testSubscription("/no-req"), null, null);
 
         assertThat(captured.get()).isNull();
+    }
+
+    @Test
+    void deliver_blankRequestId_noHeader() {
+        AtomicReference<String> captured = new AtomicReference<>("NOT_SET");
+        server.createContext("/blank-req", exchange -> {
+            captured.set(exchange.getRequestHeaders().getFirst("X-Request-Id"));
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        Event event = testEvent();
+        event.setRequestId(" ");
+
+        transport.deliver(event, testSubscription("/blank-req"), null, null);
+
+        assertThat(captured.get()).isNull();
+    }
+
+    @Test
+    void deliverNullInputsReturnsFailureWithNullSafeDiagnostics() {
+        TransportResult result = transport.deliver(null, null, null, null);
+
+        assertThat(result.isSuccess()).isFalse();
+        assertThat(result.getStatusCode()).isZero();
+    }
+
+    @Test
+    void interruptedDeliveryRestoresInterruptFlag() {
+        Thread.currentThread().interrupt();
+        try {
+            TransportResult result = transport.deliver(
+                    testEvent(), testSubscription("/interrupted"), null, Delivery.builder().build());
+
+            assertThat(result.isSuccess()).isFalse();
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        } finally {
+            Thread.interrupted();
+        }
     }
 
     @Test

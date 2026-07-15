@@ -233,9 +233,67 @@ class EventRepositoryTest {
 
     @Test
     void invalidOutboxClaimArgumentsFailBeforeRedis() {
+        assertThatThrownBy(() -> repository.tryClaimDispatcherEvent(null, "owner", 30_000))
+                .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> repository.tryClaimDispatcherEvent("", "owner", 30_000))
                 .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.tryClaimDispatcherEvent("task-1", null, 30_000))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.tryClaimDispatcherEvent("task-1", "", 30_000))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.tryClaimDispatcherEvent("task-1", "owner", 0))
+                .isInstanceOf(IllegalArgumentException.class);
         verify(jedis, never()).set(anyString(), anyString(), any());
+    }
+
+    @Test
+    void saveNullEventReportsSafeContext() {
+        assertThatThrownBy(() -> repository.save(null))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Failed to save event");
+    }
+
+    @Test
+    void dispatcherOutboxClaimCanLoseContention() {
+        when(jedis.set(eq("dispatcher:event-outbox:lock:task-1"), eq("owner-1"), any()))
+                .thenReturn(null);
+
+        assertThat(repository.tryClaimDispatcherEvent("task-1", "owner-1", 30_000)).isFalse();
+    }
+
+    @Test
+    void findDueDispatcherEventsHonorsLimitAndSkipsNonPositiveLimit() {
+        assertThat(repository.findDueDispatcherEvents(100L, 0)).isEmpty();
+        verify(jedisPool, never()).getResource();
+
+        when(jedis.zrangeByScore(EventRepository.DISPATCHER_OUTBOX_PENDING_KEY,
+                Double.NEGATIVE_INFINITY, 100.0, 0, 2)).thenReturn(List.of("task-1", "task-2"));
+        assertThat(repository.findDueDispatcherEvents(100L, 2)).containsExactly("task-1", "task-2");
+    }
+
+    @Test
+    void dispatcherOutboxTaskHandlesMissingAndMalformedRecords() {
+        when(jedis.get(EventRepository.dispatcherOutboxTaskKey("missing"))).thenReturn(null);
+        assertThat(repository.findDispatcherEventTask("missing")).isNull();
+
+        when(jedis.get(EventRepository.dispatcherOutboxTaskKey("bad"))).thenReturn("not-json");
+        assertThatThrownBy(() -> repository.findDispatcherEventTask("bad"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to read dispatcher event outbox task");
+    }
+
+    @Test
+    void claimedOutboxAckReportsOwnershipAndMaintenanceMethodsUseExpectedKeys() {
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(1L, 0L);
+
+        assertThat(repository.ackClaimedDispatcherEvent("task-1", "owner-1")).isTrue();
+        assertThat(repository.ackClaimedDispatcherEvent("task-1", "owner-2")).isFalse();
+        repository.deferDispatcherEvent("task-1", 123L);
+        repository.releaseDispatcherEventClaim("task-1", "owner-1");
+
+        verify(jedis).zadd(EventRepository.DISPATCHER_OUTBOX_PENDING_KEY, 123L, "task-1");
+        verify(jedis).eval(anyString(),
+                eq(List.of("dispatcher:event-outbox:lock:task-1")), eq(List.of("owner-1")));
     }
 
 }

@@ -187,6 +187,15 @@ class WebhookUrlGuardTest {
                 () -> guard.check("https://203.0.113.10/hook"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("blank entry");
+
+        when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
+                .allowHttp(true)
+                .blockedCidrRanges(List.of(" "))
+                .build());
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> guard.check("https://203.0.113.10/hook"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("blank entry");
     }
 
     @org.junit.jupiter.params.ParameterizedTest
@@ -210,6 +219,52 @@ class WebhookUrlGuardTest {
                 .hasMessageContaining("invalid CIDR");
     }
 
+    @Test
+    void cidrParserCoversStrictStructuralBoundaries() {
+        assertThat(WebhookUrlGuard.CidrRange.parse(null)).isNull();
+        assertThat(WebhookUrlGuard.CidrRange.parse("")).isNull();
+        assertThat(WebhookUrlGuard.CidrRange.parse("/8")).isNull();
+        assertThat(WebhookUrlGuard.CidrRange.parse("10.0.0.1/")).isNull();
+        assertThat(WebhookUrlGuard.CidrRange.parse("10.0.0.1/8/ignored")).isNull();
+        assertThat(WebhookUrlGuard.CidrRange.parse("fe80::zz/64")).isNull();
+        assertThat(WebhookUrlGuard.CidrRange.parse("10..0.1/8")).isNull();
+        assertThat(WebhookUrlGuard.CidrRange.parse("203.0.113.10")).isNotNull();
+    }
+
+    @Test
+    void cidrContainsCoversExactPartialFamilyAndMappedIpv6Cases() throws Exception {
+        WebhookUrlGuard.CidrRange exact = WebhookUrlGuard.CidrRange.parse("203.0.113.10");
+        assertThat(exact).isNotNull();
+        assertThat(exact.contains(java.net.InetAddress.getByName("203.0.113.10"))).isTrue();
+        assertThat(exact.contains(java.net.InetAddress.getByName("203.0.113.11"))).isFalse();
+
+        WebhookUrlGuard.CidrRange partial = WebhookUrlGuard.CidrRange.parse("203.0.113.0/25");
+        assertThat(partial.contains(java.net.InetAddress.getByName("203.0.113.1"))).isTrue();
+        assertThat(partial.contains(java.net.InetAddress.getByName("203.0.113.129"))).isFalse();
+        assertThat(partial.contains(java.net.InetAddress.getByName("2001:db8::1"))).isFalse();
+
+        byte[] mapped = new byte[16];
+        mapped[10] = (byte) 0xff;
+        mapped[11] = (byte) 0xff;
+        mapped[12] = 10;
+        mapped[15] = 1;
+        java.net.Inet6Address mappedAddress = java.net.Inet6Address.getByAddress(null, mapped, -1);
+        assertThat(WebhookUrlGuard.CidrRange.parse("10.0.0.0/8").contains(mappedAddress)).isTrue();
+
+        byte[] nonMappedPrefix = mapped.clone();
+        nonMappedPrefix[0] = 1;
+        assertThat(WebhookUrlGuard.CidrRange.parse("10.0.0.0/8").contains(
+                java.net.Inet6Address.getByAddress(null, nonMappedPrefix, -1))).isFalse();
+        byte[] missingFirstFf = mapped.clone();
+        missingFirstFf[10] = 0;
+        assertThat(WebhookUrlGuard.CidrRange.parse("10.0.0.0/8").contains(
+                java.net.Inet6Address.getByAddress(null, missingFirstFf, -1))).isFalse();
+        byte[] missingSecondFf = mapped.clone();
+        missingSecondFf[11] = 0;
+        assertThat(WebhookUrlGuard.CidrRange.parse("10.0.0.0/8").contains(
+                java.net.Inet6Address.getByAddress(null, missingSecondFf, -1))).isFalse();
+    }
+
     // --- allowed URL patterns ---
 
     @Test
@@ -222,6 +277,17 @@ class WebhookUrlGuardTest {
         assertThat(guard.check("https://hooks.example.com/receive")).isNull();
         assertThat(guard.check("https://evil.com/receive"))
                 .isEqualTo("URL does not match any allowed pattern");
+    }
+
+    @Test
+    void nullAllowedPatternsSkipPatternGate() {
+        when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
+                .allowHttp(true)
+                .blockedCidrRanges(List.of())
+                .allowedUrlPatterns(null)
+                .build());
+
+        assertThat(guard.check("https://203.0.113.10/hook")).isNull();
     }
 
     @Test

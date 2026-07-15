@@ -1388,4 +1388,102 @@ class DeliveryHandlerTest {
         assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
         verify(transport, never()).deliver(any(), any(), any(), any());
     }
+
+    @Test
+    void blankSigningSecretFailsClosedLikeMissingSecret() {
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn(" ");
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+        verify(transport, never()).deliver(any(), any(), any(), any());
+    }
+
+    @Test
+    void terminalTransportErrorOmitsUnavailableOptionalFailureDetails() {
+        Delivery delivery = pendingDelivery();
+        delivery.setAttempts(5);
+        delivery.setEventType(null);
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(TransportResult.builder()
+                .success(false).statusCode(0).latencyMs(-1).errorMessage(null).build());
+        when(eventRepository.ackDispatcherEvent(anyString())).thenReturn(true);
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getResponseStatus()).isNull();
+        assertThat(delivery.getResponseTimeMs()).isNull();
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.FAILED);
+        assertThat(counter(CyclesMetrics.DISPATCHER_EVENT_PUBLISHED,
+                "event_type", "system.webhook_delivery_failed")).isEqualTo(1.0);
+    }
+
+    @Test
+    void terminalFailureHandlesDeliveryDisappearanceWithoutPublishing() {
+        Delivery delivery = pendingDelivery();
+        delivery.setAttempts(5);
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
+        when(subscriptionRepository.finalizeDeliveryFailure(
+                anyString(), any(), any(), anyInt(), any(), any()))
+                .thenReturn(new TerminalFailureUpdate(false, true, 1, false, WebhookStatus.ACTIVE));
+
+        handler.handle("del-1");
+
+        verify(eventRepository, never()).save(any());
+    }
+
+    @Test
+    void autoDisableWithoutPreviousStatusStillPublishesDurableEvents() {
+        Delivery delivery = pendingDelivery();
+        delivery.setAttempts(5);
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        when(subscriptionRepository.findById("sub-1")).thenReturn(activeSubscription());
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(failureResult());
+        when(subscriptionRepository.finalizeDeliveryFailure(
+                anyString(), any(), any(), anyInt(), any(), any()))
+                .thenReturn(new TerminalFailureUpdate(true, true, 11, true, null));
+
+        handler.handle("del-1");
+
+        verify(eventRepository, times(2)).save(any());
+    }
+
+    @Test
+    void explicitRetryPolicyAndOutOfRangeHttpStatusUseConfiguredBackoff() {
+        Delivery delivery = pendingDelivery();
+        when(deliveryRepository.findById("del-1")).thenReturn(delivery);
+        when(eventRepository.findById("evt-1")).thenReturn(testEvent());
+        Subscription subscription = activeSubscription();
+        subscription.setRetryPolicy(RetryPolicy.builder()
+                .maxRetries(10)
+                .initialDelayMs(123)
+                .backoffMultiplier(1.5)
+                .maxDelayMs(456)
+                .build());
+        when(subscriptionRepository.findById("sub-1")).thenReturn(subscription);
+        when(subscriptionRepository.getSigningSecret("sub-1")).thenReturn("secret");
+        when(transport.deliver(any(), any(), any(), any())).thenReturn(TransportResult.builder()
+                .success(false).statusCode(600).latencyMs(1).errorMessage("HTTP 600").build());
+
+        handler.handle("del-1");
+
+        assertThat(delivery.getStatus()).isEqualTo(DeliveryStatus.RETRYING);
+        assertThat(counter(CyclesMetrics.DELIVERY_FAILED,
+                "tenant", "t-1", "event_type", "tenant.created", "reason", "transport_error"))
+                .isEqualTo(1.0);
+        verify(queueRepository).scheduleRetry(eq("del-1"), anyLong());
+    }
 }

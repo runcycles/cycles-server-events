@@ -249,6 +249,57 @@ class EvidenceWorkerTest {
     }
 
     @Test
+    void rejectsMissingOrOutOfRangeIssuedAtAndNonTextTraceAndEvidenceIds() throws Exception {
+        EvidenceWorker worker = worker(mock(EvidenceQueueConsumer.class), envelope -> { });
+
+        ObjectNode missingIssued = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        missingIssued.remove("issued_at_ms");
+        assertThatThrownBy(() -> worker.build(mapper.writeValueAsString(missingIssued)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("issued_at_ms");
+
+        ObjectNode outOfRangeIssued = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        outOfRangeIssued.put("issued_at_ms", new java.math.BigInteger("9223372036854775808"));
+        assertThatThrownBy(() -> worker.build(mapper.writeValueAsString(outOfRangeIssued)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("issued_at_ms");
+
+        ObjectNode numericTrace = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        numericTrace.put("trace_id", 7);
+        assertThatThrownBy(() -> worker.build(mapper.writeValueAsString(numericTrace)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("trace_id");
+
+        ObjectNode numericEvidenceId = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        numericEvidenceId.put("evidence_id", 7);
+        assertThatThrownBy(() -> worker.build(mapper.writeValueAsString(numericEvidenceId)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("evidence_id");
+
+        ObjectNode malformedEvidenceId = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        malformedEvidenceId.put("evidence_id", "not-a-sha256");
+        assertThatThrownBy(() -> worker.build(mapper.writeValueAsString(malformedEvidenceId)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("evidence_id");
+    }
+
+    @Test
+    void parseablePoisonRecordWithoutIssuedAtRetainsSafeLogContext() throws Exception {
+        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
+        ObjectNode missingIssued = (ObjectNode) mapper.readTree(sourceRecord("reserve", "ALLOW"));
+        missingIssued.remove("issued_at_ms");
+        missingIssued.remove("evidence_id");
+        missingIssued.remove("trace_id");
+        String record = mapper.writeValueAsString(missingIssued);
+        when(consumer.claim(1)).thenReturn(record);
+        when(consumer.deadLetterAndAck(record)).thenReturn(true);
+
+        worker(consumer, envelope -> { }).processNext();
+
+        verify(consumer).deadLetterAndAck(record);
+    }
+
+    @Test
     void poisonRecordMovedByRecoveryIsNotCountedAsDeadLettered() {
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
         String bad = "{ not valid json";
@@ -304,6 +355,7 @@ class EvidenceWorkerTest {
 
     @ParameterizedTest
     @ValueSource(strings = {
+            "null",
             "[]",
             "{}",
             "{\"artifact_type\":1,\"issued_at_ms\":1,\"payload\":{}}",
@@ -329,6 +381,10 @@ class EvidenceWorkerTest {
                 () -> worker(mock(EvidenceQueueConsumer.class), envelope -> { }, "relative/server"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("absolute URI");
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> worker(mock(EvidenceQueueConsumer.class), envelope -> { }, null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("server-id");
     }
 
     @Test
@@ -345,6 +401,16 @@ class EvidenceWorkerTest {
         assertThatThrownBy(() -> new EvidenceWorker(
                 mock(EvidenceQueueConsumer.class), builder, schemaValidator, envelope -> { },
                 mapper, metrics, 1, SERVER_ID, 0, 30_000))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("backoff");
+        assertThatThrownBy(() -> new EvidenceWorker(
+                mock(EvidenceQueueConsumer.class), builder, schemaValidator, envelope -> { },
+                mapper, metrics, 1, SERVER_ID, 60_001, 30_000))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("backoff");
+        assertThatThrownBy(() -> new EvidenceWorker(
+                mock(EvidenceQueueConsumer.class), builder, schemaValidator, envelope -> { },
+                mapper, metrics, 1, SERVER_ID, 1_000, 0))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("backoff");
         assertThatThrownBy(() -> new EvidenceWorker(

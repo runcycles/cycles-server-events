@@ -155,7 +155,7 @@ public class EvidenceWorker {
             deferClaims(queueFailureBackoffMs);
             EvidenceSourceLogContext ctx = sourceContext(record);
             LOG.warn("Evidence envelope stored but ack failed; left in-flight for idempotent recovery: artifact_type={} evidence_id={} stored_evidence_id={} trace_id={} issued_at_ms={} source_parseable={} error={}",
-                    safe(ctx.artifactType()), safe(ctx.evidenceId()), safe(envelope != null ? envelope.evidenceId() : null),
+                    safe(ctx.artifactType()), safe(ctx.evidenceId()), safe(envelope.evidenceId()),
                     safe(ctx.traceId()), ctx.issuedAtMs(), ctx.parseable(), safe(ackEx.getMessage()), ackEx);
             metrics.recordEvidenceRetryDeferred(ctx.artifactType(), "ack_failure");
         }

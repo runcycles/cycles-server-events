@@ -55,6 +55,18 @@ class RedisConfigTest {
     }
 
     @Test
+    void jedisPoolTreatsNullAclCredentialsAsUnconfigured() {
+        RedisConfig config = validConfig();
+        ReflectionTestUtils.setField(config, "username", null);
+        ReflectionTestUtils.setField(config, "password", null);
+
+        JedisPool pool = config.jedisPool();
+
+        assertThat(pool).isNotNull();
+        pool.close();
+    }
+
+    @Test
     void invalidRedisPortFailsAtStartup() {
         RedisConfig config = new RedisConfig();
         ReflectionTestUtils.setField(config, "host", "localhost");

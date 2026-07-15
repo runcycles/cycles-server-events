@@ -125,4 +125,12 @@ class DeliveryRepositoryTest {
                 .hasMessageContaining("Failed to update webhook delivery");
         verify(jedis, never()).eval(anyString(), anyList(), anyList());
     }
+
+    @Test
+    void updateNullDeliveryUsesNullSafeFailureDiagnostics() {
+        assertThatThrownBy(() -> repository.update(null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to update webhook delivery");
+        verify(jedis, never()).eval(anyString(), anyList(), anyList());
+    }
 }

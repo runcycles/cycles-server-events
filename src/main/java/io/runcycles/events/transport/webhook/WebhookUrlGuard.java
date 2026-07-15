@@ -82,7 +82,7 @@ public class WebhookUrlGuard {
             return "Only HTTP(S) URLs are allowed";
         }
         String host = uri.getHost();
-        if (host == null || host.isBlank()) {
+        if (host == null) {
             return "No host in URL";
         }
         List<CidrRange> blockedRanges = parseCidrRanges(config.getBlockedCidrRanges());
@@ -144,7 +144,7 @@ public class WebhookUrlGuard {
         static CidrRange parse(String cidr) {
             try {
                 String[] parts = cidr.split("/", -1);
-                if (parts.length < 1 || parts.length > 2 || parts[0].isBlank()
+                if (parts.length > 2 || parts[0].isBlank()
                         || (parts.length == 2 && parts[1].isBlank())) {
                     return null;
                 }
@@ -154,7 +154,7 @@ public class WebhookUrlGuard {
                     return null;
                 }
                 int prefix = parts.length > 1 ? Integer.parseInt(parts[1]) : maxPrefix;
-                if (prefix < 0 || prefix > maxPrefix) {
+                if (prefix > maxPrefix) {
                     LOG.warn("Invalid webhook CIDR config rejected: config_field=blocked_cidr_ranges cidr={} prefix_length={} max_prefix_length={}",
                         safe(cidr), prefix, maxPrefix);
                     return null;
@@ -186,7 +186,7 @@ public class WebhookUrlGuard {
                     throw new UnknownHostException("not an IPv4 address literal");
                 }
                 int parsed = Integer.parseInt(octets[i]);
-                if (parsed < 0 || parsed > 255) {
+                if (parsed > 255) {
                     throw new UnknownHostException("IPv4 octet out of range");
                 }
                 bytes[i] = (byte) parsed;
@@ -197,7 +197,7 @@ public class WebhookUrlGuard {
         boolean contains(InetAddress address) {
             byte[] addrBytes = address.getAddress();
             // Handle IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) against IPv4 CIDR ranges
-            if (isIpv4 && address instanceof Inet6Address && addrBytes.length == 16) {
+            if (isIpv4 && address instanceof Inet6Address) {
                 if (isIpv4Mapped(addrBytes)) {
                     addrBytes = new byte[] { addrBytes[12], addrBytes[13], addrBytes[14], addrBytes[15] };
                 } else {

@@ -175,11 +175,11 @@ public class EventPayloadValidator {
         // (commit ad77546, "log injection + comments").
         LOG.warn("Event payload validation warning: event_id={} event_type={} tenant_id={} scope={} correlation_id={} request_id={} trace_id={} rule={} detail={}",
                 stripCrLf(eventId), stripCrLf(eventType),
-                event != null ? stripCrLf(event.getTenantId()) : null,
-                event != null ? stripCrLf(event.getScope()) : null,
-                event != null ? stripCrLf(event.getCorrelationId()) : null,
-                event != null ? stripCrLf(event.getRequestId()) : null,
-                event != null ? stripCrLf(event.getTraceId()) : null,
+                stripCrLf(event.getTenantId()),
+                stripCrLf(event.getScope()),
+                stripCrLf(event.getCorrelationId()),
+                stripCrLf(event.getRequestId()),
+                stripCrLf(event.getTraceId()),
                 rule, detail);
         metrics.recordEventsPayloadInvalid(eventType, rule);
     }

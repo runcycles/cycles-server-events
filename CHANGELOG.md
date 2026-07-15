@@ -66,7 +66,11 @@ breaking.
   excerpts.
 - Evidence claim scheduling now backs off on Redis, identity, signing, and store
   failures, preventing tight reconnect/log loops and rapid in-flight growth.
-- CI now makes the real-Redis profile and 95% line / 80% branch gates blocking.
+- CI now makes the real-Redis profile and 95% line / 95% branch gates blocking.
+- Expanded failure-path and boundary tests to raise measured branch coverage
+  above 95%, including Redis CAS outcomes, terminal delivery transactions,
+  evidence source validation, webhook transport failures, CIDR parsing, and
+  retention error handling.
 
 ## [0.1.25.23] — 2026-07-11
 

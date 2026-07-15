@@ -362,10 +362,10 @@ The webhook POST body is the full event JSON. Null fields are omitted.
 ## Build & Test
 
 ```bash
-# Run the fast unit suite (454 tests in the current suite)
+# Run the fast unit suite (505 tests in the current suite)
 mvn test
 
-# Run all 471 tests including integration; enforces 95% line / 80% branch coverage
+# Run all 522 tests including integration; enforces 95% line / 95% branch coverage
 # (requires Docker for Testcontainers Redis)
 mvn verify -Pintegration-tests
 

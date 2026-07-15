@@ -273,7 +273,7 @@ public class DeliveryHandler {
         metrics.recordDeliveryFailure(sub.getTenantId(), delivery.getEventType(), reason, result.getLatencyMs());
 
         if (delivery.getAttempts() > maxRetries) {
-            String requestId = event != null ? event.getRequestId() : null;
+            String requestId = event.getRequestId();
             DeliveryStatus originalStatus = delivery.getStatus();
             Integer originalResponseStatus = delivery.getResponseStatus();
             Integer originalResponseTimeMs = delivery.getResponseTimeMs();
@@ -308,7 +308,7 @@ public class DeliveryHandler {
             }
             if (!update.deliveryFound()) return;
             if (update.disabledNow()) {
-                if (disableTask.event().getData() != null && update.previousStatus() != null) {
+                if (update.previousStatus() != null) {
                     disableTask.event().getData().put("previous_status", update.previousStatus().name());
                 }
                 metrics.recordSubscriptionAutoDisabled(sub.getTenantId(), REASON_CONSECUTIVE_FAILURES);
@@ -451,7 +451,7 @@ public class DeliveryHandler {
         if (delivery.getTraceId() != null) {
             return delivery.getTraceId();
         }
-        return event != null ? event.getTraceId() : null;
+        return event.getTraceId();
     }
 
     private static String failureReason(int statusCode) {

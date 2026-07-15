@@ -93,11 +93,32 @@ class EvidenceQueueConsumerTest {
 
     @Test
     void rejectsUnboundedDlqBlankKeysAndInvalidRecoveryLimit() {
+        assertThatThrownBy(() -> new EvidenceQueueConsumer(pool, null, "processing", "failed", 100))
+                .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new EvidenceQueueConsumer(pool, "", "processing", "failed", 100))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new EvidenceQueueConsumer(pool, "pending", null, "failed", 100))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new EvidenceQueueConsumer(pool, "pending", "", "failed", 100))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new EvidenceQueueConsumer(pool, "pending", "processing", null, 100))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new EvidenceQueueConsumer(pool, "pending", "processing", "", 100))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new EvidenceQueueConsumer(pool, "pending", "processing", "failed", 0))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> consumer().recoverStale(1, 1, 0))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void recoverClampsNegativeIdleAndTreatsUnexpectedLuaResultAsNoMove() {
+        when(jedis.eval(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.eq(List.of(
+                        "evidence:processing", "evidence:processing:claimed_at", "evidence:pending")),
+                org.mockito.ArgumentMatchers.eq(List.of("1", "10000", "10000"))))
+                .thenReturn("unexpected");
+
+        assertThat(consumer().recoverStale(10_000L, -1L, 1)).isZero();
     }
 }

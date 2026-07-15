@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.runcycles.events.config.CryptoService;
+import io.runcycles.events.model.Delivery;
 import io.runcycles.events.model.Subscription;
 import io.runcycles.events.model.DispatcherEventTask;
 import io.runcycles.events.model.Event;
@@ -305,6 +306,8 @@ class SubscriptionRepositoryTest {
 
     @Test
     void rejectsInvalidOperationalUpdateInputs() {
+        assertThatThrownBy(() -> repository.updateDeliveryState(null, 0, null, null, null, null))
+                .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> repository.updateDeliveryState("", 0, null, null, null, null))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> repository.updateDeliveryState("sub-1", -1, null, null, null, null))
@@ -313,12 +316,302 @@ class SubscriptionRepositoryTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> repository.recordDeliveryFailure("sub-1", null, 10, disableTask()))
                 .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.recordDeliveryFailure(null, Instant.now(), 10, disableTask()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.recordDeliveryFailure("", Instant.now(), 10, disableTask()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.recordDeliveryFailure("sub-1", Instant.now(), 10, null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void updateDeliveryStateHandlesCasDisappearance() {
+        String existing = "{\"subscription_id\":\"sub-1\"}";
+        when(jedis.get("webhook:sub-1")).thenReturn(existing);
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(-1L);
+
+        assertThat(repository.updateDeliveryState("sub-1", 0, null, null, null, null)).isFalse();
+    }
+
+    @Test
+    void updateDeliveryStateRejectsNonObjectAndBoundsCasRetries() {
+        when(jedis.get("webhook:bad")).thenReturn("[]");
+        assertThatThrownBy(() -> repository.updateDeliveryState("bad", 0, null, null, null, null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to update webhook subscription delivery state");
+
+        reset(jedis);
+        when(jedis.get("webhook:busy")).thenReturn("{\"subscription_id\":\"busy\"}");
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(0L);
+        assertThatThrownBy(() -> repository.updateDeliveryState("busy", 0, null, null, null, null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to update webhook subscription delivery state")
+                .hasRootCauseMessage("subscription changed too frequently to update delivery state");
+        verify(jedis, times(128)).eval(anyString(), anyList(), anyList());
+    }
+
+    @Test
+    void recordDeliveryFailureFallsBackForMalformedFieldsAndUnknownStatus() {
+        String existing = """
+                {"subscription_id":"sub-1","status":"FUTURE",
+                 "consecutive_failures":"bad","disable_after_failures":"bad"}
+                """.strip();
+        when(jedis.get("webhook:sub-1")).thenReturn(existing);
+        when(jedis.eval(anyString(), eq(List.of("webhook:sub-1")), anyList())).thenReturn(1L);
+
+        SubscriptionRepository.FailureUpdate result = repository.recordDeliveryFailure(
+                "sub-1", Instant.parse("2026-07-15T12:00:00Z"), 10, disableTask());
+
+        assertThat(result.consecutiveFailures()).isEqualTo(1);
+        assertThat(result.disabledNow()).isFalse();
+        assertThat(result.previousStatus()).isNull();
+    }
+
+    @Test
+    void recordDeliveryFailureSupportsPausedStatusAndNullEventData() {
+        String existing = """
+                {"subscription_id":"sub-1","status":"PAUSED",
+                 "consecutive_failures":10,"disable_after_failures":10}
+                """.strip();
+        DispatcherEventTask task = disableTask(null);
+        when(jedis.get("webhook:sub-1")).thenReturn(existing);
+        when(jedis.eval(anyString(), eq(List.of("webhook:sub-1",
+                EventRepository.dispatcherOutboxTaskKey("disable-test"),
+                EventRepository.DISPATCHER_OUTBOX_PENDING_KEY)), anyList())).thenReturn(1L);
+
+        SubscriptionRepository.FailureUpdate result = repository.recordDeliveryFailure(
+                "sub-1", Instant.parse("2026-07-15T12:00:00Z"), 10, task);
+
+        assertThat(result.disabledNow()).isTrue();
+        assertThat(result.previousStatus()).isEqualTo(WebhookStatus.PAUSED);
+    }
+
+    @Test
+    void recordDeliveryFailureHandlesCasDisappearanceAndRetryExhaustion() {
+        String existing = "{\"subscription_id\":\"sub-1\",\"status\":\"ACTIVE\"}";
+        when(jedis.get("webhook:sub-1")).thenReturn(existing);
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(-1L);
+        assertThat(repository.recordDeliveryFailure("sub-1", Instant.now(), 10, disableTask()).found())
+                .isFalse();
+
+        reset(jedis);
+        when(jedis.get("webhook:sub-1")).thenReturn(existing);
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(0L);
+        assertThatThrownBy(() -> repository.recordDeliveryFailure(
+                "sub-1", Instant.now(), 10, disableTask()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to record webhook subscription failure")
+                .hasRootCauseMessage("subscription changed too frequently to record delivery failure");
+        verify(jedis, times(128)).eval(anyString(), anyList(), anyList());
+    }
+
+    @Test
+    void finalizeDeliveryFailureRejectsEveryInvalidInputPosition() {
+        Delivery valid = failedDelivery();
+        Instant now = Instant.now();
+        assertThatThrownBy(() -> repository.finalizeDeliveryFailure(
+                null, valid, now, 10, disableTask(), deliveryFailedTask()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.finalizeDeliveryFailure(
+                "", valid, now, 10, disableTask(), deliveryFailedTask()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.finalizeDeliveryFailure(
+                "sub-1", null, now, 10, disableTask(), deliveryFailedTask()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.finalizeDeliveryFailure(
+                "sub-1", Delivery.builder().build(), now, 10, disableTask(), deliveryFailedTask()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.finalizeDeliveryFailure(
+                "sub-1", Delivery.builder().deliveryId(" ").build(), now, 10,
+                disableTask(), deliveryFailedTask()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.finalizeDeliveryFailure(
+                "sub-1", valid, null, 10, disableTask(), deliveryFailedTask()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.finalizeDeliveryFailure(
+                "sub-1", valid, now, 0, disableTask(), deliveryFailedTask()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.finalizeDeliveryFailure(
+                "sub-1", valid, now, 10, null, deliveryFailedTask()))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> repository.finalizeDeliveryFailure(
+                "sub-1", valid, now, 10, disableTask(), null))
+                .isInstanceOf(IllegalArgumentException.class);
+        verify(jedisPool, never()).getResource();
+    }
+
+    @Test
+    void finalizeDeliveryFailureHandlesMissingDeliveryAndSubscription() {
+        Delivery delivery = failedDelivery();
+        when(jedis.get("delivery:del-1")).thenReturn(null);
+        SubscriptionRepository.TerminalFailureUpdate missingDelivery = repository.finalizeDeliveryFailure(
+                "sub-1", delivery, Instant.now(), 10, disableTask(), deliveryFailedTask());
+        assertThat(missingDelivery.deliveryFound()).isFalse();
+
+        reset(jedis);
+        when(jedis.get("delivery:del-1")).thenReturn("{\"delivery_id\":\"del-1\"}");
+        when(jedis.get("webhook:sub-1")).thenReturn(null);
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(3L);
+        SubscriptionRepository.TerminalFailureUpdate missingSubscription = repository.finalizeDeliveryFailure(
+                "sub-1", delivery, Instant.now(), 10, disableTask(), deliveryFailedTask());
+        assertThat(missingSubscription.deliveryFound()).isTrue();
+        assertThat(missingSubscription.subscriptionFound()).isFalse();
+        assertThat(missingSubscription.consecutiveFailures()).isZero();
+    }
+
+    @Test
+    void finalizeDeliveryFailureAtomicallyDisablesActiveSubscription() {
+        Delivery delivery = failedDelivery();
+        String subscription = """
+                {"subscription_id":"sub-1","status":"ACTIVE",
+                 "consecutive_failures":10,"disable_after_failures":10}
+                """.strip();
+        when(jedis.get("delivery:del-1")).thenReturn("{\"delivery_id\":\"del-1\"}");
+        when(jedis.get("webhook:sub-1")).thenReturn(subscription);
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(2L);
+
+        SubscriptionRepository.TerminalFailureUpdate result = repository.finalizeDeliveryFailure(
+                "sub-1", delivery, Instant.parse("2026-07-15T12:00:00Z"), 10,
+                disableTask(), deliveryFailedTask());
+
+        assertThat(result.deliveryFound()).isTrue();
+        assertThat(result.subscriptionFound()).isTrue();
+        assertThat(result.consecutiveFailures()).isEqualTo(11);
+        assertThat(result.disabledNow()).isTrue();
+        assertThat(result.previousStatus()).isEqualTo(WebhookStatus.ACTIVE);
+    }
+
+    @Test
+    void finalizeDeliveryFailureFallsBackForMalformedSubscriptionFields() {
+        Delivery delivery = failedDelivery();
+        String subscription = """
+                {"subscription_id":"sub-1","status":"DISABLED",
+                 "consecutive_failures":"bad","disable_after_failures":0}
+                """.strip();
+        when(jedis.get("delivery:del-1")).thenReturn("{\"delivery_id\":\"del-1\"}");
+        when(jedis.get("webhook:sub-1")).thenReturn(subscription);
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(1L);
+
+        SubscriptionRepository.TerminalFailureUpdate result = repository.finalizeDeliveryFailure(
+                "sub-1", delivery, Instant.now(), 10, disableTask(), deliveryFailedTask());
+
+        assertThat(result.consecutiveFailures()).isEqualTo(1);
+        assertThat(result.disabledNow()).isFalse();
+        assertThat(result.previousStatus()).isEqualTo(WebhookStatus.DISABLED);
+    }
+
+    @Test
+    void finalizeDeliveryFailureHandlesLuaDisappearanceRetryAndExhaustion() {
+        Delivery delivery = failedDelivery();
+        when(jedis.get("delivery:del-1")).thenReturn("{\"delivery_id\":\"del-1\"}");
+        when(jedis.get("webhook:sub-1")).thenReturn(null);
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(-2L);
+        assertThat(repository.finalizeDeliveryFailure(
+                "sub-1", delivery, Instant.now(), 10, disableTask(), deliveryFailedTask()).deliveryFound())
+                .isFalse();
+
+        reset(jedis);
+        when(jedis.get("delivery:del-1")).thenReturn("{\"delivery_id\":\"del-1\"}");
+        when(jedis.get("webhook:sub-1")).thenReturn(null);
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(0L, 3L);
+        assertThat(repository.finalizeDeliveryFailure(
+                "sub-1", delivery, Instant.now(), 10, disableTask(), deliveryFailedTask()).deliveryFound())
+                .isTrue();
+
+        reset(jedis);
+        when(jedis.get("delivery:del-1")).thenReturn("{\"delivery_id\":\"del-1\"}");
+        when(jedis.get("webhook:sub-1")).thenReturn(null);
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(0L);
+        assertThatThrownBy(() -> repository.finalizeDeliveryFailure(
+                "sub-1", delivery, Instant.now(), 10, disableTask(), deliveryFailedTask()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to finalize webhook delivery failure")
+                .hasRootCauseMessage("delivery or subscription changed too frequently to finalize failure");
+        verify(jedis, times(128)).eval(anyString(), anyList(), anyList());
+    }
+
+    @Test
+    void recordFailureWithMissingStatusReturnsNullPreviousStatus() {
+        String existing = "{\"subscription_id\":\"sub-1\",\"consecutive_failures\":0}";
+        when(jedis.get("webhook:sub-1")).thenReturn(existing);
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(1L);
+
+        SubscriptionRepository.FailureUpdate result = repository.recordDeliveryFailure(
+                "sub-1", Instant.now(), 10, disableTask());
+
+        assertThat(result.previousStatus()).isNull();
+        assertThat(result.disabledNow()).isFalse();
+    }
+
+    @Test
+    void finalizeFailureSaturatesCounterFallsBackFromOversizedThresholdAndAllowsNullDisableData() {
+        Delivery delivery = failedDelivery();
+        String subscription = """
+                {"subscription_id":"sub-1","status":"PAUSED",
+                 "consecutive_failures":2147483647,"disable_after_failures":2147483648}
+                """.strip();
+        when(jedis.get("delivery:del-1")).thenReturn("{\"delivery_id\":\"del-1\"}");
+        when(jedis.get("webhook:sub-1")).thenReturn(subscription);
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(2L);
+
+        SubscriptionRepository.TerminalFailureUpdate result = repository.finalizeDeliveryFailure(
+                "sub-1", delivery, Instant.now(), 10, disableTask(null), deliveryFailedTask());
+
+        assertThat(result.consecutiveFailures()).isEqualTo(Integer.MAX_VALUE);
+        assertThat(result.disabledNow()).isTrue();
+        assertThat(result.previousStatus()).isEqualTo(WebhookStatus.PAUSED);
+    }
+
+    @Test
+    void finalizeFailureRetriesUnexpectedLuaCodesAndShapes() {
+        Delivery delivery = failedDelivery();
+        when(jedis.get("delivery:del-1")).thenReturn("{\"delivery_id\":\"del-1\"}");
+        when(jedis.get("webhook:sub-1")).thenReturn(null);
+        when(jedis.eval(anyString(), anyList(), anyList())).thenReturn(4L, "unexpected", 3L);
+
+        SubscriptionRepository.TerminalFailureUpdate result = repository.finalizeDeliveryFailure(
+                "sub-1", delivery, Instant.now(), 10, disableTask(), deliveryFailedTask());
+
+        assertThat(result.deliveryFound()).isTrue();
+        verify(jedis, times(3)).eval(anyString(), anyList(), anyList());
+    }
+
+    @Test
+    void finalizeFailureRejectsNonObjectSubscriptionState() {
+        Delivery delivery = failedDelivery();
+        when(jedis.get("delivery:del-1")).thenReturn("{\"delivery_id\":\"del-1\"}");
+        when(jedis.get("webhook:sub-1")).thenReturn("[]");
+
+        assertThatThrownBy(() -> repository.finalizeDeliveryFailure(
+                "sub-1", delivery, Instant.now(), 10, disableTask(), deliveryFailedTask()))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to finalize webhook delivery failure");
     }
 
     private static DispatcherEventTask disableTask() {
+        return disableTask(new LinkedHashMap<>());
+    }
+
+    private static DispatcherEventTask disableTask(LinkedHashMap<String, Object> data) {
         return DispatcherEventTask.create("disable-test", Event.builder()
                 .eventType("webhook.disabled")
+                .data(data)
+                .build());
+    }
+
+    private static DispatcherEventTask deliveryFailedTask() {
+        return DispatcherEventTask.create("delivery-failed-test", Event.builder()
+                .eventType("system.webhook_delivery_failed")
                 .data(new LinkedHashMap<>())
                 .build());
+    }
+
+    private static Delivery failedDelivery() {
+        return Delivery.builder()
+                .deliveryId("del-1")
+                .subscriptionId("sub-1")
+                .eventId("evt-1")
+                .eventType("tenant.created")
+                .build();
     }
 }

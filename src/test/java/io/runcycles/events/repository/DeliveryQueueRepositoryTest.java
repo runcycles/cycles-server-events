@@ -59,6 +59,8 @@ class DeliveryQueueRepositoryTest {
 
     @Test
     void orderingLockRejectsInvalidOwnerAndLease() {
+        assertThatThrownBy(() -> repository.tryAcquireOrderingLock(null, 60_000))
+                .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> repository.tryAcquireOrderingLock("", 60_000))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> repository.tryAcquireOrderingLock("owner-1", 0))
@@ -108,6 +110,15 @@ class DeliveryQueueRepositoryTest {
     }
 
     @Test
+    void recoverStaleProcessingClampsNegativeIdleAndHandlesUnexpectedLuaResult() {
+        when(jedis.eval(anyString(),
+                eq(List.of("dispatch:processing", "dispatch:processing:claimed_at", "dispatch:pending")),
+                eq(List.of("1000", "10000", "10000")))).thenReturn("unexpected");
+
+        assertThat(repository.recoverStaleProcessing(10_000L, -1L)).isZero();
+    }
+
+    @Test
     void scheduleRetry() {
         repository.scheduleRetry("del-1", 1700000000000L);
 
@@ -146,5 +157,15 @@ class DeliveryQueueRepositoryTest {
 
         assertThat(result).isEmpty();
         verify(jedis).eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")), anyList());
+    }
+
+    @Test
+    void popRetryReadySkipsRedisForNonPositiveLimitAndRejectsUnexpectedLuaShape() {
+        assertThat(repository.popRetryReady(1L, 0)).isEmpty();
+        verify(jedis, never()).eval(anyString(), anyList(), anyList());
+
+        when(jedis.eval(anyString(), eq(List.of("dispatch:retry", "dispatch:pending")), anyList()))
+                .thenReturn("unexpected");
+        assertThat(repository.popRetryReady(1L, 1)).isEmpty();
     }
 }

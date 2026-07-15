@@ -85,6 +85,31 @@ class LocalEvidenceSigningKeyTest {
                 .hasMessageContaining("64 hex characters");
     }
 
+    @Test
+    void nullConfigurationValuesFollowTheSameMissingAndHalfConfiguredRules() {
+        String priv = freshKeyPair().priv();
+        String did = freshKeyPair().pub();
+        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, null, null, false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("required");
+        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, null, did, false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("half-configured");
+        assertThatThrownBy(() -> new LocalEvidenceSigningKey(signer, priv, null, false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("half-configured");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"/", ":", "@", "G", "`", "g"})
+    void rejectsEveryNonHexCharacterClass(String invalidCharacter) {
+        String malformed = invalidCharacter.repeat(64);
+        assertThatThrownBy(() -> new LocalEvidenceSigningKey(
+                signer, malformed, freshKeyPair().pub(), false))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("64 hex characters");
+    }
+
     private record KeyHex(String priv, String pub) {
     }
 

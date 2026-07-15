@@ -517,10 +517,10 @@ architectural rather than a correctness blocker for this release:
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 471 in the 2026-07-15 clean verification |
+| Total tests | 522 in the 2026-07-15 clean verification |
 | Integration tests | 17 across webhook delivery, evidence signing/store, and Redis atomicity |
-| JaCoCo result | 95.59% line / 80.08% branch |
-| JaCoCo minimum | 95% line / 80% branch (both enforced) |
+| JaCoCo result | 97.69% line / 95.46% branch |
+| JaCoCo minimum | 95% line / 95% branch (both enforced) |
 
 ## Source Inventory
 
@@ -693,8 +693,8 @@ Captured explicitly so a future reviewer doesn't re-litigate the gap analysis:
 - **Date:** 2026-07-15
 - **Version:** 0.1.25.25
 - **Build:** PASS (`mvn -B clean verify -Pintegration-tests`)
-- **Coverage:** 95.59% line / 80.08% branch; 95% / 80% gates enforced
-- **Total:** 471 tests (454 unit + 17 Docker-backed integration), zero failures
+- **Coverage:** 97.69% line / 95.46% branch; 95% / 95% gates enforced
+- **Total:** 522 tests (505 unit + 17 Docker-backed integration), zero failures
 
 ## Cross-Repo Spec Drift Notes (informational)
 

@@ -309,7 +309,7 @@ public class SubscriptionRepository {
     }
 
     private static WebhookStatus parseStatus(String value) {
-        if (value == null || value.isBlank()) return null;
+        if (value.isBlank()) return null;
         try {
             return WebhookStatus.valueOf(value);
         } catch (IllegalArgumentException unknownFutureStatus) {

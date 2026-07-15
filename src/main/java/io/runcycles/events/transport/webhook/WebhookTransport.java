@@ -144,8 +144,8 @@ public class WebhookTransport implements Transport {
         headers.forEach((name, value) -> {
             if (isReservedHeader(name)) {
                 LOG.warn("Webhook custom header ignored because it is reserved: subscription_id={} tenant_id={} header_name={}",
-                        safe(subscription != null ? subscription.getSubscriptionId() : null),
-                        safe(subscription != null ? subscription.getTenantId() : null),
+                        safe(subscription.getSubscriptionId()),
+                        safe(subscription.getTenantId()),
                         safe(name));
                 return;
             }
