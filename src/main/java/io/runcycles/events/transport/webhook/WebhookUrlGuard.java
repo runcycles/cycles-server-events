@@ -59,7 +59,7 @@ public class WebhookUrlGuard {
 
     private static final Logger LOG = LoggerFactory.getLogger(WebhookUrlGuard.class);
     private static final List<CidrRange> BASELINE_BLOCKED_RANGES = List.of(
-            "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12",
+            "0.0.0.0/8", "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12",
             "192.168.0.0/16", "169.254.0.0/16", "fe80::/10", "fc00::/7",
             "100.64.0.0/10")
             .stream()

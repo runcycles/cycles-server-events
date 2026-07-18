@@ -100,8 +100,9 @@ class WebhookUrlGuardTest {
     }
 
     @Test
-    void everyPrivateNetworkBaselineRangeIsBlockedWhenAdminRangesAreEmpty() {
+    void everyBaselineRangeIsBlockedWhenAdminRangesAreEmpty() {
         when(configRepository.get()).thenReturn(permissive());
+        assertThat(guard.check("https://0.0.0.1/hook")).startsWith("Resolves to blocked IP:");
         assertThat(guard.check("https://10.1.2.3/hook")).startsWith("Resolves to blocked IP:");
         assertThat(guard.check("https://100.64.0.1/hook")).startsWith("Resolves to blocked IP:");
         assertThat(guard.check("https://192.168.1.1/hook")).startsWith("Resolves to blocked IP:");
