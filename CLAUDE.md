@@ -25,6 +25,7 @@ mvn-proxy -B package -DskipTests  # Build JAR only
 ```bash
 REDIS_HOST=localhost REDIS_PORT=6379 REDIS_PASSWORD="" \
   WEBHOOK_SECRET_ENCRYPTION_KEY="" \
+  WEBHOOK_SECRET_ALLOW_PLAINTEXT=true \
   java -jar target/cycles-server-events-*.jar
 ```
 
@@ -40,7 +41,10 @@ The `flatten-maven-plugin` resolves `${revision}` at build time.
 
 Both admin and events services must share the same `WEBHOOK_SECRET_ENCRYPTION_KEY`.
 Generate with: `openssl rand -base64 32`
-If empty/unset, signing secrets are stored and read as plaintext (backward compatible).
+Empty/unset key material fails startup by default. Local development may opt out
+explicitly with `WEBHOOK_SECRET_ALLOW_PLAINTEXT=true`; signing secrets are then
+stored unencrypted and startup logs a warning. Existing plaintext records remain
+readable after a key is configured, while new writes use `enc:`.
 
 ## Test Coverage
 

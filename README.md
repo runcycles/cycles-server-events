@@ -34,7 +34,8 @@ Redis ──BLMOVE──► cycles-server-events (DispatchLoop)
                     │
                     ├── DeliveryHandler: load delivery + event + subscription
                     ├── WebhookUrlGuard: delivery-time SSRF re-validation against
-                    │     config:webhook-security (blocked → permanent FAIL, no retry)
+                    │     built-in baseline + config:webhook-security
+                    │     (blocked → permanent FAIL, no retry)
                     ├── SubscriptionRepository: decrypt signing secret (AES-256-GCM)
                     ├── WebhookTransport: HTTP POST with HMAC-SHA256 signature
                     ├── On success: mark SUCCESS, reset consecutive failures
@@ -90,7 +91,19 @@ Services: Redis (6379), Admin (7979), Runtime Server (7878), Events worker (9980
 ### Standalone (requires existing Redis)
 
 ```bash
-REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
+REDIS_HOST=localhost REDIS_PORT=6379 \
+  WEBHOOK_SECRET_ENCRYPTION_KEY="<persistent-base64-encoded-32-byte-key>" \
+  java -jar target/cycles-server-events-*.jar
+```
+
+Generate the key once with `openssl rand -base64 32`, store it in the deployment
+secret manager, and configure the same value in `cycles-server-admin`. For local
+development only, plaintext storage requires an explicit opt-out:
+
+```bash
+REDIS_HOST=localhost REDIS_PORT=6379 WEBHOOK_SECRET_ENCRYPTION_KEY="" \
+  WEBHOOK_SECRET_ALLOW_PLAINTEXT=true \
+  java -jar target/cycles-server-events-*.jar
 ```
 
 ## Configuration
@@ -104,7 +117,9 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `REDIS_TLS_ENABLED` | false | Enable TLS for Redis connections |
 | `REDIS_CONNECT_TIMEOUT_MS` / `REDIS_SOCKET_TIMEOUT_MS` | 2000 / 5000 | Positive Redis connection and non-blocking command timeouts |
 | `REDIS_BLOCKING_SOCKET_TIMEOUT_MS` | 10000 | Finite socket timeout for blocking Redis claims. Must exceed the longest configured BLMOVE timeout. |
-| `WEBHOOK_SECRET_ENCRYPTION_KEY` | (empty) | AES-256-GCM key for signing secret encryption (base64-encoded 32 bytes). If empty, secrets stored/read as plaintext (backward compatible). |
+| `WEBHOOK_SECRET_ENCRYPTION_KEY` | (none; startup fails) | AES-256-GCM key for signing secret encryption (base64-encoded 32 bytes). Existing plaintext values remain readable after a key is added; new writes use `enc:`. |
+| `WEBHOOK_SECRET_ALLOW_PLAINTEXT` | false | Local/development compatibility escape hatch. When true and the key is empty, secrets are stored unencrypted and startup emits a prominent warning. Never enable in production. |
+| `WEBHOOK_URL_GUARD_ALLOW_PRIVATE_NETWORKS` | false | Local/development escape hatch that disables the built-in private-network SSRF baseline. Unspecified addresses and admin-configured CIDRs remain blocked. Never enable in production. |
 | `dispatch.pending.timeout-seconds` | 5 | BLMOVE blocking timeout (seconds) |
 | `DISPATCH_LOOP_DELAY_MS` | 25 | Delay between dispatch-loop invocations after a claim completes or times out. |
 | `DISPATCH_PROCESSING_RECOVERY_IDLE_MS` | 180000 | Minimum age before an in-flight `dispatch:processing` delivery is considered stale and requeued. Startup requires it to exceed both `DISPATCH_ORDERING_LEASE_MS` and the pending-plus-HTTP timeout duration. |
@@ -140,18 +155,19 @@ REDIS_HOST=localhost REDIS_PORT=6379 java -jar target/cycles-server-events-*.jar
 | `EVIDENCE_INFRASTRUCTURE_BACKOFF_MS` | 30000 | Claim pause after identity, signing, or store failures; limits in-flight growth during systemic outages. |
 | `EVIDENCE_STORE_BACKEND` / `EVIDENCE_STORE_KEY_PREFIX` / `EVIDENCE_STORE_TTL_SECONDS` | redis / evidence:envelope: / 0 | Content-addressed evidence storage backend, Redis key prefix, and archival TTL (`0` means no expiry). |
 
-The delivery-time URL guard reads `config:webhook-security`. If that key is
-absent, its hardened fallback blocks private, loopback, link-local,
-carrier-grade NAT, unspecified IPv4 and IPv6, and unique-local IPv6 ranges,
-including `0.0.0.0/8`, `::/128`, `100.64.0.0/10`, and `fe80::/10`. The
-unspecified address is also rejected semantically even if a stored blocklist
-omits it. A malformed configured CIDR is
-treated as indeterminate rather than silently skipped: the delivery remains
-in-flight for recovery and `cycles_webhook_security_config_indeterminate_total`
-increments. Host resolution is checked immediately before delivery, but the JDK
-HTTP client performs its own connection-time DNS lookup; deployments requiring
-DNS-rebinding resistance must enforce the same egress policy in a proxy or
-network firewall.
+The delivery-time URL guard always blocks loopback, RFC 1918, IPv4 and IPv6
+link-local, carrier-grade NAT, and IPv6 unique-local ranges, including the cloud
+metadata address `169.254.169.254`. Every admin-authored range in
+`config:webhook-security` is additive; an empty stored list does not replace the
+built-in baseline. Unspecified addresses are rejected semantically. The
+development-only `WEBHOOK_URL_GUARD_ALLOW_PRIVATE_NETWORKS=true` escape hatch
+disables only the baseline, logs a warning, and does not override admin ranges
+or the unspecified-address check. A malformed configured CIDR is treated as
+indeterminate rather than silently skipped: the delivery remains in-flight for
+recovery and `cycles_webhook_security_config_indeterminate_total` increments.
+Host resolution is checked immediately before delivery, but the JDK HTTP client
+performs its own connection-time DNS lookup; deployments requiring DNS-rebinding
+resistance must enforce the same egress policy in a proxy or network firewall.
 
 The Redis client sets the connection name `cycles-server-events`; a
 least-privilege Redis ACL therefore needs `+client|setname` in addition to the
@@ -163,7 +179,10 @@ commands and key patterns used by this worker.
 openssl rand -base64 32
 ```
 
-The same key must be configured in both `cycles-server-admin` and `cycles-server-events`. Admin encrypts secrets on write; events decrypts on read.
+The same key must be configured in both `cycles-server-admin` and
+`cycles-server-events`. Admin encrypts secrets on write; events decrypts on
+read. Missing key material now fails events-service startup unless
+`WEBHOOK_SECRET_ALLOW_PLAINTEXT=true` is explicitly set.
 
 ## Signing Secret Lifecycle
 

@@ -46,7 +46,7 @@ class SubscriptionRepositoryTest {
         objectMapper.registerModule(new JavaTimeModule());
         objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         lenient().when(jedisPool.getResource()).thenReturn(jedis);
-        CryptoService cryptoService = new CryptoService(""); // pass-through mode
+        CryptoService cryptoService = new CryptoService("", true); // explicit pass-through mode
         repository = new SubscriptionRepository(jedisPool, objectMapper, cryptoService);
     }
 
@@ -108,11 +108,13 @@ class SubscriptionRepositoryTest {
     @Test
     void getSigningSecret_decryptsEncryptedValue() {
         // Simulate an encrypted secret stored by admin service
-        CryptoService encryptor = new CryptoService(java.util.Base64.getEncoder().encodeToString(new byte[32]));
+        CryptoService encryptor = new CryptoService(
+                java.util.Base64.getEncoder().encodeToString(new byte[32]), false);
         String encrypted = encryptor.encrypt("my-secret");
         when(jedis.get("webhook:secret:sub-enc")).thenReturn(encrypted);
         // Create repo with same key for decryption
-        CryptoService decryptor = new CryptoService(java.util.Base64.getEncoder().encodeToString(new byte[32]));
+        CryptoService decryptor = new CryptoService(
+                java.util.Base64.getEncoder().encodeToString(new byte[32]), false);
         SubscriptionRepository encRepo = new SubscriptionRepository(jedisPool, objectMapper, decryptor);
 
         String result = encRepo.getSigningSecret("sub-enc");

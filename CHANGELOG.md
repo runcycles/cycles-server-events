@@ -20,6 +20,25 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
+## [Unreleased]
+
+### Security
+
+- Webhook delivery now enforces an always-on SSRF baseline for loopback,
+  RFC 1918, link-local, cloud metadata, CGNAT, and IPv6 unique-local addresses.
+  Admin-configured CIDRs are additive instead of replacing that baseline.
+- Missing `WEBHOOK_SECRET_ENCRYPTION_KEY` now fails startup. Plaintext secret
+  storage requires the explicit development-only
+  `WEBHOOK_SECRET_ALLOW_PLAINTEXT=true` opt-out and emits a prominent warning.
+
+### Changed
+
+- Added `WEBHOOK_URL_GUARD_ALLOW_PRIVATE_NETWORKS=true` as the only explicit
+  local/development escape hatch for the built-in SSRF baseline. Admin CIDRs and
+  unspecified-address rejection remain enforced.
+- Existing plaintext webhook secrets remain readable after encryption is
+  enabled, while subsequent writes retain the compatible `enc:` format.
+
 ## [0.1.25.24] — 2026-07-15
 
 ### Fixed

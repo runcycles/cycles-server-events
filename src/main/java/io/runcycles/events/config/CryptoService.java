@@ -14,10 +14,13 @@ import java.security.SecureRandom;
 import java.util.Base64;
 
 /**
- * AES-256-GCM decryption for webhook signing secrets at rest.
- * If no encryption key is configured, plaintext values operate in pass-through
- * mode. Encrypted values fail closed because delivering an unsigned webhook
- * when a stored signing secret cannot be decrypted breaks authenticity.
+ * AES-256-GCM encryption and decryption for webhook signing secrets at rest.
+ * Missing key material fails startup unless an explicit development/backward-
+ * compatibility opt-out enables plaintext pass-through. Existing plaintext
+ * values remain readable after a key is configured, while all subsequent writes
+ * use the {@code enc:} format. Encrypted values fail closed because delivering
+ * an unsigned webhook when a stored signing secret cannot be decrypted breaks
+ * authenticity.
  */
 @Component
 public class CryptoService {
@@ -31,10 +34,18 @@ public class CryptoService {
 
     private final SecretKeySpec key;
 
-    public CryptoService(@Value("${webhook.secret.encryption-key:}") String base64Key) {
+    public CryptoService(
+            @Value("${webhook.secret.encryption-key:}") String base64Key,
+            @Value("${webhook.secret.allow-plaintext:false}") boolean allowPlaintext) {
         if (base64Key == null || base64Key.isBlank()) {
+            if (!allowPlaintext) {
+                throw new IllegalStateException(
+                        "WEBHOOK_SECRET_ENCRYPTION_KEY must be configured; "
+                        + "set WEBHOOK_SECRET_ALLOW_PLAINTEXT=true only for local/development compatibility");
+            }
             this.key = null;
-            LOG.info("Webhook secret encryption disabled (no key configured)");
+            LOG.warn("SECURITY WARNING: webhook signing secrets stored UNENCRYPTED "
+                    + "because webhook.secret.allow-plaintext=true");
         } else {
             byte[] keyBytes = Base64.getDecoder().decode(base64Key);
             if (keyBytes.length != 32) {

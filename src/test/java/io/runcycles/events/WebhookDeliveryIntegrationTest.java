@@ -77,6 +77,7 @@ class WebhookDeliveryIntegrationTest {
         registry.add("redis.port", () -> redis.getMappedPort(6379));
         registry.add("redis.password", () -> "");
         registry.add("webhook.secret.encryption-key", () -> "");
+        registry.add("webhook.secret.allow-plaintext", () -> "true");
         registry.add("dispatch.pending.timeout-seconds", () -> "1");
         registry.add("dispatch.retry.poll-interval-ms", () -> "1000");
         registry.add("dispatch.max-delivery-age-ms", () -> "86400000");

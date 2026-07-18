@@ -1,5 +1,9 @@
 package io.runcycles.events.transport.webhook;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import io.runcycles.events.model.WebhookSecurityConfig;
 import io.runcycles.events.repository.WebhookSecurityConfigRepository;
 import org.junit.jupiter.api.BeforeEach;
@@ -7,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
@@ -23,7 +28,7 @@ class WebhookUrlGuardTest {
 
     @BeforeEach
     void setUp() {
-        guard = new WebhookUrlGuard(configRepository);
+        guard = new WebhookUrlGuard(configRepository, false);
         // Restrictive defaults (private ranges blocked, HTTPS required) unless
         // a test overrides — mirrors the absent-config-key posture.
         lenient().when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder().build());
@@ -82,7 +87,8 @@ class WebhookUrlGuardTest {
     // --- blocked CIDR ranges (default set) ---
 
     @Test
-    void loopbackIpv4_blockedByDefaults() {
+    void loopbackIpv4_blockedByBaselineWhenAdminRangesAreEmpty() {
+        when(configRepository.get()).thenReturn(permissive());
         String v = guard.check("https://127.0.0.1/hook");
         assertThat(v).startsWith("Resolves to blocked IP:");
     }
@@ -94,20 +100,22 @@ class WebhookUrlGuardTest {
     }
 
     @Test
-    void privateRanges_blockedByDefaults() {
-        assertThat(guard.check("https://0.0.0.1/hook")).startsWith("Resolves to blocked IP:");
+    void everyPrivateNetworkBaselineRangeIsBlockedWhenAdminRangesAreEmpty() {
+        when(configRepository.get()).thenReturn(permissive());
         assertThat(guard.check("https://10.1.2.3/hook")).startsWith("Resolves to blocked IP:");
         assertThat(guard.check("https://100.64.0.1/hook")).startsWith("Resolves to blocked IP:");
         assertThat(guard.check("https://192.168.1.1/hook")).startsWith("Resolves to blocked IP:");
         assertThat(guard.check("https://172.16.0.9/hook")).startsWith("Resolves to blocked IP:");
         assertThat(guard.check("https://169.254.169.254/latest/meta-data")).startsWith("Resolves to blocked IP:");
+        assertThat(guard.check("https://[fe80::1]/hook")).startsWith("Resolves to blocked IP:");
+        assertThat(guard.check("https://[fd00::1]/hook")).startsWith("Resolves to blocked IP:");
     }
 
     @Test
-    void ipv6Loopback_blockedByDefaults() {
+    void ipv6LoopbackAndUnspecifiedBlockedByBaseline() {
+        when(configRepository.get()).thenReturn(permissive());
         assertThat(guard.check("https://[::]/hook")).startsWith("Resolves to unspecified IP:");
         assertThat(guard.check("https://[::1]/hook")).startsWith("Resolves to blocked IP:");
-        assertThat(guard.check("https://[fe80::1]/hook")).startsWith("Resolves to blocked IP:");
     }
 
     @Test
@@ -118,37 +126,93 @@ class WebhookUrlGuardTest {
 
     @Test
     void decimalEncodedIpv4LoopbackIsBlocked() {
+        when(configRepository.get()).thenReturn(permissive());
         assertThat(guard.check("https://2130706433/hook")).startsWith("Resolves to blocked IP:");
     }
 
     @Test
     void ipv4MappedIpv6_blockedAgainstIpv4Range() {
+        when(configRepository.get()).thenReturn(permissive());
         assertThat(guard.check("https://[::ffff:10.0.0.1]/hook")).startsWith("Resolves to blocked IP:");
     }
 
     @Test
     void publicIp_passesDefaults() {
+        when(configRepository.get()).thenReturn(permissive());
         // TEST-NET-3 (RFC 5737) — a literal public-range IP, no DNS involved.
         assertThat(guard.check("https://203.0.113.10/hook")).isNull();
     }
 
     @Test
-    void emptyBlockedRanges_skipsResolution() {
+    void emptyAdminRanges_doNotDisableBaseline() {
         when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
                 .allowHttp(true).blockedCidrRanges(List.of()).build());
-        // Would be unresolvable + loopback under defaults; both checks skipped.
-        assertThat(guard.check("https://127.0.0.1/hook")).isNull();
+        assertThat(guard.check("https://127.0.0.1/hook")).startsWith("Resolves to blocked IP:");
     }
 
     @Test
-    void nullBlockedRangesSkipResolution() {
+    void nullAdminRanges_doNotDisableBaseline() {
         when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
                 .allowHttp(true).blockedCidrRanges(null).build());
-        assertThat(guard.check("https://127.0.0.1/hook")).isNull();
+        assertThat(guard.check("https://127.0.0.1/hook")).startsWith("Resolves to blocked IP:");
+    }
+
+    @Test
+    void configuredAdminRangesAreAdditiveToBaseline() {
+        when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
+                .allowHttp(true)
+                .blockedCidrRanges(List.of("203.0.113.0/24"))
+                .build());
+
+        assertThat(guard.check("https://203.0.113.10/hook")).startsWith("Resolves to blocked IP:");
+        assertThat(guard.check("https://127.0.0.1/hook")).startsWith("Resolves to blocked IP:");
+    }
+
+    @Test
+    void allowPrivateNetworksDisablesOnlyBaselineKeepsUnspecifiedCheckAndWarns() {
+        Logger logger = (Logger) LoggerFactory.getLogger(WebhookUrlGuard.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            guard = new WebhookUrlGuard(configRepository, true);
+            when(configRepository.get()).thenReturn(permissive());
+
+            assertThat(guard.check("https://127.0.0.1/hook")).isNull();
+            assertThat(guard.check("https://169.254.169.254/latest/meta-data")).isNull();
+            assertThat(guard.check("https://[::1]/hook")).isNull();
+            assertThat(guard.check("https://[::]/hook")).startsWith("Resolves to unspecified IP:");
+            assertThat(appender.list).anySatisfy(event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                assertThat(event.getFormattedMessage()).contains("baseline private-network denylist is DISABLED");
+            });
+        } finally {
+            logger.detachAppender(appender);
+        }
+    }
+
+    @Test
+    void allowPrivateNetworksDoesNotOverrideAdminRanges() {
+        guard = new WebhookUrlGuard(configRepository, true);
+        when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
+                .allowHttp(true)
+                .blockedCidrRanges(List.of("127.0.0.0/8"))
+                .build());
+
+        assertThat(guard.check("https://127.0.0.1/hook")).startsWith("Resolves to blocked IP:");
+    }
+
+    @Test
+    void allowPrivateNetworksWithNoAdminRangesPreservesUnresolvableHostBehavior() {
+        guard = new WebhookUrlGuard(configRepository, true);
+        when(configRepository.get()).thenReturn(permissive());
+
+        assertThat(guard.check("https://definitely-not-a-real-host.invalid/hook")).isNull();
     }
 
     @Test
     void unresolvableHost_blockedWhenRangesConfigured() {
+        when(configRepository.get()).thenReturn(permissive());
         String v = guard.check("https://definitely-not-a-real-host.invalid/hook");
         assertThat(v).startsWith("Cannot resolve hostname:");
     }
@@ -216,6 +280,7 @@ class WebhookUrlGuardTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {
             "10.0.0.0/not-a-prefix",
+            "10.0.0.0/33",
             "10.0.0.0/999999999999999999999",
             "10.0.0/8",
             "10.0.x.1/8",
@@ -287,10 +352,10 @@ class WebhookUrlGuardTest {
         when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
                 .allowHttp(true)
                 .blockedCidrRanges(List.of())
-                .allowedUrlPatterns(List.of("https://*.example.com/*"))
+                .allowedUrlPatterns(List.of("https://203.0.113.*/*"))
                 .build());
-        assertThat(guard.check("https://hooks.example.com/receive")).isNull();
-        assertThat(guard.check("https://evil.com/receive"))
+        assertThat(guard.check("https://203.0.113.10/receive")).isNull();
+        assertThat(guard.check("https://198.51.100.10/receive"))
                 .isEqualTo("URL does not match any allowed pattern");
     }
 
@@ -300,6 +365,17 @@ class WebhookUrlGuardTest {
                 .allowHttp(true)
                 .blockedCidrRanges(List.of())
                 .allowedUrlPatterns(null)
+                .build());
+
+        assertThat(guard.check("https://203.0.113.10/hook")).isNull();
+    }
+
+    @Test
+    void emptyAllowedPatternsSkipPatternGate() {
+        when(configRepository.get()).thenReturn(WebhookSecurityConfig.builder()
+                .allowHttp(true)
+                .blockedCidrRanges(List.of())
+                .allowedUrlPatterns(List.of())
                 .build());
 
         assertThat(guard.check("https://203.0.113.10/hook")).isNull();

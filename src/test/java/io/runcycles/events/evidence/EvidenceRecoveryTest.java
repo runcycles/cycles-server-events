@@ -34,6 +34,18 @@ class EvidenceRecoveryTest {
     }
 
     @Test
+    void periodicRecoveryHandlesNoStaleWork() {
+        EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
+        when(consumer.recoverStale(org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.eq(120_000L), org.mockito.ArgumentMatchers.eq(100))).thenReturn(0L);
+
+        new EvidenceRecovery(consumer, 120_000L, 100).recoverPeriodically();
+
+        verify(consumer).recoverStale(org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.eq(120_000L), org.mockito.ArgumentMatchers.eq(100));
+    }
+
+    @Test
     void rejectsInvalidRecoveryConfiguration() {
         EvidenceQueueConsumer consumer = mock(EvidenceQueueConsumer.class);
 

@@ -45,6 +45,15 @@ class DispatchRecoveryTest {
     }
 
     @Test
+    void periodicRecoveryHandlesNoStaleWork() {
+        when(queueRepository.recoverStaleProcessing(anyLong(), eq(180_000L))).thenReturn(0L);
+
+        recovery.recoverPeriodically();
+
+        verify(queueRepository).recoverStaleProcessing(anyLong(), eq(180_000L));
+    }
+
+    @Test
     void rejectsInvalidRecoveryTiming() {
         assertThatThrownBy(() -> new DispatchRecovery(queueRepository, 0, 120_000L, 5, 30))
                 .isInstanceOf(IllegalArgumentException.class);

@@ -491,13 +491,12 @@ attempts have stopped.
 1. Read `GET config:webhook-security` and validate every
    `blocked_cidr_ranges` value as a literal IPv4/IPv6 CIDR. Blank values,
    hostnames, zone identifiers, and malformed prefixes are rejected.
-2. Correct the config through the admin plane. Do not delete the key merely to
-   bypass validation unless accepting the documented hardened fallback is an
-   explicit incident decision.
-   The events-side absent-key fallback intentionally blocks `0.0.0.0/8`,
-   `100.64.0.0/10`, `fe80::/10`, and `::/128` in addition to the current admin
-   fallback. Until the admin service aligns those defaults, a URL accepted by
-   admin without a stored config can still fail closed here at delivery.
+2. Correct the config through the admin plane. Admin ranges are additive to the
+   events worker's always-on loopback, RFC 1918, link-local, CGNAT, and IPv6
+   unique-local baseline; deleting the key or storing an empty list cannot
+   remove that baseline. `WEBHOOK_URL_GUARD_ALLOW_PRIVATE_NETWORKS=true` is a
+   local/development-only escape hatch, emits a prominent warning, and still
+   honors configured ranges plus the unspecified-address check.
 3. No delivery replay is normally needed: affected records remain in
    `dispatch:processing` and return to pending after the recovery idle window.
 
@@ -598,7 +597,9 @@ don't fit.
 | `REDIS_HOST`, `REDIS_PORT`, `REDIS_USERNAME`, `REDIS_PASSWORD` | `localhost`, `6379`, (empty), (empty) | Always set for production; use a least-privilege ACL identity. Jedis sets client name `cycles-server-events`, so the ACL must include `+client|setname`. |
 | `REDIS_TLS_ENABLED` | `false` | Enable for off-host production Redis. JVM trust configuration must trust the Redis certificate. |
 | `REDIS_CONNECT_TIMEOUT_MS` / `REDIS_SOCKET_TIMEOUT_MS` / `REDIS_BLOCKING_SOCKET_TIMEOUT_MS` | `2000` / `5000` / `10000` | Connection, ordinary-command, and blocking-command socket bounds. The blocking timeout must exceed every BLMOVE command timeout so an unavailable peer cannot pin a scheduler thread forever. |
-| `WEBHOOK_SECRET_ENCRYPTION_KEY` | (empty) | Set to a base64-encoded 32-byte key to enable AES-256-GCM for webhook signing secrets at rest. Must match the key configured in `cycles-server-admin`. If empty, secrets are stored/read as plaintext (backward-compatible, not recommended for production). |
+| `WEBHOOK_SECRET_ENCRYPTION_KEY` | (none; startup fails) | Base64-encoded 32-byte AES-256-GCM key for webhook signing secrets at rest. Must match `cycles-server-admin`. Existing non-`enc:` values remain readable for migration; new writes are encrypted. |
+| `WEBHOOK_SECRET_ALLOW_PLAINTEXT` | `false` | Local/development compatibility escape hatch. When true with an empty key, startup warns prominently and signing secrets remain unencrypted in Redis. Never enable in production. |
+| `WEBHOOK_URL_GUARD_ALLOW_PRIVATE_NETWORKS` | `false` | Local/development escape hatch that disables the always-on private-network SSRF baseline. Admin-configured CIDRs remain additive and unspecified addresses remain blocked. Never enable in production. |
 | `dispatch.http.timeout-seconds` | `30` | Lower if one slow subscriber is blocking the queue and you can tolerate more retries. Raise if you have legitimately slow subscribers that need more time. |
 | `dispatch.http.connect-timeout-seconds` | `5` | Rarely needs tuning. Lower if your egress is fast and you want to fail faster on unreachable DNS. |
 | `DISPATCH_LOOP_DELAY_MS` | `25` | Pause after each dispatch invocation. This is not the empty-queue wait; BLMOVE can block for `dispatch.pending.timeout-seconds`. |
