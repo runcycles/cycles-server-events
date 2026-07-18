@@ -6,6 +6,7 @@ import io.runcycles.events.model.WebhookSecurityConfig;
 import io.runcycles.events.repository.WebhookSecurityConfigRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.net.Inet4Address;
@@ -25,10 +26,7 @@ import java.util.regex.Pattern;
  *
  * <ul>
  *   <li>DNS rebinding / target drift: the hostname's resolution can change
- *       between subscription creation and delivery (re-resolving here
- *       narrows the window to a single request; full resolve-and-pin is
- *       not expressible with java.net.http and is documented as residual
- *       risk in AUDIT.md).</li>
+ *       between subscription creation and delivery.</li>
  *   <li>Config tightened after creation: blocking a CIDR or revoking
  *       {@code allow_http} now applies to EXISTING subscriptions at their
  *       next delivery, not just to new ones.</li>
@@ -40,6 +38,13 @@ import java.util.regex.Pattern;
  * (same config key, CIDR matching incl. IPv4-mapped IPv6, and glob dialect).
  * This delivery-side parser is deliberately stricter for malformed CIDRs:
  * an indeterminate blocklist is rejected rather than partially ignored.
+ *
+ * <p><strong>Known DNS-rebinding TOCTOU:</strong> this guard resolves the host
+ * to validate every returned address, then {@code HttpClient} resolves the host
+ * again while connecting. Re-validating immediately before delivery narrows but
+ * does not eliminate that gap. A complete fix requires a transport or egress
+ * proxy that pins the connection to a validated address; that is out of scope
+ * for this guard and remains documented in AUDIT.md.
  *
  * <p>Returns a violation reason string, or {@code null} when the URL is
  * allowed. Unresolvable hosts are treated as violations when CIDR ranges
@@ -53,11 +58,26 @@ import java.util.regex.Pattern;
 public class WebhookUrlGuard {
 
     private static final Logger LOG = LoggerFactory.getLogger(WebhookUrlGuard.class);
+    private static final List<CidrRange> BASELINE_BLOCKED_RANGES = List.of(
+            "127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12",
+            "192.168.0.0/16", "169.254.0.0/16", "fe80::/10", "fc00::/7",
+            "100.64.0.0/10")
+            .stream()
+            .map(CidrRange::parse)
+            .toList();
 
     private final WebhookSecurityConfigRepository configRepository;
+    private final boolean allowPrivateNetworks;
 
-    public WebhookUrlGuard(WebhookSecurityConfigRepository configRepository) {
+    public WebhookUrlGuard(
+            WebhookSecurityConfigRepository configRepository,
+            @Value("${webhook.url-guard.allow-private-networks:false}") boolean allowPrivateNetworks) {
         this.configRepository = configRepository;
+        this.allowPrivateNetworks = allowPrivateNetworks;
+        if (allowPrivateNetworks) {
+            LOG.warn("SECURITY WARNING: webhook URL guard baseline private-network denylist is DISABLED; "
+                    + "webhook.url-guard.allow-private-networks=true is for local/development use only");
+        }
     }
 
     /** @return violation reason, or {@code null} when the URL passes the current config. */
@@ -85,7 +105,13 @@ public class WebhookUrlGuard {
         if (host == null) {
             return "No host in URL";
         }
-        List<CidrRange> blockedRanges = parseCidrRanges(config.getBlockedCidrRanges());
+        List<CidrRange> blockedRanges = new ArrayList<>();
+        if (!allowPrivateNetworks) {
+            blockedRanges.addAll(BASELINE_BLOCKED_RANGES);
+        }
+        // Admin-authored CIDRs are always additive to the built-in baseline.
+        // The local/dev escape hatch disables only the baseline, not admin policy.
+        blockedRanges.addAll(parseCidrRanges(config.getBlockedCidrRanges()));
         try {
             InetAddress[] addresses = InetAddress.getAllByName(host);
             for (InetAddress addr : addresses) {

@@ -50,6 +50,7 @@ class EvidenceWorkerIntegrationTest {
     static void props(DynamicPropertyRegistry r) {
         r.add("redis.host", redis::getHost);
         r.add("redis.port", () -> redis.getMappedPort(6379));
+        r.add("webhook.secret.allow-plaintext", () -> "true");
         r.add("cycles.evidence.signing.private-key-hex", KEY::priv);
         r.add("cycles.evidence.signing.signer-did", KEY::pub);
         r.add("cycles.evidence.server-id", () -> SERVER_ID);

@@ -62,7 +62,7 @@ class RedisAtomicityIntegrationTest {
 
     @Test
     void concurrentFailuresAreNeverLostAndDisableExactlyOnce() throws Exception {
-        SubscriptionRepository repository = new SubscriptionRepository(pool, mapper, new CryptoService(""));
+        SubscriptionRepository repository = new SubscriptionRepository(pool, mapper, new CryptoService("", true));
         int calls = 50;
         try (Jedis jedis = pool.getResource()) {
             jedis.set("webhook:concurrent", """
@@ -173,7 +173,7 @@ class RedisAtomicityIntegrationTest {
 
     @Test
     void terminalFailureAtomicallyStagesBothRequiredEventsAndDisablesPausedSubscription() throws Exception {
-        SubscriptionRepository repository = new SubscriptionRepository(pool, mapper, new CryptoService(""));
+        SubscriptionRepository repository = new SubscriptionRepository(pool, mapper, new CryptoService("", true));
         Delivery failed = Delivery.builder()
                 .deliveryId("terminal-atomic")
                 .subscriptionId("paused-sub")
@@ -436,7 +436,7 @@ class RedisAtomicityIntegrationTest {
 
     @Test
     void sameDeliveryTerminalTransitionAppliesExactlyOnceUnderContention() throws Exception {
-        SubscriptionRepository repository = new SubscriptionRepository(pool, mapper, new CryptoService(""));
+        SubscriptionRepository repository = new SubscriptionRepository(pool, mapper, new CryptoService("", true));
         String deliveryId = "same-terminal";
         ClaimedDelivery claim = new ClaimedDelivery(deliveryId, "same-owner");
         try (Jedis jedis = pool.getResource()) {
@@ -490,7 +490,7 @@ class RedisAtomicityIntegrationTest {
 
     @Test
     void staleDeliveryOwnerCannotOverwriteSuccessorOrScheduleRetry() throws Exception {
-        SubscriptionRepository subscriptions = new SubscriptionRepository(pool, mapper, new CryptoService(""));
+        SubscriptionRepository subscriptions = new SubscriptionRepository(pool, mapper, new CryptoService("", true));
         DeliveryRepository deliveries = new DeliveryRepository(pool, mapper);
         String deliveryId = "successor-fence";
         ClaimedDelivery stale = new ClaimedDelivery(deliveryId, "old-owner");

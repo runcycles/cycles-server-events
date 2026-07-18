@@ -2,6 +2,35 @@
 
 ## Implementation History
 
+### 2026-07-18 — Unreleased: fail-closed webhook security defaults
+
+SECURITY. Direct code review confirmed two deployment defaults could be weakened
+implicitly. `WebhookUrlGuard` now enforces an always-on delivery baseline for
+loopback, RFC 1918, IPv4/IPv6 link-local, the `169.254.169.254` metadata target,
+CGNAT, and IPv6 unique-local addresses. Stored `blocked_cidr_ranges` are
+additive, every resolved address is checked, and only the explicit
+`WEBHOOK_URL_GUARD_ALLOW_PRIVATE_NETWORKS=true` local/development flag disables
+the baseline. The semantic unspecified-address rejection remains unconditional.
+The guard javadoc records the residual DNS-rebinding TOCTOU between its lookup
+and `HttpClient`'s connection-time lookup; address pinning remains out of scope.
+
+`CryptoService` now rejects missing `WEBHOOK_SECRET_ENCRYPTION_KEY` at startup
+unless `WEBHOOK_SECRET_ALLOW_PLAINTEXT=true` explicitly opts into unencrypted
+storage and a prominent WARN. The compatible `enc:` format is unchanged.
+Non-`enc:` values remain readable after a key is installed so deployments can
+migrate by reading legacy plaintext and encrypting all subsequent writes.
+
+The authoritative `WebhookSecurityConfig` schema continues to define the shared
+admin configuration wire shape. The baseline and both escape hatches are local
+delivery/deployment policy and add no Redis or HTTP wire fields, so the change is
+compatible with `cycles-governance-admin-v0.1.25.yaml`. Required cross-repo
+follow-up: `cycles-server-admin` contains a duplicated `CryptoService` and must
+adopt the same missing-key failure, explicit plaintext opt-out, warning, and
+migration behavior so both services remain in lockstep. Admin was intentionally
+not modified in this session. Validation used the user-approved installed Maven
+executable because `mvn-proxy` was unavailable in this Windows environment:
+532 non-Docker tests passed, with JaCoCo at 97.45% line / 95.02% branch.
+
 ### 2026-07-15 — v0.1.25.24: distributed reliability and evidence integrity
 
 Closed the 9.5-readiness review findings: continuous age-gated recovery,
@@ -547,20 +576,25 @@ architectural rather than a correctness blocker for this release:
   record. This worker forwards those values but cannot add at-rest encryption
   without a coordinated producer/wire-format change.
 
-The events-side absent-config SSRF baseline deliberately blocks more special-use
-ranges than the current admin fallback (`0.0.0.0/8`, CGNAT, IPv6 link-local, and
-unspecified IPv6). Until the admin repository aligns those defaults, a URL
-accepted there without a stored shared config can fail closed here at delivery.
-Weakening the last-mile check would re-open SSRF; admin alignment is the required
-cross-repository follow-up and is outside this event-server-only PR.
+The events-side SSRF baseline is now invariant even when the shared admin config
+stores `blocked_cidr_ranges: []`. It deliberately blocks CGNAT and IPv6
+link-local in addition to the protocol's current default list, while unspecified
+addresses are rejected semantically. This is stricter delivery-side policy, not
+a wire-schema change; weakening it through admin config would re-open SSRF.
+
+Required cross-repository follow-up: `cycles-server-admin` has a duplicated
+`CryptoService`. It must receive the same fail-closed missing-key default and
+explicit plaintext opt-out so the producer and dispatcher do not drift. Until
+then, events can read admin-written legacy plaintext for migration, but an admin
+deployment without its encryption key can still write new plaintext secrets.
 
 ## Test Coverage
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 550 in the 2026-07-15 clean verification |
-| Integration tests | 27 across webhook delivery, evidence signing/store, and Redis atomicity |
-| JaCoCo result | 97.82% line / 95.27% branch |
+| Total tests | 532 non-Docker tests in the 2026-07-18 clean verification |
+| Integration tests | Excluded because Docker was unavailable; the CI integration profile remains unchanged |
+| JaCoCo result | 97.45% line / 95.02% branch |
 | JaCoCo minimum | 95% line / 95% branch (both enforced) |
 
 ## Source Inventory
@@ -583,9 +617,12 @@ here, avoiding stale hand-maintained counts.
 | 32-byte key length enforced (CryptoService) | PASS |
 | Random IV per encryption (12 bytes) | PASS |
 | Backward-compatible plaintext fallback | PASS |
+| Missing webhook encryption key fails startup unless plaintext is explicitly allowed | PASS |
+| Plaintext opt-out emits a prominent unencrypted-storage warning | PASS |
 | Encrypted webhook secrets fail closed without the decrypt key | PASS |
 | Missing signing-secret write races remain recoverable and never send unsigned | PASS |
-| Delivery SSRF fallback covers unspecified, CGNAT, link-local, private, loopback, and unique-local ranges | PASS |
+| Always-on delivery SSRF baseline covers CGNAT, link-local, private, loopback, metadata, and unique-local ranges | PASS |
+| Admin webhook CIDRs are additive; only the explicit local/dev flag disables the baseline | PASS |
 | Malformed webhook security configuration fails closed with an alertable metric | PASS |
 | No TODO/FIXME/HACK in source | PASS |
 | Actuators isolated to separate management port (0.1.25.9) | PASS |
@@ -602,7 +639,9 @@ here, avoiding stale hand-maintained counts.
 | redis.tls.enabled | false | REDIS_TLS_ENABLED | OK |
 | redis.connect-timeout-ms / socket-timeout-ms | 2000 / 5000 | REDIS_CONNECT_TIMEOUT_MS / REDIS_SOCKET_TIMEOUT_MS | OK |
 | redis.blocking-socket-timeout-ms | 10000 | REDIS_BLOCKING_SOCKET_TIMEOUT_MS | OK |
-| webhook.secret.encryption-key | (empty) | WEBHOOK_SECRET_ENCRYPTION_KEY | OK |
+| webhook.secret.encryption-key | required by default | WEBHOOK_SECRET_ENCRYPTION_KEY | OK; missing key fails startup |
+| webhook.secret.allow-plaintext | false | WEBHOOK_SECRET_ALLOW_PLAINTEXT | OK; explicit local/dev opt-out with WARN |
+| webhook.url-guard.allow-private-networks | false | WEBHOOK_URL_GUARD_ALLOW_PRIVATE_NETWORKS | OK; explicit local/dev baseline opt-out with WARN |
 | dispatch.pending.timeout-seconds | 5 | - | OK |
 | dispatch.loop.delay-ms | 25 | DISPATCH_LOOP_DELAY_MS | OK |
 | dispatch.ordering.lease-ms | 120000 | DISPATCH_ORDERING_LEASE_MS | OK |
@@ -749,11 +788,11 @@ Captured explicitly so a future reviewer doesn't re-litigate the gap analysis:
 
 ## Last Audited
 
-- **Date:** 2026-07-15
+- **Date:** 2026-07-18
 - **Version:** 0.1.25.24
-- **Build:** PASS (`mvn -B clean verify -Pintegration-tests`)
-- **Coverage:** 97.89% line / 95.72% branch; 95% / 95% gates enforced
-- **Total:** 540 tests (515 unit + 25 Docker-backed integration), zero failures
+- **Build:** PASS (`mvn.cmd -B clean verify`; `*IntegrationTest` excluded because Docker was unavailable)
+- **Coverage:** 97.45% line / 95.02% branch; 95% / 95% gates enforced
+- **Total:** 532 non-Docker tests, zero failures
 
 ## Cross-Repo Spec Drift Notes (informational)
 
