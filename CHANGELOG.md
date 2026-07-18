@@ -22,11 +22,15 @@ breaking.
 
 ## [Unreleased]
 
+## [0.1.25.25] — 2026-07-18
+
 ### Security
 
 - Webhook delivery now enforces an always-on SSRF baseline for loopback,
   RFC 1918, link-local, cloud metadata, CGNAT, and IPv6 unique-local addresses.
   Admin-configured CIDRs are additive instead of replacing that baseline.
+- The baseline explicitly includes the IPv4 "this network" block
+  (`0.0.0.0/8`), including when admin stores an empty CIDR list.
 - Missing `WEBHOOK_SECRET_ENCRYPTION_KEY` now fails startup. Plaintext secret
   storage requires the explicit development-only
   `WEBHOOK_SECRET_ALLOW_PLAINTEXT=true` opt-out and emits a prominent warning.

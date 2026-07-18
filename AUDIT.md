@@ -2,13 +2,14 @@
 
 ## Implementation History
 
-### 2026-07-18 — Unreleased: fail-closed webhook security defaults
+### 2026-07-18 — v0.1.25.25: fail-closed webhook security defaults
 
 SECURITY. Direct code review confirmed two deployment defaults could be weakened
 implicitly. `WebhookUrlGuard` now enforces an always-on delivery baseline for
-loopback, RFC 1918, IPv4/IPv6 link-local, the `169.254.169.254` metadata target,
-CGNAT, and IPv6 unique-local addresses. Stored `blocked_cidr_ranges` are
-additive, every resolved address is checked, and only the explicit
+the IPv4 `0.0.0.0/8` "this network" block, loopback, RFC 1918, IPv4/IPv6
+link-local, the `169.254.169.254` metadata target, CGNAT, and IPv6 unique-local
+addresses. Stored `blocked_cidr_ranges` are additive, every resolved address is
+checked, and only the explicit
 `WEBHOOK_URL_GUARD_ALLOW_PRIVATE_NETWORKS=true` local/development flag disables
 the baseline. The semantic unspecified-address rejection remains unconditional.
 The guard javadoc records the residual DNS-rebinding TOCTOU between its lookup
@@ -27,9 +28,9 @@ compatible with `cycles-governance-admin-v0.1.25.yaml`. Required cross-repo
 follow-up: `cycles-server-admin` contains a duplicated `CryptoService` and must
 adopt the same missing-key failure, explicit plaintext opt-out, warning, and
 migration behavior so both services remain in lockstep. Admin was intentionally
-not modified in this session. Validation used the user-approved installed Maven
-executable because `mvn-proxy` was unavailable in this Windows environment:
-532 non-Docker tests passed, with JaCoCo at 97.45% line / 95.02% branch.
+not modified in this release. Validation used
+`mvn.cmd -B clean verify -Pintegration-tests`: 559 tests passed, including 27
+Docker-backed integration tests, with JaCoCo at 97.98% line / 95.57% branch.
 
 ### 2026-07-15 — v0.1.25.24: distributed reliability and evidence integrity
 
@@ -536,7 +537,7 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 | Field | Value |
 |-------|-------|
 | Service | cycles-server-events |
-| Version | 0.1.25.24 |
+| Version | 0.1.25.25 |
 | Java | 21 |
 | Spring Boot | 3.5.16 |
 | Spec Authority | [cycles-governance-admin-v0.1.25.yaml](https://github.com/runcycles/cycles-protocol/blob/main/cycles-governance-admin-v0.1.25.yaml) and [cycles-evidence-v0.2.yaml](https://github.com/runcycles/cycles-protocol/blob/main/cycles-evidence-v0.2.yaml) |
@@ -592,9 +593,9 @@ deployment without its encryption key can still write new plaintext secrets.
 
 | Metric | Value |
 |--------|-------|
-| Total tests | 532 non-Docker tests in the 2026-07-18 clean verification |
-| Integration tests | Excluded because Docker was unavailable; the CI integration profile remains unchanged |
-| JaCoCo result | 97.45% line / 95.02% branch |
+| Total tests | 559 tests in the 2026-07-18 clean verification |
+| Integration tests | 27 Docker-backed tests across webhook delivery, evidence processing, and Redis atomicity |
+| JaCoCo result | 97.98% line / 95.57% branch |
 | JaCoCo minimum | 95% line / 95% branch (both enforced) |
 
 ## Source Inventory
@@ -789,10 +790,10 @@ Captured explicitly so a future reviewer doesn't re-litigate the gap analysis:
 ## Last Audited
 
 - **Date:** 2026-07-18
-- **Version:** 0.1.25.24
-- **Build:** PASS (`mvn.cmd -B clean verify`; `*IntegrationTest` excluded because Docker was unavailable)
-- **Coverage:** 97.45% line / 95.02% branch; 95% / 95% gates enforced
-- **Total:** 532 non-Docker tests, zero failures
+- **Version:** 0.1.25.25
+- **Build:** PASS (`mvn.cmd -B clean verify -Pintegration-tests`)
+- **Coverage:** 97.98% line / 95.57% branch; 95% / 95% gates enforced
+- **Total:** 559 tests (532 unit + 27 Docker-backed integration), zero failures
 
 ## Cross-Repo Spec Drift Notes (informational)
 
