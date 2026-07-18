@@ -78,6 +78,7 @@ class WebhookDeliveryIntegrationTest {
         registry.add("redis.password", () -> "");
         registry.add("webhook.secret.encryption-key", () -> "");
         registry.add("webhook.secret.allow-plaintext", () -> "true");
+        registry.add("webhook.url-guard.allow-private-networks", () -> "true");
         registry.add("dispatch.pending.timeout-seconds", () -> "1");
         registry.add("dispatch.retry.poll-interval-ms", () -> "1000");
         registry.add("dispatch.max-delivery-age-ms", () -> "86400000");
@@ -413,6 +414,12 @@ class WebhookDeliveryIntegrationTest {
             String deliveryJson = jedis.get("delivery:" + deliveryId);
             assertThat(deliveryJson).contains("\"status\":\"FAILED\"");
             assertThat(deliveryJson).contains("blocked by webhook security policy");
+            io.micrometer.core.instrument.Counter ssrfBlocked = meterRegistry
+                    .find(CyclesMetrics.DELIVERY_FAILED)
+                    .tags("event_type", "tenant.created", "reason", "ssrf_blocked")
+                    .counter();
+            assertThat(ssrfBlocked).isNotNull();
+            assertThat(ssrfBlocked.count()).isGreaterThan(0.0);
         }
     }
 
