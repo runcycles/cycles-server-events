@@ -2,6 +2,21 @@
 
 ## Implementation History
 
+### 2026-07-21 — dependency maintenance: json-schema-validator 2.0.4
+
+Dependabot proposed `com.networknt:json-schema-validator` 2.0.0 → 3.0.6
+(runcycles/cycles-server-events#118). The 3.x line migrates to Jackson 3
+(`tools.jackson.*`); `CyclesEvidenceSchemaValidator` hands it
+`com.fasterxml.jackson` (Jackson 2) nodes from the Spring Boot 3.5 pipeline, so
+3.x cannot compile here without carrying a second Jackson generation through a
+security-critical validation path. The major was declined via
+`@dependabot ignore this major version`; revisit when the service moves to a
+Jackson 3 framework baseline.
+
+Adopted 2.0.4 instead — the latest patch on the Jackson 2-compatible 2.x line.
+No API changes for this codebase (the 2.0.0 `SchemaRegistry`/`Schema` surface
+is unchanged); 532/532 unit tests pass. Redis integration tests run in CI.
+
 ### 2026-07-18 — v0.1.25.25: fail-closed webhook security defaults
 
 SECURITY. Direct code review confirmed two deployment defaults could be weakened
