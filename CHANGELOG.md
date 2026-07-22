@@ -22,6 +22,14 @@ breaking.
 
 ## [Unreleased]
 
+### Changed
+
+- Bumped `com.networknt:json-schema-validator` from 2.0.0 to 2.0.4 — the latest
+  patch release on the Jackson 2-compatible 2.x line. The proposed 3.0.6 major
+  was declined: the 3.x line targets Jackson 3 (`tools.jackson.*`), which this
+  Spring Boot 3.5 service does not yet ship. Evidence schema validation
+  behavior is unchanged.
+
 ## [0.1.25.25] — 2026-07-18
 
 ### Security
