@@ -2,6 +2,23 @@
 
 ## Implementation History
 
+### 2026-07-22 — CI maintenance: remove the claude-review workflow
+
+The 1.0.180 pin bump below did not resolve the `claude-review` failures: a
+fresh run on #121 failed identically. The execution stream shows Claude Code
+and the review plugin install and initialize normally, then the first API turn
+returns `is_error: true` in ~2s with no assistant output and
+`total_cost_usd: 0` — an auth-layer rejection, consistent with an expired
+`CLAUDE_CODE_OAUTH_TOKEN` repository secret (last successful run 2026-07-18;
+the same-day action bump in #117 was coincidental). Neither action pin version
+is at fault.
+
+`claude-code-review.yml` is removed so every PR does not carry a permanent
+failing check. `claude.yml` (explicit `@claude` mentions) remains; it uses the
+same secret and will also fail until the token is rotated
+(`claude setup-token`, then update the repo secret). Restore the review
+workflow from this commit's parent once the token is refreshed.
+
 ### 2026-07-22 — CI maintenance: claude-code-action 1.0.180
 
 The `claude-review` job failed on every non-dependabot PR since the 1.0.177
