@@ -2,6 +2,16 @@
 
 ## Implementation History
 
+### 2026-07-22 — CI maintenance: claude-code-action 1.0.180
+
+The `claude-review` job failed on every non-dependabot PR since the 1.0.177
+action bump (#117), reporting an internal `result is_error:true` before any
+review output (first observed on #121; reproduced twice, identical). Required
+checks were unaffected. Upstream shipped three releases since; both workflow
+pins advance to the v1.0.180 tag commit (`fa7e2f0`), verified against the
+upstream annotated tag. If the failure persists, the fallback is reverting to
+the pre-#117 pin.
+
 ### 2026-07-21 — dependency maintenance: json-schema-validator 2.0.4
 
 Dependabot proposed `com.networknt:json-schema-validator` 2.0.0 → 3.0.6
