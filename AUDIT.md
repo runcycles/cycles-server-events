@@ -4,14 +4,14 @@
 
 ### 2026-07-26 — build and workflow dependency maintenance
 
-Dependabot PRs #124 and #126–#129 update OSSF Scorecard to 2.4.4, the Maven
-flatten plugin to 1.8.0, the CodeQL SARIF uploader to 4.37.3, Docker login to
-4.5.1, and the explicit-mention Claude action to 1.0.183. The workflow actions
-remain SHA-pinned; the Maven change affects artifact flattening only. Server
-code, the event/webhook wire contract, Redis data, and the release version are
-unchanged. Unit, integration, 95% line/branch coverage, container/security,
-and workflow checks passed on the reviewed heads. The previously documented
-Claude OAuth-secret issue is not claimed fixed by the action patch.
+Dependabot PRs #124–#129 update OSSF Scorecard to 2.4.4, checkout to 7.0.1,
+the Maven flatten plugin to 1.8.0, the CodeQL SARIF uploader to 4.37.3, Docker
+login to 4.5.1, and the explicit-mention Claude action to 1.0.183. The workflow
+actions remain SHA-pinned; the Maven change affects artifact flattening only.
+Server code, the event/webhook wire contract, Redis data, and the release
+version are unchanged. Unit, real-Redis integration, 95% line/branch coverage,
+container/security, and workflow checks passed on all six heads. The previously
+documented Claude OAuth-secret issue is not claimed fixed by the action patch.
 
 ### 2026-07-22 — CI maintenance: remove the claude-review workflow
 
