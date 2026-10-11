@@ -26,7 +26,7 @@
              managed Tomcat version is at least 10.1.60. -->
         <tomcat.version>10.1.60</tomcat.version>
         <jedis.version>8.0.1</jedis.version>
-        <json-schema-validator.version>2.0.7</json-schema-validator.version>
+        <json-schema-validator.version>2.0.8</json-schema-validator.version>
         <testcontainers.version>1.20.4</testcontainers.version>
     </properties>
 
