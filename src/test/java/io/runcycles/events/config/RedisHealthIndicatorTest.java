@@ -2,7 +2,7 @@ package io.runcycles.events.config;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.actuate.health.Status;
+import org.springframework.boot.health.contributor.Status;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisPool;
 
