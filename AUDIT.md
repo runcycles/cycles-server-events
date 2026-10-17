@@ -1,5 +1,43 @@
 # Cycles Protocol v0.1.25 — Events Server Implementation Audit
 
+## 2026-10-17 — PR #160 container security remediation
+
+Upgrades to Spring Boot 4.0.8 / Spring Framework 7.0.9, with Tomcat 11.0.27
+and Jackson BOMs 2.21.7 / 3.1.7. This follows the server's PR #284 remediation
+for Spring MVC CVE-2026-47884 / CVE-2026-47890 and the reported Jackson
+findings. Spring's fixed 6.2.20 release is enterprise-only; Spring 7.0.9 is
+the supported OSS fix. The Tomcat override includes the security fixes
+missing from Boot's managed 11.0.24, including CVE-2026-65182,
+CVE-2026-65905 and CVE-2026-68525.
+
+Retains the existing Jackson 2 ObjectMapper for Redis, webhook payloads,
+canonical evidence, and schema validation through Boot's compatibility
+module, with explicit HTTP mapper selection. That module is deprecated
+upstream; migration to Jackson 3 must separately verify wire/persisted
+formats and canonical signing bytes. Relocates the Boot health APIs and
+adopts Boot-managed Testcontainers 2.0.5, replacing the 1.20.4 pin that
+could not connect to the local Docker 29 daemon. Its JUnit module uses the
+new `testcontainers-junit-jupiter` artifact name.
+
+The branch includes current main, including Jedis 8.0.2 and JSON Schema
+validator 2.0.8. Authoritative YAML, dispatch logic, webhook signatures,
+evidence recipes, Redis schema, and Lua scripts are unchanged. The existing
+95% line/branch coverage and HIGH/CRITICAL scanner gates remain enabled,
+with no vulnerability suppressions or exclusions added.
+
+Validation: `mvn clean verify -Pintegration-tests` passed all 559 tests with
+no failures, errors or skips. JaCoCo measured 97.98% line / 95.57% branch
+coverage, passing both existing 95% gates. The fresh no-cache container
+build passed Trivy 0.70.0 with zero fixable HIGH/CRITICAL findings. Packaged
+container smoke checks passed readiness, liveness and Prometheus on the
+separate management port, using Redis and a configured encryption key.
+
+References: [Spring XsltView advisory](https://spring.io/security/cve-2026-47884/),
+[Spring SSE advisory](https://spring.io/security/cve-2026-47890/),
+[Boot 4 migration guide](https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide),
+[Tomcat security advisories](https://tomcat.apache.org/security-11.html),
+[Testcontainers 2 migration](https://github.com/testcontainers/testcontainers-java/releases/tag/2.0.0).
+
 ## 2026-09-24 — Dependency and container security maintenance
 
 Consolidates Dependabot PRs #152, #151, #150. Docker Buildx,
@@ -590,7 +628,7 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 
 **Specs:** `cycles-governance-admin-v0.1.25.yaml` (OpenAPI 3.1.0) is the event/webhook authority; `cycles-evidence-v0.2.yaml` is the evidence envelope, nested mirror, and signer-authority reference. Both are authoritative in `cycles-protocol`. The evidence schema is bundled for deterministic runtime validation while its compatible wire discriminator remains `cycles-evidence/v0.1`.
 
-**Service:** Spring Boot 3.5.16 / Java 21 / Jedis 7.5.2 / Micrometer Prometheus registry. Redis-driven webhook dispatcher and evidence signer (no application API surface of its own). Spring Boot 3.5.16 manages tomcat-embed-core 10.1.55 directly.
+**Service:** Spring Boot 4.0.8 / Java 21 / Jedis 8.0.2 / Micrometer Prometheus registry. Redis-driven webhook dispatcher and evidence signer (no application API surface of its own). Spring Framework 7.0.9, Tomcat 11.0.27, Jackson 2.21.7 / 3.1.7.
 
 **Downstream docs:**
 - [`CHANGELOG.md`](CHANGELOG.md) — release notes for consumers (Keep-a-Changelog format)
@@ -606,7 +644,7 @@ Initial Redis-driven dispatcher implementation: dispatch loop, delivery handler,
 | Service | cycles-server-events |
 | Version | 0.1.25.25 |
 | Java | 21 |
-| Spring Boot | 3.5.16 |
+| Spring Boot | 4.0.8 |
 | Spec Authority | [cycles-governance-admin-v0.1.25.yaml](https://github.com/runcycles/cycles-protocol/blob/main/cycles-governance-admin-v0.1.25.yaml) and [cycles-evidence-v0.2.yaml](https://github.com/runcycles/cycles-protocol/blob/main/cycles-evidence-v0.2.yaml) |
 
 ## Current Assessment
@@ -750,16 +788,17 @@ here, avoiding stale hand-maintained counts.
 
 | Dependency | Version | Purpose |
 |------------|---------|---------|
-| spring-boot-starter-web | 3.5.16 | Embedded worker/management web server |
-| spring-boot-starter-actuator | 3.5.16 | Health + metrics |
-| jedis | 7.5.2 | Redis client |
+| spring-boot-starter-webmvc | 4.0.8 | Embedded worker/management web server |
+| spring-boot-starter-actuator | 4.0.8 | Health + metrics |
+| spring-boot-jackson2 | 4.0.8 | Existing Jackson 2 serialization compatibility |
+| jedis | 8.0.2 | Redis client |
 | jackson-datatype-jsr310 | (parent) | Java time serialization |
 | jackson-dataformat-yaml | (parent) | Bundled OpenAPI schema parsing |
-| json-schema-validator | 2.0.0 | JSON Schema 2020-12 evidence conformance |
+| json-schema-validator | 2.0.8 | JSON Schema 2020-12 evidence conformance |
 | java-json-canonicalization | 1.1 | RFC 8785 canonical evidence bytes |
 | lombok | (parent) | Compile-time only |
-| spring-boot-starter-test | 3.5.16 | Test framework |
-| testcontainers | 1.20.4 | Integration test Redis |
+| spring-boot-starter-test | 4.0.8 | Test framework |
+| testcontainers | 2.0.5 | Integration test Redis |
 | micrometer-registry-prometheus | (parent) | Prometheus metrics endpoint |
 | jacoco | 0.8.15 | Coverage enforcement |
 
