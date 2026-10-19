@@ -1,5 +1,16 @@
 # Cycles Protocol v0.1.25 — Events Server Implementation Audit
 
+## 2026-10-19 — Dependabot dependency review
+
+Consolidates the following reviewed updates on current main:
+
+- PR #163: fix(deps): bump actions/setup-java from 6.0.1 to 6.1.0
+- PR #164: fix(deps): bump ossf/scorecard-action from 2.4.4 to 2.5.0
+- PR #165: fix(deps): bump github/codeql-action/upload-sarif from 4.38.3 to 4.39.0
+
+Workflow actions remain pinned to verified upstream commit SHAs. Existing supported runtime versions, application code, and YAML protocol contracts are preserved. Existing lint, build, test, coverage, conformance, and applicable security checks must pass on the combined commit before merge; coverage requirements are not lowered.
+
+
 ## 2026-10-17 — PR #160 container security remediation
 
 Upgrades to Spring Boot 4.0.8 / Spring Framework 7.0.9, with Tomcat 11.0.27
