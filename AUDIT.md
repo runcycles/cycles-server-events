@@ -1,5 +1,15 @@
 # Cycles Protocol v0.1.25 — Events Server Implementation Audit
 
+## 2026-11-01 — Dependabot Docker login action review
+
+PR #168 updates docker/login-action from 4.6.0 to 4.7.0. The pinned commit
+81c6f93d4bc991e510b342a00b419b3bb4efc5c6 matches the upstream v4.7.0 tag.
+The release improves scoped registry credential handling; this workflow
+continues to authenticate to GHCR with its existing inputs and permissions.
+Current main is incorporated. Runtime code and YAML protocol contracts are
+unchanged by this update. Unit tests, real Redis integration, and the existing
+95% coverage gate must pass on the final commit before merge.
+
 ## 2026-10-19 — Dependabot dependency review
 
 Consolidates the following reviewed updates on current main:
