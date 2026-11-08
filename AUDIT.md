@@ -1,5 +1,11 @@
 # Cycles Protocol v0.1.25 — Events Server Implementation Audit
 
+## 2026-11-08 - Dependabot dependency review
+
+Consolidates PRs #173 (docker/login-action 4.8.0) and #171 (actions/setup-java 6.2.0). Both commit pins match upstream release tags. GHCR authentication inputs, permissions, Temurin Java 21 selection, and Redis integration coverage are preserved.
+
+Current main is incorporated. Application source and authoritative YAML contracts are unchanged. Existing build, lint, typecheck, test, coverage, conformance, and security checks where configured must pass on the final commit before merge. The minimum 95% line coverage gate is preserved.
+
 ## 2026-11-01 — Dependabot Docker login action review
 
 PR #168 updates docker/login-action from 4.6.0 to 4.7.0. The pinned commit
