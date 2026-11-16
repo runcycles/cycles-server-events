@@ -415,6 +415,8 @@ The webhook POST body is the full event JSON. Null fields are omitted.
 
 ## Build & Test
 
+Source builds require Java 21+ and Maven 3.9+. Integration tests also require Docker.
+
 ```bash
 # Run the fast unit suite (515 tests in the current suite)
 mvn test
