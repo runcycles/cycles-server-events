@@ -1,5 +1,9 @@
 # Cycles Protocol v0.1.25 — Events Server Implementation Audit
 
+## 2026-11-22 — Dependabot dependency review
+
+PR #178 updated `actions/setup-java` to upstream v6.3.0 (commit `d1374f8`) in the CI workflow. Both jobs continue to select Temurin JDK 21.
+
 ## 2026-11-16 — Flatten plugin maintenance (PR #176)
 
 Updates flatten-maven-plugin from 1.8.0 to 1.9.0 on current main, retaining
