@@ -65,7 +65,7 @@
             <artifactId>json-schema-validator</artifactId>
             <version>${json-schema-validator.version}</version>
         </dependency>
-        <!-- RFC 8785 JSON Canonicalization Scheme (JCS) â€” the cycles-evidence-v0.1
+        <!-- RFC 8785 JSON Canonicalization Scheme (JCS) — the cycles-evidence-v0.1
              content-hash + signing-input recipe. erdtman is the reference impl
              (same author as the JS/Python JCS), maximizing cross-language
              byte-equality with the Cycles reference fixtures. -->

@@ -2,7 +2,7 @@
 
 ## 2026-11-26 — Encrypted webhook headers
 
-Subscription reads decrypt the admin service’s AES-GCM header envelope before delivery. Existing plaintext rows remain readable. Delivery finalization updates the stored JSON tree and preserves the encrypted envelope. Deploy this reader to all workers before upgrading the admin writer.
+Subscription reads decrypt the admin service’s AES-GCM header envelope before delivery. Existing plaintext rows remain readable. Delivery finalization updates the stored JSON tree and preserves the encrypted envelope. Deploy this reader to all workers and runtime 0.1.25.61 to event producers. Drain and stop all older admin writers before enabling admin 0.1.25.56. Older writers can discard the envelope during unrelated edits.
 
 
 ## 2026-11-22 — Dependabot dependency review

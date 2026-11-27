@@ -23,7 +23,7 @@ breaking.
 ## [0.1.25.26] — 2026-11-26
 
 - Added support for encrypted custom webhook headers from admin 0.1.25.56.
-  Upgrade every delivery worker first and configure the shared webhook encryption key.
+  Upgrade every delivery worker and runtime event producer first, configure the shared webhook encryption key, and stop older admin writers before starting admin 0.1.25.56.
 
 ### Changed
 
