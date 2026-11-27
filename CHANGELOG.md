@@ -20,7 +20,10 @@ require a minor bump. Additive fields (new optional event-payload fields, new
 enum values, new optional subscription fields) are **not** considered
 breaking.
 
-## [Unreleased]
+## [0.1.25.26] — 2026-11-26
+
+- Added support for encrypted custom webhook headers from admin 0.1.25.56.
+  Upgrade every delivery worker and runtime event producer first, configure the shared webhook encryption key, and stop older admin writers before starting admin 0.1.25.56.
 
 ### Changed
 

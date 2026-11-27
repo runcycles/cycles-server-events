@@ -1,5 +1,10 @@
 # Cycles Protocol v0.1.25 — Events Server Implementation Audit
 
+## 2026-11-26 — Encrypted webhook headers
+
+Subscription reads decrypt the admin service’s AES-GCM header envelope before delivery. Existing plaintext rows remain readable. Delivery finalization updates the stored JSON tree and preserves the encrypted envelope. Deploy this reader to all workers and runtime 0.1.25.61 to event producers. Drain and stop all older admin writers before enabling admin 0.1.25.56. Older writers can discard the envelope during unrelated edits.
+
+
 ## 2026-11-22 — Dependabot dependency review
 
 PR #178 updated `actions/setup-java` to upstream v6.3.0 (commit `d1374f8`) in the CI workflow. Both jobs continue to select Temurin JDK 21.

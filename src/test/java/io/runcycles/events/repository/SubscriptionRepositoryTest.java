@@ -70,6 +70,17 @@ class SubscriptionRepositoryTest {
     }
 
     @Test
+    void decryptsAdminHeaderEnvelopeForDelivery() throws Exception {
+        CryptoService crypto = new CryptoService(java.util.Base64.getEncoder().encodeToString(new byte[32]), false);
+        repository = new SubscriptionRepository(jedisPool, objectMapper, crypto);
+        var row = objectMapper.createObjectNode();
+        row.put("encrypted_headers", crypto.encrypt("{\"Authorization\":\"test-token\"}"));
+        when(jedis.get("webhook:sub-1")).thenReturn(row.toString());
+
+        assertThat(repository.findById("sub-1").getHeaders()).containsEntry("Authorization", "test-token");
+    }
+
+    @Test
     void findById_notFound() {
         when(jedis.get("webhook:sub-missing")).thenReturn(null);
 

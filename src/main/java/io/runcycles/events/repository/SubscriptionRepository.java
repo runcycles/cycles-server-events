@@ -85,7 +85,12 @@ public class SubscriptionRepository {
         try (Jedis jedis = jedisPool.getResource()) {
             String data = jedis.get("webhook:" + subscriptionId);
             if (data == null) return null;
-            return objectMapper.readValue(data, Subscription.class);
+            ObjectNode row = (ObjectNode) objectMapper.readTree(data);
+            JsonNode encrypted = row.remove("encrypted_headers");
+            if (encrypted != null) {
+                row.set("headers", objectMapper.readTree(cryptoService.decrypt(encrypted.asText())));
+            }
+            return objectMapper.treeToValue(row, Subscription.class);
         } catch (Exception e) {
             LOG.error("Failed to read webhook subscription: subscription_id={}", safe(subscriptionId), e);
             throw new IllegalStateException("Failed to read webhook subscription", e);
